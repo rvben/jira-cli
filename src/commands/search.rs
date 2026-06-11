@@ -1,11 +1,11 @@
 use crate::api::{ApiError, JiraClient};
 use crate::output::OutputConfig;
 
-use super::issues::{fetch_all_issues, issue_to_json, render_issue_table};
+use super::issues::{fetch_all_issues, filter_fields, issue_to_json, render_issue_table};
 
 /// Run a raw JQL search and render the results.
 ///
-/// The JQL string is passed verbatim to the Jira search API — no clauses or
+/// The JQL string is passed verbatim to the Jira search API - no clauses or
 /// ORDER BY are appended. Use `issues list` for a filtered view with automatic
 /// ordering.
 pub async fn run(
@@ -15,17 +15,22 @@ pub async fn run(
     limit: usize,
     offset: usize,
     all: bool,
+    fields: Option<&[String]>,
 ) -> Result<(), ApiError> {
     if all {
         let issues = fetch_all_issues(client, jql).await?;
         let count = issues.len();
         if out.json {
+            let items: Vec<serde_json::Value> = issues
+                .iter()
+                .map(|i| filter_fields(issue_to_json(i, client), fields))
+                .collect();
             out.print_data(
                 &serde_json::to_string_pretty(&serde_json::json!({
+                    "items": items,
                     "total": count,
                     "startAt": 0,
                     "maxResults": count,
-                    "issues": issues.iter().map(|i| issue_to_json(i, client)).collect::<Vec<_>>(),
                 }))
                 .expect("failed to serialize JSON"),
             );
@@ -43,12 +48,17 @@ pub async fn run(
             Some(n) => serde_json::json!(n),
             None => serde_json::Value::Null,
         };
+        let items: Vec<serde_json::Value> = resp
+            .issues
+            .iter()
+            .map(|i| filter_fields(issue_to_json(i, client), fields))
+            .collect();
         out.print_data(
             &serde_json::to_string_pretty(&serde_json::json!({
+                "items": items,
                 "total": total_json,
                 "startAt": resp.start_at,
                 "maxResults": resp.max_results,
-                "issues": resp.issues.iter().map(|i| issue_to_json(i, client)).collect::<Vec<_>>(),
             }))
             .expect("failed to serialize JSON"),
         );
@@ -57,13 +67,13 @@ pub async fn run(
         if !resp.is_last {
             match resp.total {
                 Some(n) => out.print_message(&format!(
-                    "Showing {}-{} of {} issues — use --limit/--offset or --all to paginate",
+                    "Showing {}-{} of {} issues - use --limit/--offset or --all to paginate",
                     resp.start_at + 1,
                     resp.start_at + resp.issues.len(),
                     n
                 )),
                 None => out.print_message(&format!(
-                    "Showing {}-{} issues (more available) — use --limit/--offset or --all to paginate",
+                    "Showing {}-{} issues (more available) - use --limit/--offset or --all to paginate",
                     resp.start_at + 1,
                     resp.start_at + resp.issues.len()
                 )),

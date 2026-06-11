@@ -1261,7 +1261,7 @@ token = "supersecrettoken"
         let _token = EnvVarGuard::unset("JIRA_TOKEN");
         let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-        let out = crate::output::OutputConfig::new(true, true);
+        let out = crate::output::OutputConfig::new(true, false, true);
         // Must not error and must produce no error output
         show(&out, None, None, None).unwrap();
     }
@@ -1287,7 +1287,7 @@ token = "supersecrettoken"
         let _token = EnvVarGuard::unset("JIRA_TOKEN");
         let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-        let out = crate::output::OutputConfig::new(false, true);
+        let out = crate::output::OutputConfig::new(false, false, true);
         show(&out, None, None, None).unwrap();
     }
 
@@ -1295,7 +1295,7 @@ token = "supersecrettoken"
 
     #[tokio::test]
     async fn init_json_output_includes_example_and_paths() {
-        let out = crate::output::OutputConfig::new(true, true);
+        let out = crate::output::OutputConfig::new(true, false, true);
         // No env or config needed — init() never loads credentials in JSON mode
         init(&out, Some("jira.corp.com")).await;
     }

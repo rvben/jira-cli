@@ -28,8 +28,12 @@ pub struct OutputConfig {
 }
 
 impl OutputConfig {
-    pub fn new(json_flag: bool, quiet: bool) -> Self {
-        let json = json_flag || !std::io::stdout().is_terminal();
+    pub fn new(json_flag: bool, text_flag: bool, quiet: bool) -> Self {
+        let json = if text_flag {
+            false
+        } else {
+            json_flag || !std::io::stdout().is_terminal()
+        };
         Self { json, quiet }
     }
 
@@ -60,6 +64,25 @@ impl OutputConfig {
             println!("{human_message}");
         }
     }
+}
+
+/// Write a structured error envelope as the last line of stderr.
+///
+/// Consumers can parse this JSON to branch on `error.kind` without
+/// parsing free-form error text.
+pub fn print_error_envelope(kind: &str, message: &str) {
+    let envelope = serde_json::json!({
+        "error": {
+            "kind": kind,
+            "message": message
+        }
+    });
+    eprintln!(
+        "{}",
+        serde_json::to_string(&envelope).unwrap_or_else(|_| {
+            r#"{"error":{"kind":"unexpected_error","message":"serialization failed"}}"#.into()
+        })
+    );
 }
 
 /// Exit codes for agent-friendly error handling.

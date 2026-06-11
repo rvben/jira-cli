@@ -1536,6 +1536,7 @@ async fn issues_list_with_no_results_succeeds() {
         50,
         0,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -2428,6 +2429,7 @@ async fn issues_list_type_filter_adds_issuetype_to_jql() {
         50,
         0,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -2512,6 +2514,7 @@ async fn issues_list_all_fetches_multiple_pages() {
         50,
         0,
         true,
+        None,
     )
     .await
     .unwrap();
@@ -2549,7 +2552,7 @@ async fn search_all_fetches_multiple_pages() {
         .await;
 
     let out = json_out();
-    jira_cli::commands::search::run(&client, &out, "project = PROJ", 50, 0, true)
+    jira_cli::commands::search::run(&client, &out, "project = PROJ", 50, 0, true, None)
         .await
         .unwrap();
 }
@@ -2618,6 +2621,7 @@ async fn issues_mine_uses_current_user_assignee_filter() {
         jira_cli::commands::issues::ListFilters::default(),
         50,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -3647,7 +3651,7 @@ async fn search_run_json_shape() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::search::run(&client, &out, "project = PROJ", 50, 0, false)
+    jira_cli::commands::search::run(&client, &out, "project = PROJ", 50, 0, false, None)
         .await
         .unwrap();
 }
@@ -3675,7 +3679,7 @@ async fn search_run_shows_pagination_info_when_more_results() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::search::run(&client, &out, "project = PROJ", 2, 0, false)
+    jira_cli::commands::search::run(&client, &out, "project = PROJ", 2, 0, false, None)
         .await
         .unwrap();
 }

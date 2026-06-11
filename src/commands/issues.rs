@@ -29,23 +29,38 @@ pub async fn list(
     limit: usize,
     offset: usize,
     all: bool,
+    fields: Option<&[String]>,
 ) -> Result<(), ApiError> {
     let jql = build_list_jql(&filters);
     if all {
         let issues = fetch_all_issues(client, &jql).await?;
         let n = issues.len();
-        render_results(out, &issues, Some(n), 0, n, client, false);
+        render_results(
+            out,
+            &issues,
+            PageInfo {
+                total: Some(n),
+                start_at: 0,
+                max_results: n,
+                more: false,
+            },
+            client,
+            fields,
+        );
     } else {
         let resp = client.search(&jql, limit, offset).await?;
         let more = !resp.is_last;
         render_results(
             out,
             &resp.issues,
-            resp.total,
-            resp.start_at,
-            resp.max_results,
+            PageInfo {
+                total: resp.total,
+                start_at: resp.start_at,
+                max_results: resp.max_results,
+                more,
+            },
             client,
-            more,
+            fields,
         );
     }
     Ok(())
@@ -58,9 +73,10 @@ pub async fn mine(
     mut filters: ListFilters<'_>,
     limit: usize,
     all: bool,
+    fields: Option<&[String]>,
 ) -> Result<(), ApiError> {
     filters.assignee = Some("me");
-    list(client, out, filters, limit, 0, all).await
+    list(client, out, filters, limit, 0, all, fields).await
 }
 
 /// List comments on an issue.
@@ -143,49 +159,71 @@ pub async fn fetch_all_issues(client: &JiraClient, jql: &str) -> Result<Vec<Issu
     Ok(all)
 }
 
-fn render_results(
-    out: &OutputConfig,
-    issues: &[Issue],
+struct PageInfo {
     total: Option<usize>,
     start_at: usize,
     max_results: usize,
-    client: &JiraClient,
     more: bool,
+}
+
+fn render_results(
+    out: &OutputConfig,
+    issues: &[Issue],
+    page: PageInfo,
+    client: &JiraClient,
+    fields: Option<&[String]>,
 ) {
     if out.json {
-        let total_json: serde_json::Value = match total {
+        let total_json: serde_json::Value = match page.total {
             Some(n) => serde_json::json!(n),
             None => serde_json::Value::Null,
         };
+        let items: Vec<serde_json::Value> = issues
+            .iter()
+            .map(|i| filter_fields(issue_to_json(i, client), fields))
+            .collect();
         out.print_data(
             &serde_json::to_string_pretty(&serde_json::json!({
+                "items": items,
                 "total": total_json,
-                "startAt": start_at,
-                "maxResults": max_results,
-                "issues": issues.iter().map(|i| issue_to_json(i, client)).collect::<Vec<_>>(),
+                "startAt": page.start_at,
+                "maxResults": page.max_results,
             }))
             .expect("failed to serialize JSON"),
         );
     } else {
         render_issue_table(issues, out);
-        if more {
-            match total {
+        if page.more {
+            match page.total {
                 Some(n) => out.print_message(&format!(
-                    "Showing {}-{} of {} issues — use --limit/--offset or --all to paginate",
-                    start_at + 1,
-                    start_at + issues.len(),
+                    "Showing {}-{} of {} issues - use --limit/--offset or --all to paginate",
+                    page.start_at + 1,
+                    page.start_at + issues.len(),
                     n
                 )),
                 None => out.print_message(&format!(
-                    "Showing {}-{} issues (more available) — use --limit/--offset or --all to paginate",
-                    start_at + 1,
-                    start_at + issues.len()
+                    "Showing {}-{} issues (more available) - use --limit/--offset or --all to paginate",
+                    page.start_at + 1,
+                    page.start_at + issues.len()
                 )),
             }
         } else {
             out.print_message(&format!("{} issues", issues.len()));
         }
     }
+}
+
+/// Retain only the requested fields from a JSON object. When `fields` is `None`
+/// or empty, the original value is returned unchanged.
+pub fn filter_fields(mut value: serde_json::Value, fields: Option<&[String]>) -> serde_json::Value {
+    let Some(names) = fields else { return value };
+    if names.is_empty() {
+        return value;
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.retain(|k, _| names.iter().any(|f| f == k));
+    }
+    value
 }
 
 pub async fn show(

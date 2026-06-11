@@ -299,6 +299,7 @@ async fn e2e_issues_mine() {
         jira_cli::commands::issues::ListFilters::default(),
         10,
         false,
+        None,
     )
     .await
     .expect("issues mine failed");

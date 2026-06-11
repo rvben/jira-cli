@@ -8,6 +8,14 @@ use jira_cli::output::{OutputConfig, exit_code_for_error};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+/// Parse a comma-separated `--fields` argument into a list of field names.
+fn parse_fields_arg(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
 fn parse_field(s: &str) -> Result<(String, serde_json::Value), String> {
     let (key, raw) = s
         .split_once('=')
@@ -64,8 +72,12 @@ struct Cli {
     #[arg(long, env = "JIRA_PROFILE")]
     profile: Option<String>,
 
-    /// Output as JSON (auto-enabled when stdout is not a terminal)
-    #[arg(long, global = true)]
+    /// Output format: auto (default), text, or json
+    #[arg(long = "output", short = 'o', global = true, default_value = "auto")]
+    output: String,
+
+    /// Output as JSON (alias for --output=json)
+    #[arg(long, global = true, hide = true)]
     json: bool,
 
     /// Suppress non-data output (counts, confirmations)
@@ -102,6 +114,10 @@ enum Command {
         /// Fetch all pages (overrides --limit and --offset)
         #[arg(long)]
         all: bool,
+
+        /// Comma-separated list of fields to include in output (JSON mode only)
+        #[arg(long)]
+        fields: Option<String>,
     },
 
     /// Search for users by name or email
@@ -194,6 +210,10 @@ enum IssuesCommand {
         /// Fetch all pages (overrides --limit and --offset)
         #[arg(long)]
         all: bool,
+
+        /// Comma-separated list of fields to include in output (JSON mode only)
+        #[arg(long)]
+        fields: Option<String>,
     },
 
     /// List issues assigned to you
@@ -221,6 +241,10 @@ enum IssuesCommand {
         /// Fetch all pages (overrides --limit)
         #[arg(long)]
         all: bool,
+
+        /// Comma-separated list of fields to include in output (JSON mode only)
+        #[arg(long)]
+        fields: Option<String>,
     },
 
     /// List comments on an issue
@@ -428,6 +452,10 @@ enum IssuesCommand {
         /// Preview without making any changes
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip confirmation prompt (required when stdin is not a terminal)
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Assign all issues matching a JQL query to a user
@@ -443,6 +471,10 @@ enum IssuesCommand {
         /// Preview without making any changes
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip confirmation prompt (required when stdin is not a terminal)
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Catch bare issue keys: `jira issue PROJ-123` → `jira issues show PROJ-123`
@@ -525,14 +557,47 @@ enum FieldsCommand {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    let out = OutputConfig::new(cli.json, cli.quiet);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Clap handles usage errors (unrecognized subcommands, bad flags, etc.)
+            // before any Rust code runs. Print the clap message, then append the
+            // structured error envelope so consumers can branch on `kind` without
+            // parsing prose.
+            let msg = e.to_string();
+            e.print().unwrap_or_else(|_| eprintln!("{msg}"));
+            jira_cli::output::print_error_envelope("invalid_input", &msg);
+            std::process::exit(e.exit_code());
+        }
+    };
+    let text_mode = cli.output == "text";
+    let json_mode = cli.json || cli.output == "json";
+    let out = OutputConfig::new(json_mode, text_mode, cli.quiet);
 
     let result = run(cli, out).await;
 
     if let Err(ref e) = result {
+        let (kind, message) = error_kind_and_message(e.as_ref());
         eprintln!("Error: {e}");
+        jira_cli::output::print_error_envelope(kind, &message);
         std::process::exit(exit_code_for_error(e.as_ref()));
+    }
+}
+
+fn error_kind_and_message(err: &(dyn std::error::Error + 'static)) -> (&'static str, String) {
+    use jira_cli::api::ApiError;
+    if let Some(api_err) = err.downcast_ref::<ApiError>() {
+        let kind = match api_err {
+            ApiError::Auth(_) => "auth",
+            ApiError::NotFound(_) => "not_found",
+            ApiError::InvalidInput(_) => "invalid_input",
+            ApiError::RateLimit => "rate_limit",
+            ApiError::Api { .. } => "api_error",
+            ApiError::Http(_) | ApiError::Other(_) => "unexpected_error",
+        };
+        (kind, api_err.to_string())
+    } else {
+        ("unexpected_error", err.to_string())
     }
 }
 
@@ -622,6 +687,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 limit,
                 offset,
                 all,
+                fields,
             } => {
                 let parsed_components = vec_to_opt_refs(&components);
                 let parsed_labels = vec_to_opt_refs(&labels);
@@ -637,7 +703,17 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     fix_versions: parsed_fix_versions.as_deref(),
                     jql_extra: jql.as_deref(),
                 };
-                commands::issues::list(&client, &out, filters, limit, offset, all).await?
+                let field_filter = fields.as_deref().map(parse_fields_arg);
+                commands::issues::list(
+                    &client,
+                    &out,
+                    filters,
+                    limit,
+                    offset,
+                    all,
+                    field_filter.as_deref(),
+                )
+                .await?
             }
             IssuesCommand::Mine {
                 project,
@@ -646,6 +722,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 sprint,
                 limit,
                 all,
+                fields,
             } => {
                 let filters = commands::issues::ListFilters {
                     project: project.as_deref(),
@@ -654,7 +731,9 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     sprint: sprint.as_deref(),
                     ..Default::default()
                 };
-                commands::issues::mine(&client, &out, filters, limit, all).await?
+                let field_filter = fields.as_deref().map(parse_fields_arg);
+                commands::issues::mine(&client, &out, filters, limit, all, field_filter.as_deref())
+                    .await?
             }
             IssuesCommand::Comments { key } => {
                 commands::issues::comments(&client, &out, &key).await?
@@ -770,14 +849,36 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 )
                 .await?
             }
-            IssuesCommand::BulkTransition { jql, to, dry_run } => {
+            IssuesCommand::BulkTransition {
+                jql,
+                to,
+                dry_run,
+                yes,
+            } => {
+                use std::io::IsTerminal;
+                if !yes && !dry_run && !std::io::stdin().is_terminal() {
+                    return Err(jira_cli::api::ApiError::InvalidInput(
+                        "bulk-transition requires --yes when stdin is not a terminal".into(),
+                    )
+                    .into());
+                }
                 commands::issues::bulk_transition(&client, &out, &jql, &to, dry_run).await?
             }
             IssuesCommand::BulkAssign {
                 jql,
                 assignee,
                 dry_run,
-            } => commands::issues::bulk_assign(&client, &out, &jql, &assignee, dry_run).await?,
+                yes,
+            } => {
+                use std::io::IsTerminal;
+                if !yes && !dry_run && !std::io::stdin().is_terminal() {
+                    return Err(jira_cli::api::ApiError::InvalidInput(
+                        "bulk-assign requires --yes when stdin is not a terminal".into(),
+                    )
+                    .into());
+                }
+                commands::issues::bulk_assign(&client, &out, &jql, &assignee, dry_run).await?
+            }
             IssuesCommand::External(args) => {
                 let key = args
                     .first()
@@ -825,7 +926,20 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             limit,
             offset,
             all,
-        } => commands::search::run(&client, &out, &jql, limit, offset, all).await?,
+            fields,
+        } => {
+            let field_filter = fields.as_deref().map(parse_fields_arg);
+            commands::search::run(
+                &client,
+                &out,
+                &jql,
+                limit,
+                offset,
+                all,
+                field_filter.as_deref(),
+            )
+            .await?
+        }
 
         Command::Myself => commands::myself::show(&client, &out).await?,
 
@@ -854,8 +968,6 @@ fn schema_json() -> serde_json::Value {
     let config_path_description = jira_cli::config::schema_config_path_description();
     let permission_advice = jira_cli::config::schema_recommended_permissions_example();
 
-    // Annotations keyed by base command path (no <arg> suffixes).
-    // Only things clap cannot express: json_shape and alias_for.
     let init_shape = serde_json::json!({
         "configPath": "/path/to/config.toml",
         "pathResolution": config_path_description,
@@ -868,87 +980,381 @@ fn schema_json() -> serde_json::Value {
         }
     });
 
-    let annotations: HashMap<&str, serde_json::Value> = [
-        ("issues list", serde_json::json!({ "json_shape": {
-            "total": "N", "startAt": 0, "maxResults": 50,
-            "issues": "[{ key, id, url, summary, status, assignee: { displayName, accountId }, priority, type, created, updated }]"
-        }})),
-        ("issues show", serde_json::json!({ "json_shape": {
-            "key": "PROJ-1", "id": "10001", "url": "https://...",
-            "summary": "...", "status": "In Progress", "type": "Bug", "priority": "High",
-            "assignee": { "displayName": "Alice", "accountId": "abc123" },
-            "reporter": { "displayName": "Bob", "accountId": "xyz" },
-            "labels": ["backend"], "components": [{ "id": "10010", "name": "Backend", "description": "Server-side" }],
-            "fixVersions": [{ "id": "10010", "name": "1.2.0", "description": "...", "released": true, "archived": false, "releaseDate": "2024-03-01" }],
-            "affectedVersions": [{ "id": "10005", "name": "1.1.0", "description": "...", "released": true, "archived": false, "releaseDate": "2024-02-01" }],
-            "description": "...",
-            "created": "2024-01-01", "updated": "2024-01-02",
-            "comments": "[{ id, author: { displayName, accountId }, body, created, updated }]",
-            "issueLinks": "[{ id, sentence, type: { name, inward, outward }, outwardIssue, inwardIssue }]"
-        }})),
-        ("issues create", serde_json::json!({ "json_shape": {
-            "key": "PROJ-1", "id": "10001", "url": "https://...",
-            "sprintId": "(present when --sprint used)", "sprintName": "(present when --sprint used)"
-        }})),
-        ("issues update", serde_json::json!({ "json_shape": { "key": "PROJ-1", "updated": true } })),
-        ("issues move", serde_json::json!({ "json_shape": { "issue": "PROJ-1", "sprintId": 5, "sprintName": "Sprint 1" } })),
-        ("issues comment", serde_json::json!({ "json_shape": {
-            "id": "10042", "issue": "PROJ-1", "url": "https://...", "author": "Alice", "created": "2024-01-01"
-        }})),
-        ("issues transition", serde_json::json!({ "json_shape": {
-            "issue": "PROJ-1", "transition": "Start Progress", "status": "In Progress", "id": "21"
-        }})),
-        ("issues list-transitions", serde_json::json!({ "json_shape": [
-            { "id": "21", "name": "In Progress", "to": { "name": "In Progress", "statusCategory": { "key": "indeterminate", "name": "In Progress" } } }
-        ]})),
-        ("issues assign", serde_json::json!({ "json_shape": { "issue": "PROJ-1", "accountId": "abc123" } })),
-        ("issues link-types", serde_json::json!({ "json_shape": [
-            { "id": "1", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" }
-        ]})),
-        ("issues link", serde_json::json!({ "json_shape": { "from": "PROJ-1", "to": "PROJ-2", "type": "Relates" } })),
-        ("issues unlink", serde_json::json!({ "json_shape": { "linkId": "10001" } })),
-        ("users search", serde_json::json!({ "json_shape": { "total": "N", "users": "[{ accountId, displayName, email }]" } })),
-        ("boards list", serde_json::json!({ "json_shape": { "total": "N", "boards": "[{ id, name, type }]" } })),
-        ("sprints list", serde_json::json!({ "json_shape": {
-            "total": "N", "sprints": "[{ id, name, state, boardId, boardName, startDate, endDate, completeDate }]"
-        }})),
-        ("fields list", serde_json::json!({ "json_shape": { "total": "N", "fields": "[{ id, name, custom, type }]" } })),
-        ("projects list", serde_json::json!({ "json_shape": { "total": "N", "projects": "[{ key, name, id, type }]" } })),
-        ("projects show", serde_json::json!({ "json_shape": { "id": "10001", "key": "PROJ", "name": "My Project", "type": "software" } })),
-        ("projects components", serde_json::json!({ "json_shape": {
-            "project": "PROJ", "total": "N",
-            "components": "[{ id, name, description }]"
-        }})),
-        ("projects versions", serde_json::json!({ "json_shape": {
-            "project": "PROJ", "total": "N",
-            "versions": "[{ id, name, description, released, archived, releaseDate }]"
-        }})),
-        ("search", serde_json::json!({ "json_shape": { "total": "N", "startAt": 0, "maxResults": 50, "issues": "[...]" } })),
-        ("myself", serde_json::json!({ "json_shape": { "accountId": "abc123", "displayName": "Alice" } })),
-        ("config show", serde_json::json!({ "json_shape": {
-            "configPath": "/path/to/config.toml", "host": "example.atlassian.net",
-            "email": "me@example.com", "tokenMasked": "***abcd"
-        }})),
-        ("config init", serde_json::json!({ "json_shape": init_shape })),
-        ("init", serde_json::json!({ "alias_for": "config init", "json_shape": init_shape })),
-        ("issue", serde_json::json!({ "alias_for": "issues show" })),
+    // Mutating flag per command path.
+    let mutating: HashMap<&str, bool> = [
+        ("issues list", false),
+        ("issues mine", false),
+        ("issues comments", false),
+        ("issues show", false),
+        ("issues create", true),
+        ("issues update", true),
+        ("issues move", true),
+        ("issues comment", true),
+        ("issues transition", true),
+        ("issues list-transitions", false),
+        ("issues assign", true),
+        ("issues link-types", false),
+        ("issues link", true),
+        ("issues unlink", true),
+        ("issues log-work", true),
+        ("issues bulk-transition", true),
+        ("issues bulk-assign", true),
+        ("projects list", false),
+        ("projects show", false),
+        ("projects components", false),
+        ("projects versions", false),
+        ("search", false),
+        ("users search", false),
+        ("boards list", false),
+        ("sprints list", false),
+        ("myself", false),
+        ("fields list", false),
+        ("config show", false),
+        ("config init", true),
+        ("config remove", true),
+        ("init", true),
+        ("schema", false),
+        ("completions", false),
     ]
     .into_iter()
     .collect();
 
-    // Arg IDs of global flags — excluded from per-command flag lists.
-    let global_ids: HashSet<&str> = ["json", "quiet", "host", "email", "profile"]
+    // Output fields per command path.
+    let output_fields: HashMap<&str, serde_json::Value> = [
+        (
+            "issues list",
+            serde_json::json!([
+                {"name": "key", "type": "string", "description": "Issue key (e.g. PROJ-123)"},
+                {"name": "id", "type": "string", "description": "Internal Jira ID"},
+                {"name": "summary", "type": "string"},
+                {"name": "status", "type": "string"},
+                {"name": "assignee", "type": "string"},
+                {"name": "priority", "type": "string"},
+                {"name": "type", "type": "string"},
+                {"name": "created", "type": "string"},
+                {"name": "updated", "type": "string"}
+            ]),
+        ),
+        (
+            "issues mine",
+            serde_json::json!([
+                {"name": "key", "type": "string"},
+                {"name": "id", "type": "string"},
+                {"name": "summary", "type": "string"},
+                {"name": "status", "type": "string"},
+                {"name": "priority", "type": "string"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "issues show",
+            serde_json::json!([
+                {"name": "key", "type": "string"},
+                {"name": "id", "type": "string"},
+                {"name": "summary", "type": "string"},
+                {"name": "status", "type": "string"},
+                {"name": "type", "type": "string"},
+                {"name": "priority", "type": "string"},
+                {"name": "description", "type": "string"},
+                {"name": "assignee", "type": "string"},
+                {"name": "reporter", "type": "string"},
+                {"name": "labels", "type": "string[]"},
+                {"name": "components", "type": "string[]"},
+                {"name": "created", "type": "string"},
+                {"name": "updated", "type": "string"}
+            ]),
+        ),
+        (
+            "issues comments",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "author", "type": "string"},
+                {"name": "body", "type": "string"},
+                {"name": "created", "type": "string"},
+                {"name": "updated", "type": "string"}
+            ]),
+        ),
+        (
+            "issues create",
+            serde_json::json!([
+                {"name": "key", "type": "string"},
+                {"name": "id", "type": "string"},
+                {"name": "url", "type": "string"}
+            ]),
+        ),
+        (
+            "issues update",
+            serde_json::json!([
+                {"name": "key", "type": "string"},
+                {"name": "updated", "type": "boolean"}
+            ]),
+        ),
+        (
+            "issues move",
+            serde_json::json!([
+                {"name": "issue", "type": "string"},
+                {"name": "sprintId", "type": "integer"},
+                {"name": "sprintName", "type": "string"}
+            ]),
+        ),
+        (
+            "issues comment",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "issue", "type": "string"},
+                {"name": "url", "type": "string"},
+                {"name": "author", "type": "string"},
+                {"name": "created", "type": "string"}
+            ]),
+        ),
+        (
+            "issues transition",
+            serde_json::json!([
+                {"name": "issue", "type": "string"},
+                {"name": "transition", "type": "string"},
+                {"name": "status", "type": "string"},
+                {"name": "id", "type": "string"}
+            ]),
+        ),
+        (
+            "issues list-transitions",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "to", "type": "string"}
+            ]),
+        ),
+        (
+            "issues assign",
+            serde_json::json!([
+                {"name": "issue", "type": "string"},
+                {"name": "accountId", "type": "string"}
+            ]),
+        ),
+        (
+            "issues link-types",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "inward", "type": "string"},
+                {"name": "outward", "type": "string"}
+            ]),
+        ),
+        (
+            "issues link",
+            serde_json::json!([
+                {"name": "from", "type": "string"},
+                {"name": "to", "type": "string"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "issues unlink",
+            serde_json::json!([
+                {"name": "linkId", "type": "string"}
+            ]),
+        ),
+        (
+            "issues log-work",
+            serde_json::json!([
+                {"name": "issue", "type": "string"},
+                {"name": "timeSpent", "type": "string"}
+            ]),
+        ),
+        (
+            "issues bulk-transition",
+            serde_json::json!([
+                {"name": "transitioned", "type": "integer"},
+                {"name": "failed", "type": "integer"}
+            ]),
+        ),
+        (
+            "issues bulk-assign",
+            serde_json::json!([
+                {"name": "assigned", "type": "integer"},
+                {"name": "failed", "type": "integer"}
+            ]),
+        ),
+        (
+            "projects list",
+            serde_json::json!([
+                {"name": "key", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "id", "type": "string"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "projects show",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "key", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "projects components",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "description", "type": "string"}
+            ]),
+        ),
+        (
+            "projects versions",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "released", "type": "boolean"},
+                {"name": "releaseDate", "type": "string"}
+            ]),
+        ),
+        (
+            "search",
+            serde_json::json!([
+                {"name": "key", "type": "string"},
+                {"name": "id", "type": "string"},
+                {"name": "summary", "type": "string"},
+                {"name": "status", "type": "string"},
+                {"name": "assignee", "type": "string"},
+                {"name": "priority", "type": "string"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "users search",
+            serde_json::json!([
+                {"name": "accountId", "type": "string"},
+                {"name": "displayName", "type": "string"},
+                {"name": "email", "type": "string"}
+            ]),
+        ),
+        (
+            "boards list",
+            serde_json::json!([
+                {"name": "id", "type": "integer"},
+                {"name": "name", "type": "string"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "sprints list",
+            serde_json::json!([
+                {"name": "id", "type": "integer"},
+                {"name": "name", "type": "string"},
+                {"name": "state", "type": "string"},
+                {"name": "boardId", "type": "integer"},
+                {"name": "boardName", "type": "string"},
+                {"name": "startDate", "type": "string"},
+                {"name": "endDate", "type": "string"}
+            ]),
+        ),
+        (
+            "myself",
+            serde_json::json!([
+                {"name": "accountId", "type": "string"},
+                {"name": "displayName", "type": "string"},
+                {"name": "email", "type": "string"}
+            ]),
+        ),
+        (
+            "fields list",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "custom", "type": "boolean"},
+                {"name": "type", "type": "string"}
+            ]),
+        ),
+        (
+            "config show",
+            serde_json::json!([
+                {"name": "configPath", "type": "string"},
+                {"name": "host", "type": "string"},
+                {"name": "email", "type": "string"},
+                {"name": "tokenMasked", "type": "string"}
+            ]),
+        ),
+        (
+            "config init",
+            serde_json::json!([
+                {"name": "configPath", "type": "string"},
+                {"name": "configExists", "type": "boolean"}
+            ]),
+        ),
+        (
+            "config remove",
+            serde_json::json!([
+                {"name": "profile", "type": "string"},
+                {"name": "removed", "type": "boolean"}
+            ]),
+        ),
+        (
+            "init",
+            serde_json::json!([
+                {"name": "configPath", "type": "string"},
+                {"name": "configExists", "type": "boolean"}
+            ]),
+        ),
+        ("schema", serde_json::json!([])),
+        ("completions", serde_json::json!([])),
+    ]
+    .into_iter()
+    .collect();
+
+    // Annotations for extra info (json_shape and alias_for).
+    let annotations: HashMap<&str, serde_json::Value> = [
+        (
+            "config init",
+            serde_json::json!({ "json_shape": init_shape.clone() }),
+        ),
+        (
+            "init",
+            serde_json::json!({ "alias_for": "config init", "json_shape": init_shape }),
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    // Global arg IDs excluded from per-command arg lists.
+    let global_ids: HashSet<&str> = ["json", "output", "quiet", "host", "email", "profile"]
         .iter()
         .copied()
         .collect();
 
     let root = Cli::command();
-    let commands = walk_commands(&root, &[], &annotations, &global_ids);
+    let commands = walk_commands(
+        &root,
+        &[],
+        &annotations,
+        &global_ids,
+        &mutating,
+        &output_fields,
+    );
 
     serde_json::json!({
+        "clispec": "0.2",
         "name": "jira",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "CLI for Jira — optimized for humans and agents",
+        "description": "CLI for Jira - optimized for humans and agents",
+        "global_args": [
+            {"name": "--output", "type": "string", "required": false, "default": "auto", "description": "Output format: auto (default), text, or json", "enum": ["auto", "text", "json"]},
+            {"name": "--quiet", "type": "boolean", "required": false, "description": "Suppress non-data output"},
+            {"name": "--host", "type": "string", "required": false, "description": "Atlassian domain (overrides config/env)"},
+            {"name": "--email", "type": "string", "required": false, "description": "Account email (overrides config/env)"},
+            {"name": "--profile", "type": "string", "required": false, "description": "Config profile to use"},
+        ],
+        "errors": [
+            {"kind": "auth", "exit_code": 3, "retryable": false, "description": "Authentication failed - bad or missing credentials"},
+            {"kind": "not_found", "exit_code": 4, "retryable": false, "description": "Requested resource does not exist"},
+            {"kind": "invalid_input", "exit_code": 2, "retryable": false, "description": "Bad user input or config error"},
+            {"kind": "conflict", "exit_code": 7, "retryable": false, "description": "Resource already exists with a different configuration"},
+            {"kind": "confirmation_required", "exit_code": 2, "retryable": false, "description": "Destructive operation requires explicit confirmation (--yes)"},
+            {"kind": "rate_limit", "exit_code": 6, "retryable": true, "description": "Rate limited by Jira - wait and retry"},
+            {"kind": "api_error", "exit_code": 5, "retryable": false, "description": "Non-2xx response from the Jira API"},
+            {"kind": "unexpected_error", "exit_code": 1, "retryable": false, "description": "Unexpected or unclassified error"},
+        ],
         "auth": {
             "note": format!(
                 "Provide host and email via CLI flags, environment variables, or the config file at {config_path}. Provide the API token via JIRA_TOKEN or that config file."
@@ -973,32 +1379,9 @@ fn schema_json() -> serde_json::Value {
                 { "name": "JIRA_EMAIL", "description": "Account email (not required when auth_type=pat)", "required": false },
                 { "name": "JIRA_TOKEN", "description": "API token (env/config only)", "required": false },
                 { "name": "JIRA_PROFILE", "description": "Config profile", "required": false },
-                { "name": "JIRA_AUTH_TYPE", "description": "Authentication type: 'basic' (default, Jira Cloud) or 'pat' (Personal Access Token, Jira Data Center/Server)", "required": false },
+                { "name": "JIRA_AUTH_TYPE", "description": "Authentication type: basic (default, Jira Cloud) or pat (Personal Access Token, Jira Data Center/Server)", "required": false },
                 { "name": "JIRA_API_VERSION", "description": "Jira REST API version: 3 (default, Cloud) or 2 (Data Center/Server)", "required": false }
             ]
-        },
-        "global_flags": [
-            { "name": "--host", "env": "JIRA_HOST", "description": "Atlassian domain", "required": false },
-            { "name": "--email", "env": "JIRA_EMAIL", "description": "Account email (not required when auth_type=pat)", "required": false },
-            { "name": "--profile", "env": "JIRA_PROFILE", "description": "Config profile", "required": false },
-            { "name": "--json", "description": "Force JSON output (auto when stdout is not a TTY)", "required": false },
-            { "name": "--quiet", "description": "Suppress non-data output", "required": false },
-        ],
-        "exit_codes": {
-            "0": "success",
-            "1": "general / unexpected error",
-            "2": "bad user input or config error",
-            "3": "authentication failed",
-            "4": "resource not found",
-            "5": "Jira API error",
-            "6": "rate limited"
-        },
-        "json_notes": {
-            "assignee_field": "JSON assignee is { displayName, accountId }. Use accountId with 'issues assign --assignee'.",
-            "type_field": "JSON 'type' is normalized from Jira's 'issuetype' field.",
-            "issue_links": "issueLinks[].sentence is a plain-English summary e.g. 'PROJ-1 blocks PROJ-2'. Use it instead of parsing inward/outward fields.",
-            "pagination": "'issues list' and 'search' JSON includes total/startAt/maxResults. Use --offset to page through results.",
-            "sprint_fields": "sprintId and sprintName are only present in 'issues create' output when --sprint is used."
         },
         "commands": commands
     })
@@ -1008,13 +1391,14 @@ fn schema_json() -> serde_json::Value {
 ///
 /// Intermediate subcommand groups (e.g. `issues`, `projects`) are not emitted;
 /// only leaf commands that perform an action produce an entry. Command names are
-/// built as space-joined paths (e.g. `"issues list"`). Positional argument names
-/// are appended in angle brackets to form the display name (e.g. `"issues show <key>"`).
+/// built as space-joined paths (e.g. `"issues list"`).
 fn walk_commands(
     cmd: &clap::Command,
     path: &[String],
     annotations: &std::collections::HashMap<&str, serde_json::Value>,
     global_ids: &std::collections::HashSet<&str>,
+    mutating: &std::collections::HashMap<&str, bool>,
+    output_fields: &std::collections::HashMap<&str, serde_json::Value>,
 ) -> Vec<serde_json::Value> {
     let subs: Vec<_> = cmd
         .get_subcommands()
@@ -1022,7 +1406,7 @@ fn walk_commands(
         .collect();
 
     if subs.is_empty() {
-        // Leaf command — emit a schema entry.
+        // Leaf command - emit a schema entry.
         let positionals: Vec<_> = cmd.get_arguments().filter(|a| a.is_positional()).collect();
         let flags: Vec<_> = cmd
             .get_arguments()
@@ -1035,22 +1419,17 @@ fn walk_commands(
             .collect();
 
         let base_path = path.join(" ");
-        let display_name = if positionals.is_empty() {
-            base_path.clone()
-        } else {
-            let suffix: Vec<String> = positionals
-                .iter()
-                .map(|a| format!("<{}>", a.get_id().as_str()))
-                .collect();
-            format!("{base_path} {}", suffix.join(" "))
-        };
 
         let mut entry = serde_json::Map::new();
-        entry.insert("name".into(), serde_json::json!(display_name));
+        entry.insert("name".into(), serde_json::json!(base_path));
         entry.insert(
             "description".into(),
             serde_json::json!(cmd.get_about().map(|s| s.to_string()).unwrap_or_default()),
         );
+
+        // mutating field
+        let is_mutating = mutating.get(base_path.as_str()).copied().unwrap_or(false);
+        entry.insert("mutating".into(), serde_json::json!(is_mutating));
 
         let ann = annotations.get(base_path.as_str());
 
@@ -1058,50 +1437,56 @@ fn walk_commands(
             entry.insert("alias_for".into(), alias.clone());
         }
 
-        if !positionals.is_empty() {
-            let args: Vec<serde_json::Value> = positionals
-                .iter()
-                .map(|a| {
-                    serde_json::json!({
-                        "name": a.get_id().as_str(),
-                        "description": a.get_help().map(|s| s.to_string()).unwrap_or_default(),
-                        "required": a.is_required_set(),
-                    })
-                })
-                .collect();
-            entry.insert("args".into(), serde_json::json!(args));
+        // Merge positionals and flags into a single args array, each with name+type.
+        let mut all_args: Vec<serde_json::Value> = Vec::new();
+
+        for a in &positionals {
+            let mut arg_obj = serde_json::Map::new();
+            arg_obj.insert("name".into(), serde_json::json!(a.get_id().as_str()));
+            arg_obj.insert("type".into(), serde_json::json!(arg_type(a)));
+            arg_obj.insert("required".into(), serde_json::json!(a.is_required_set()));
+            if let Some(help) = a.get_help() {
+                arg_obj.insert("description".into(), serde_json::json!(help.to_string()));
+            }
+            all_args.push(serde_json::Value::Object(arg_obj));
         }
 
-        if !flags.is_empty() {
-            let flag_entries: Vec<serde_json::Value> = flags
-                .iter()
-                .map(|a| {
-                    let long_name = a
-                        .get_long()
-                        .map(|l| format!("--{l}"))
-                        .unwrap_or_else(|| format!("--{}", a.get_id().as_str().replace('_', "-")));
-                    let mut f = serde_json::Map::new();
-                    f.insert("name".into(), serde_json::json!(long_name));
-                    if let Some(short) = a.get_short() {
-                        f.insert("short".into(), serde_json::json!(format!("-{short}")));
-                    }
-                    f.insert(
-                        "description".into(),
-                        serde_json::json!(a.get_help().map(|s| s.to_string()).unwrap_or_default()),
-                    );
-                    f.insert("required".into(), serde_json::json!(a.is_required_set()));
-                    if !a.get_default_values().is_empty() {
-                        let dv = a.get_default_values()[0].to_string_lossy();
-                        if let Ok(n) = dv.parse::<i64>() {
-                            f.insert("default".into(), serde_json::json!(n));
-                        } else {
-                            f.insert("default".into(), serde_json::json!(dv.as_ref()));
-                        }
-                    }
-                    serde_json::Value::Object(f)
-                })
-                .collect();
-            entry.insert("flags".into(), serde_json::json!(flag_entries));
+        for a in &flags {
+            let long_name = a
+                .get_long()
+                .map(|l| format!("--{l}"))
+                .unwrap_or_else(|| format!("--{}", a.get_id().as_str().replace('_', "-")));
+            let mut arg_obj = serde_json::Map::new();
+            arg_obj.insert("name".into(), serde_json::json!(long_name));
+            if let Some(short) = a.get_short() {
+                arg_obj.insert("short".into(), serde_json::json!(format!("-{short}")));
+            }
+            arg_obj.insert("type".into(), serde_json::json!(arg_type(a)));
+            arg_obj.insert("required".into(), serde_json::json!(a.is_required_set()));
+            if !a.get_default_values().is_empty() {
+                let dv = a.get_default_values()[0].to_string_lossy();
+                if let Ok(n) = dv.parse::<i64>() {
+                    arg_obj.insert("default".into(), serde_json::json!(n));
+                } else {
+                    arg_obj.insert("default".into(), serde_json::json!(dv.as_ref()));
+                }
+            }
+            if let Some(help) = a.get_help() {
+                let help_str = help.to_string();
+                if !help_str.is_empty() {
+                    arg_obj.insert("description".into(), serde_json::json!(help_str));
+                }
+            }
+            all_args.push(serde_json::Value::Object(arg_obj));
+        }
+
+        entry.insert("args".into(), serde_json::json!(all_args));
+
+        // output_fields
+        if let Some(fields) = output_fields.get(base_path.as_str()) {
+            entry.insert("output_fields".into(), fields.clone());
+        } else {
+            entry.insert("output_fields".into(), serde_json::json!([]));
         }
 
         if let Some(shape) = ann.and_then(|a| a.get("json_shape")) {
@@ -1110,14 +1495,39 @@ fn walk_commands(
 
         vec![serde_json::Value::Object(entry)]
     } else {
-        // Intermediate group — recurse into subcommands.
+        // Intermediate group - recurse into subcommands.
         subs.iter()
             .flat_map(|sub| {
                 let mut new_path = path.to_vec();
                 new_path.push(sub.get_name().to_string());
-                walk_commands(sub, &new_path, annotations, global_ids)
+                walk_commands(
+                    sub,
+                    &new_path,
+                    annotations,
+                    global_ids,
+                    mutating,
+                    output_fields,
+                )
             })
             .collect()
+    }
+}
+
+/// Infer the type string for a clap argument.
+fn arg_type(a: &clap::Arg) -> &'static str {
+    use clap::ArgAction;
+    match a.get_action() {
+        ArgAction::SetTrue | ArgAction::SetFalse => "boolean",
+        ArgAction::Count => "integer",
+        ArgAction::Append => "string[]",
+        _ => {
+            // Numeric-looking IDs (limit/offset style args).
+            let id = a.get_id().as_str();
+            if id == "limit" || id == "offset" {
+                return "integer";
+            }
+            "string"
+        }
     }
 }
 
@@ -1271,9 +1681,9 @@ mod tests {
         let _env = ProcessEnvLock::acquire().unwrap();
         let _config_dir = unset_config_dir_env();
         let schema = schema_json();
-        let global_flags = schema["global_flags"].as_array().unwrap();
+        let global_args = schema["global_args"].as_array().unwrap();
         assert!(
-            !global_flags.iter().any(|flag| flag["name"] == "--token"),
+            !global_args.iter().any(|arg| arg["name"] == "--token"),
             "schema must not invent a --token CLI flag"
         );
 
@@ -1282,6 +1692,110 @@ mod tests {
             auth_env.iter().any(|entry| entry["name"] == "JIRA_TOKEN"),
             "schema must still document JIRA_TOKEN as an auth source"
         );
+    }
+
+    #[test]
+    fn schema_has_clispec_version() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        assert_eq!(schema["clispec"].as_str(), Some("0.2"));
+    }
+
+    #[test]
+    fn schema_has_global_args_with_type() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let global_args = schema["global_args"].as_array().unwrap();
+        assert!(!global_args.is_empty(), "global_args must not be empty");
+        for arg in global_args {
+            assert!(
+                arg["name"].as_str().is_some(),
+                "every global_arg needs a name"
+            );
+            assert!(
+                arg["type"].as_str().is_some(),
+                "every global_arg needs a type: {arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_has_errors_array() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let errors = schema["errors"].as_array().unwrap();
+        assert!(!errors.is_empty(), "errors array must not be empty");
+        for err in errors {
+            assert!(err["kind"].as_str().is_some(), "every error needs a kind");
+            assert!(
+                err["exit_code"].as_u64().is_some(),
+                "every error needs exit_code"
+            );
+        }
+        // Check specific kinds exist
+        let kinds: Vec<&str> = errors.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert!(kinds.contains(&"auth"), "errors must include auth kind");
+        assert!(
+            kinds.contains(&"not_found"),
+            "errors must include not_found kind"
+        );
+        assert!(
+            kinds.contains(&"conflict"),
+            "errors must include conflict kind (Principle 5: Idempotent Operations)"
+        );
+    }
+
+    #[test]
+    fn schema_all_commands_have_mutating() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let commands = schema["commands"].as_array().unwrap();
+        for cmd in commands {
+            assert!(
+                cmd["mutating"].is_boolean(),
+                "command '{}' must have mutating bool",
+                cmd["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn schema_all_commands_have_output_fields() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let commands = schema["commands"].as_array().unwrap();
+        for cmd in commands {
+            assert!(
+                cmd["output_fields"].is_array(),
+                "command '{}' must have output_fields array",
+                cmd["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn schema_all_args_have_type() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let commands = schema["commands"].as_array().unwrap();
+        for cmd in commands {
+            if let Some(args) = cmd["args"].as_array() {
+                for arg in args {
+                    assert!(
+                        arg["type"].as_str().is_some(),
+                        "arg '{}' in command '{}' must have type",
+                        arg["name"],
+                        cmd["name"]
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1349,8 +1863,8 @@ mod tests {
         let _token = EnvVarGuard::unset("JIRA_TOKEN");
         let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-        let err =
-            jira_cli::config::show(&OutputConfig::new(true, true), None, None, None).unwrap_err();
+        let err = jira_cli::config::show(&OutputConfig::new(true, false, true), None, None, None)
+            .unwrap_err();
         assert!(matches!(err, ApiError::InvalidInput(_)));
     }
 

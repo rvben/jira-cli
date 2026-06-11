@@ -339,3 +339,123 @@ async fn issues_update_dispatch_combined_flags_send_one_put() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Verify that `jira schema` output validates against the vendored clispec v0.2
+/// JSON Schema. This catches regressions where required fields are dropped or
+/// the schema structure diverges from the spec.
+#[test]
+fn schema_output_validates_against_clispec_v0_2() {
+    use jira_cli::test_support::{ProcessEnvLock, unset_config_dir_env};
+
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let _config_dir = unset_config_dir_env();
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["schema"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "jira schema failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let schema_output: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("jira schema must emit valid JSON");
+
+    let meta_schema_str = include_str!("fixtures/clispec-v0.2.json");
+    let meta_schema: serde_json::Value = serde_json::from_str(meta_schema_str)
+        .expect("bundled clispec v0.2 schema must be valid JSON");
+
+    let validator = jsonschema::validator_for(&meta_schema)
+        .expect("clispec v0.2 JSON Schema must be compilable");
+
+    let errors: Vec<String> = validator
+        .iter_errors(&schema_output)
+        .map(|e| format!("{e}"))
+        .collect();
+
+    assert!(
+        errors.is_empty(),
+        "jira schema output failed clispec v0.2 validation:\n{}",
+        errors.join("\n")
+    );
+}
+
+/// Verify that `jira schema` declares a `conflict` error kind, required by
+/// Principle 5 (Idempotent Operations) of the CLI Spec.
+#[test]
+fn schema_declares_conflict_error_kind() {
+    use jira_cli::test_support::{ProcessEnvLock, unset_config_dir_env};
+
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let _config_dir = unset_config_dir_env();
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["schema"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let schema: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("schema must be valid JSON");
+
+    let has_conflict = schema["errors"]
+        .as_array()
+        .expect("errors must be an array")
+        .iter()
+        .any(|e| e["kind"].as_str() == Some("conflict"));
+
+    assert!(has_conflict, "schema must declare a 'conflict' error kind");
+}
+
+/// Verify that `jira issues list --help` mentions `--fields`, satisfying
+/// Principle 6 (Bounded Output) of the CLI Spec.
+#[test]
+fn issues_list_help_mentions_fields_flag() {
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["issues", "list", "--help"])
+        .output()
+        .unwrap();
+
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("--fields"),
+        "issues list --help must mention --fields; got:\n{help}"
+    );
+}
+
+/// Verify that unrecognized subcommands emit a structured error envelope on
+/// stderr (Principle 1: Structured Output), so agents can branch on `kind`
+/// without parsing prose.
+#[test]
+fn unrecognized_subcommand_emits_error_envelope() {
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["__no_such_subcommand__"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let last_line = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("stderr must not be empty");
+
+    let envelope: serde_json::Value = serde_json::from_str(last_line).unwrap_or_else(|_| {
+        panic!("last line of stderr must be a JSON error envelope; got: {last_line:?}")
+    });
+
+    assert!(
+        envelope["error"]["kind"].as_str().is_some(),
+        "error envelope must contain a 'kind' field; got: {envelope}"
+    );
+}
