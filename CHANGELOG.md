@@ -20,6 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.3.14](https://github.com/rvben/jira-cli/compare/v0.3.13...v0.3.14) - 2026-06-11
+
+### Added
+
+- comply with CLI Spec v0.2 (schema, output, error envelope) ([ba3dad3](https://github.com/rvben/jira-cli/commit/ba3dad3bb65c914f2a852848022c2fa877443576))
+
 ## [0.3.13](https://github.com/rvben/jira-cli/compare/v0.3.12...v0.3.13) - 2026-05-02
 
 ### Added
