@@ -1349,7 +1349,6 @@ fn schema_json() -> serde_json::Value {
             {"kind": "auth", "exit_code": 3, "retryable": false, "description": "Authentication failed - bad or missing credentials"},
             {"kind": "not_found", "exit_code": 4, "retryable": false, "description": "Requested resource does not exist"},
             {"kind": "invalid_input", "exit_code": 2, "retryable": false, "description": "Bad user input or config error"},
-            {"kind": "conflict", "exit_code": 7, "retryable": false, "description": "Resource already exists with a different configuration"},
             {"kind": "confirmation_required", "exit_code": 2, "retryable": false, "description": "Destructive operation requires explicit confirmation (--yes)"},
             {"kind": "rate_limit", "exit_code": 6, "retryable": true, "description": "Rate limited by Jira - wait and retry"},
             {"kind": "api_error", "exit_code": 5, "retryable": false, "description": "Non-2xx response from the Jira API"},
@@ -1741,10 +1740,6 @@ mod tests {
         assert!(
             kinds.contains(&"not_found"),
             "errors must include not_found kind"
-        );
-        assert!(
-            kinds.contains(&"conflict"),
-            "errors must include conflict kind (Principle 5: Idempotent Operations)"
         );
     }
 

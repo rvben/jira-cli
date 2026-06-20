@@ -384,35 +384,6 @@ fn schema_output_validates_against_clispec_v0_2() {
     );
 }
 
-/// Verify that `jira schema` declares a `conflict` error kind, required by
-/// Principle 5 (Idempotent Operations) of the CLI Spec.
-#[test]
-fn schema_declares_conflict_error_kind() {
-    use jira_cli::test_support::{ProcessEnvLock, unset_config_dir_env};
-
-    let _env = ProcessEnvLock::acquire().unwrap();
-    let _config_dir = unset_config_dir_env();
-
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["schema"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-
-    let schema: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("schema must be valid JSON");
-
-    let has_conflict = schema["errors"]
-        .as_array()
-        .expect("errors must be an array")
-        .iter()
-        .any(|e| e["kind"].as_str() == Some("conflict"));
-
-    assert!(has_conflict, "schema must declare a 'conflict' error kind");
-}
-
 /// Verify that `jira issues list --help` mentions `--fields`, satisfying
 /// Principle 6 (Bounded Output) of the CLI Spec.
 #[test]
