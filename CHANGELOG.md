@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.3.15](https://github.com/rvben/jira-cli/compare/v0.3.14...v0.3.15) - 2026-06-20
+
+### Fixed
+
+- **schema**: correct exit-code declarations ([55711d9](https://github.com/rvben/jira-cli/commit/55711d985ace403b47785b522022c5f6f529cb51))
+
 ## [0.3.14](https://github.com/rvben/jira-cli/compare/v0.3.13...v0.3.14) - 2026-06-11
 
 ### Added
