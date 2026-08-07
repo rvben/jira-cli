@@ -5,6 +5,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use jira_cli::api::{ApiError, AuthType, IssueDraft, IssueUpdate, JiraClient};
 use jira_cli::output::OutputConfig;
+use tempfile::TempDir;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -4049,4 +4050,361 @@ async fn create_issue_sends_fix_versions() {
         .await
         .unwrap();
     assert_eq!(resp.key, "PROJ-42");
+}
+
+// ── Attachments (client) ─────────────────────────────────────────────────────
+
+fn attachment_response(id: serde_json::Value, filename: &str, size: u64) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "filename": filename,
+        "author": { "displayName": "Alice", "accountId": "abc123" },
+        "created": "2024-01-15T10:00:00.000Z",
+        "size": size,
+        "mimeType": "application/pdf",
+    })
+}
+
+#[tokio::test]
+async fn list_attachments_reads_ids_from_the_issue_attachment_field() {
+    let cases: [(&str, serde_json::Value, &[&str]); 2] = [
+        (
+            "ids reported as a string and as a number both become strings",
+            serde_json::json!({ "fields": { "attachment": [
+                attachment_response(serde_json::json!("10001"), "a.pdf", 100),
+                attachment_response(serde_json::json!(10002), "b.pdf", 200),
+            ]}}),
+            &["10001", "10002"],
+        ),
+        (
+            "an issue without an attachment field has no attachments",
+            serde_json::json!({ "fields": {} }),
+            &[],
+        ),
+    ];
+
+    for (label, body, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server);
+        let ids: Vec<String> = client
+            .list_attachments("PROJ-1")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(ids, expected, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn upload_attachments_sends_no_check_header_and_file_bytes() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("notes.txt");
+    std::fs::write(&file_path, b"upload me").unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/attachments"))
+        .and(header("X-Atlassian-Token", "no-check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            attachment_response(serde_json::json!("10003"), "notes.txt", 9)
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let uploaded = client
+        .upload_attachments("PROJ-1", &[file_path])
+        .await
+        .unwrap();
+    assert_eq!(uploaded.len(), 1);
+    assert_eq!(uploaded[0].filename, "notes.txt");
+
+    let requests = server.received_requests().await.unwrap();
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        body.contains("upload me"),
+        "multipart body must carry the file's actual bytes"
+    );
+}
+
+#[tokio::test]
+async fn upload_attachments_missing_local_file_is_rejected_before_any_request() {
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+
+    let missing = std::path::PathBuf::from("/no/such/file-really-does-not-exist.txt");
+    let err = client
+        .upload_attachments("PROJ-1", &[missing])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Other(_)));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// Jira stores exactly what the client declares for a multipart part and
+/// never derives a type from the bytes itself, so the declared Content-Type
+/// must follow the file's name; a name with no recognized mapping must still
+/// go up as `application/octet-stream`.
+///
+/// `.md` is deliberately not one of the cases: the underlying `mime_guess`
+/// table lists two candidate types for it (`text/markdown` and
+/// `text/x-markdown`), and which one wins is an artifact of that crate's
+/// internal list ordering, not a decision this codebase makes. Asserting
+/// that exact string would pin a dependency implementation detail rather
+/// than behavior, so `.pdf` and `.png` (both unambiguous in that table) are
+/// used for the recognized cases instead.
+#[tokio::test]
+async fn upload_attachments_declares_content_type_from_file_name() {
+    let cases = [
+        ("report.pdf", "application/pdf"),
+        ("diagram.png", "image/png"),
+        ("README", "application/octet-stream"),
+    ];
+
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    let mut paths = Vec::new();
+    for (name, _) in &cases {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"bytes").unwrap();
+        paths.push(path);
+    }
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/attachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    client.upload_attachments("PROJ-1", &paths).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body = String::from_utf8_lossy(&requests[0].body);
+    for (name, expected_type) in cases {
+        let declared_part = format!("filename=\"{name}\"\r\nContent-Type: {expected_type}\r\n");
+        assert!(
+            body.contains(&declared_part),
+            "{name} must be uploaded with Content-Type: {expected_type}, got body:\n{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn attachment_id_that_is_not_a_number_is_rejected_before_any_request() {
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+
+    for id in ["not-a-number", "../../attachment/1", ""] {
+        let err = client.get_attachment(id).await.unwrap_err();
+        assert!(
+            matches!(err, ApiError::InvalidInput(_)),
+            "get_attachment({id:?})"
+        );
+        let err = client.delete_attachment(id).await.unwrap_err();
+        assert!(
+            matches!(err, ApiError::InvalidInput(_)),
+            "delete_attachment({id:?})"
+        );
+        let err = client.download_attachment(id).await.unwrap_err();
+        assert!(
+            matches!(err, ApiError::InvalidInput(_)),
+            "download_attachment({id:?})"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn list_attachments_returns_a_clean_error_for_an_unrecognized_id_type() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": {
+                "attachment": [{
+                    "id": ["not", "a", "valid", "id"],
+                    "filename": "a.pdf",
+                    "created": "2024-01-15T10:00:00.000Z",
+                    "size": 100,
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    // A server response with an id shape the client doesn't recognize must
+    // surface as a normal error, not a panic.
+    let err = client.list_attachments("PROJ-9").await.unwrap_err();
+    assert!(matches!(err, ApiError::Http(_)));
+}
+
+#[tokio::test]
+async fn download_attachment_returns_raw_bytes() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"binary-payload".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let bytes = client.download_attachment("10001").await.unwrap();
+    assert_eq!(bytes, b"binary-payload".to_vec());
+}
+
+#[tokio::test]
+async fn download_attachment_maps_404_to_not_found() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/999"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "errorMessages": ["Attachment does not exist"], "errors": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let err = client.download_attachment("999").await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn delete_attachment_sends_delete_request() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    client.delete_attachment("10001").await.unwrap();
+}
+
+// ── Attachments (commands::issues) ───────────────────────────────────────────
+
+#[tokio::test]
+async fn attachments_command_lists_via_issue_fields_endpoint() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": {
+                "attachment": [attachment_response(serde_json::json!("10001"), "a.pdf", 100)]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let out = json_out();
+    jira_cli::commands::issues::attachments(&client, &out, "PROJ-1")
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.query(), Some("fields=attachment"));
+}
+
+/// The filename Jira reports is reduced to a single path component before it
+/// is written, so a crafted name can only ever land directly inside `--dir`;
+/// a name that cannot be reduced to one usable component is refused and
+/// nothing is written. The id is also accepted in both JSON forms Jira uses
+/// (string from the issue `attachment` field, number from `attachment/{id}`).
+#[tokio::test]
+async fn download_attachment_command_reduces_reported_filename_to_a_basename() {
+    // (attachment id as Jira reports it, filename Jira reports, file expected
+    // in the destination directory — `None` means the download must be refused)
+    let cases: [(serde_json::Value, &str, Option<&str>); 6] = [
+        (
+            serde_json::json!("10001"),
+            "../../evil/../../report.pdf",
+            Some("report.pdf"),
+        ),
+        (
+            serde_json::json!("10010"),
+            "..\\..\\windows\\system32\\config",
+            Some("config"),
+        ),
+        (serde_json::json!("10011"), "/etc/passwd", Some("passwd")),
+        (serde_json::json!(10009), "invoice.pdf", Some("invoice.pdf")),
+        (serde_json::json!("10002"), "..", None),
+        // No path separator, so it survives basename-reduction as a single
+        // component, but it still names a Windows drive-relative path / NTFS
+        // alternate-data-stream, so it must be refused rather than written.
+        (serde_json::json!("10012"), "C:evil.txt", None),
+    ];
+
+    for (id, filename, expected) in cases {
+        let server = MockServer::start().await;
+        let dest = TempDir::new().unwrap();
+        let id_str = id.as_str().map_or_else(|| id.to_string(), str::to_string);
+
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/3/attachment/{id_str}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(attachment_response(
+                    id.clone(),
+                    filename,
+                    4,
+                )),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/3/attachment/content/{id_str}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server);
+        let out = json_out();
+        let result =
+            jira_cli::commands::issues::download_attachment(&client, &out, &id_str, dest.path())
+                .await;
+
+        let entries: Vec<_> = std::fs::read_dir(dest.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        match expected {
+            Some(name) => {
+                result.unwrap_or_else(|e| panic!("filename {filename:?} must be accepted: {e}"));
+                assert_eq!(entries, vec![std::ffi::OsString::from(name)]);
+                assert_eq!(std::fs::read(dest.path().join(name)).unwrap(), b"data");
+            }
+            None => {
+                let err = result.err().unwrap_or_else(|| {
+                    panic!("filename {filename:?} must be refused, wrote: {entries:?}")
+                });
+                assert!(matches!(err, ApiError::Other(_)), "filename {filename:?}");
+                assert!(
+                    entries.is_empty(),
+                    "filename {filename:?} must write nothing"
+                );
+            }
+        }
+    }
 }

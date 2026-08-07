@@ -439,6 +439,38 @@ enum IssuesCommand {
         started: Option<String>,
     },
 
+    /// List attachments on an issue
+    Attachments {
+        /// Issue key (e.g. PROJ-123)
+        key: String,
+    },
+
+    /// Attach one or more local files to an issue
+    Attach {
+        /// Issue key (e.g. PROJ-123)
+        key: String,
+
+        /// File to upload (can be specified multiple times)
+        #[arg(short, long, required = true)]
+        file: Vec<std::path::PathBuf>,
+    },
+
+    /// Download an attachment by ID
+    DownloadAttachment {
+        /// Attachment ID (shown in `issues attachments` output)
+        id: String,
+
+        /// Directory to write the file into
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+    },
+
+    /// Delete an attachment by ID
+    DeleteAttachment {
+        /// Attachment ID (shown in `issues attachments` output)
+        id: String,
+    },
+
     /// Transition all issues matching a JQL query to a new status
     BulkTransition {
         /// JQL query selecting the issues to transition
@@ -652,6 +684,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     | IssuesCommand::Link { .. }
                     | IssuesCommand::Unlink { .. }
                     | IssuesCommand::LogWork { .. }
+                    | IssuesCommand::Attach { .. }
+                    | IssuesCommand::DeleteAttachment { .. }
                     | IssuesCommand::BulkTransition { .. }
                     | IssuesCommand::BulkAssign { .. }
             )
@@ -849,6 +883,18 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 )
                 .await?
             }
+            IssuesCommand::Attachments { key } => {
+                commands::issues::attachments(&client, &out, &key).await?
+            }
+            IssuesCommand::Attach { key, file } => {
+                commands::issues::attach(&client, &out, &key, &file).await?
+            }
+            IssuesCommand::DownloadAttachment { id, dir } => {
+                commands::issues::download_attachment(&client, &out, &id, &dir).await?
+            }
+            IssuesCommand::DeleteAttachment { id } => {
+                commands::issues::delete_attachment(&client, &out, &id).await?
+            }
             IssuesCommand::BulkTransition {
                 jql,
                 to,
@@ -997,6 +1043,10 @@ fn schema_json() -> serde_json::Value {
         ("issues link", true),
         ("issues unlink", true),
         ("issues log-work", true),
+        ("issues attachments", false),
+        ("issues attach", true),
+        ("issues download-attachment", false),
+        ("issues delete-attachment", true),
         ("issues bulk-transition", true),
         ("issues bulk-assign", true),
         ("projects list", false),
@@ -1159,6 +1209,45 @@ fn schema_json() -> serde_json::Value {
             serde_json::json!([
                 {"name": "issue", "type": "string"},
                 {"name": "timeSpent", "type": "string"}
+            ]),
+        ),
+        (
+            "issues attachments",
+            serde_json::json!([
+                {"name": "id", "type": "string", "description": "Attachment ID"},
+                {"name": "filename", "type": "string"},
+                {"name": "size", "type": "integer", "description": "Size in bytes"},
+                {"name": "mimeType", "type": "string"},
+                {"name": "author", "type": "string"},
+                {"name": "created", "type": "string"}
+            ]),
+        ),
+        (
+            "issues attach",
+            serde_json::json!([
+                {"name": "issue", "type": "string"},
+                {"name": "id", "type": "string", "description": "Attachment ID"},
+                {"name": "filename", "type": "string"},
+                {"name": "size", "type": "integer", "description": "Size in bytes"},
+                {"name": "mimeType", "type": "string"},
+                {"name": "author", "type": "string"},
+                {"name": "created", "type": "string"}
+            ]),
+        ),
+        (
+            "issues download-attachment",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "filename", "type": "string"},
+                {"name": "path", "type": "string", "description": "Local path the file was written to"},
+                {"name": "size", "type": "integer", "description": "Size in bytes"}
+            ]),
+        ),
+        (
+            "issues delete-attachment",
+            serde_json::json!([
+                {"name": "id", "type": "string"},
+                {"name": "deleted", "type": "boolean"}
             ]),
         ),
         (

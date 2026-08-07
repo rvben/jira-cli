@@ -430,3 +430,438 @@ fn unrecognized_subcommand_emits_error_envelope() {
         "error envelope must contain a 'kind' field; got: {envelope}"
     );
 }
+
+// ── Attachment commands: CLI surface ─────────────────────────────────────────
+
+/// Same as `run_jira_against`, but with `JIRA_READ_ONLY` set, to exercise the
+/// read-only write guard against a real subprocess.
+fn run_jira_against_read_only(server: &MockServer, args: &[&str]) -> std::process::Output {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+    let host = server.uri();
+    let _host = EnvVarGuard::set("JIRA_HOST", &host);
+    let _email = EnvVarGuard::set("JIRA_EMAIL", "test@example.com");
+    let _token = EnvVarGuard::set("JIRA_TOKEN", "test-token");
+    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+    let _read_only = EnvVarGuard::set("JIRA_READ_ONLY", "1");
+    Command::cargo_bin("jira")
+        .unwrap()
+        .args(args)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap()
+}
+
+/// One attachment as Jira reports it, with every optional field present.
+fn attachment_json(id: &str, filename: &str, size: u64) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "filename": filename,
+        "author": { "displayName": "Alice", "accountId": "abc123" },
+        "created": "2024-01-15T10:00:00.000Z",
+        "size": size,
+        "mimeType": "application/pdf",
+    })
+}
+
+/// An issue response carrying `attachments` in its `attachment` field.
+fn issue_with_attachments(attachments: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "fields": { "attachment": attachments } })
+}
+
+/// The declaration `jira schema` emits for `command`.
+fn schema_command(command: &str) -> serde_json::Value {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let _config_dir = jira_cli::test_support::unset_config_dir_env();
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["schema"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    schema["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == command)
+        .unwrap_or_else(|| panic!("schema must declare command '{command}'"))
+        .clone()
+}
+
+/// The repo treats `jira schema`'s declared `output_fields` as the contract for
+/// what a command's JSON output looks like. Assert that the keys of `actual`,
+/// plus `extra` (fields the command emits outside that object), are exactly the
+/// fields declared for `command`.
+fn assert_json_keys_match_schema(command: &str, actual: &serde_json::Value, extra: &[&str]) {
+    let schema = schema_command(command);
+    let declared: std::collections::BTreeSet<&str> = schema["output_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    let mut emitted: std::collections::BTreeSet<&str> = actual
+        .as_object()
+        .unwrap_or_else(|| panic!("{command} output must be a JSON object; got: {actual}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    emitted.extend(extra.iter().copied());
+    assert_eq!(
+        emitted, declared,
+        "{command} JSON keys must match the fields `jira schema` declares"
+    );
+}
+
+/// Verify that `jira issues attach --help` documents the flag used to select
+/// files, satisfying the same "surface is discoverable via --help" bar as
+/// other mutating commands (e.g. `issues list --help` mentions `--fields`).
+#[test]
+fn issues_attach_help_mentions_file_flag() {
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["issues", "attach", "--help"])
+        .output()
+        .unwrap();
+
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("--file"),
+        "issues attach --help must mention --file; got:\n{help}"
+    );
+}
+
+#[tokio::test]
+async fn issues_attach_missing_required_file_flag_is_rejected() {
+    let server = MockServer::start().await;
+
+    let output = run_jira_against(&server, &["issues", "attach", "PROJ-1"]);
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--file"),
+        "missing required --file must be reported; got:\n{stderr}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn attachment_write_commands_are_blocked_in_read_only_mode() {
+    let server = MockServer::start().await;
+
+    for args in [
+        &["issues", "attach", "PROJ-1", "--file", "irrelevant.bin"][..],
+        &["issues", "delete-attachment", "10001"][..],
+    ] {
+        let output = run_jira_against_read_only(&server, args);
+        assert_eq!(
+            output.status.code(),
+            Some(exit_codes::INPUT_ERROR),
+            "args: {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("read-only"),
+            "args: {args:?}, stderr: {stderr}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn attachment_read_commands_are_allowed_in_read_only_mode() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(issue_with_attachments(serde_json::json!([]))),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(attachment_json(
+            "10001",
+            "report.pdf",
+            4,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+        .mount(&server)
+        .await;
+
+    for args in [
+        &["issues", "attachments", "PROJ-1"][..],
+        &[
+            "issues",
+            "download-attachment",
+            "10001",
+            "--dir",
+            dest.path().to_str().unwrap(),
+        ][..],
+    ] {
+        let output = run_jira_against_read_only(&server, args);
+        assert!(
+            output.status.success(),
+            "args: {args:?}, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// `jira schema` declares `author` as `type: "string"`, matching how
+/// `issues comment` and `issues log-work` render an author as a plain display
+/// name, so the emitted value is pinned to that declared type too.
+#[tokio::test]
+async fn issues_attachments_json_output_matches_schema_contract() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(issue_with_attachments(serde_json::json!([
+                attachment_json("10001", "report.pdf", 2048)
+            ]))),
+        )
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "attachments", "PROJ-1"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues attachments", &json["attachments"][0], &[]);
+
+    let schema = schema_command("issues attachments");
+    let author = schema["output_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "author")
+        .unwrap();
+    assert_eq!(author["type"], "string");
+    assert!(
+        json["attachments"][0]["author"].is_string(),
+        "schema declares 'author' as type string but the actual value is: {}",
+        json["attachments"][0]["author"]
+    );
+}
+
+#[tokio::test]
+async fn issues_attach_json_field_names_match_schema_contract() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    let file_path = dir.path().join("diagram.png");
+    std::fs::write(&file_path, b"png-bytes").unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/attachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            attachment_json("10005", "diagram.png", 9)
+        ])))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "attach",
+            "PROJ-1",
+            "--file",
+            file_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // `issue` sits next to `attachments`, not inside an attachment object.
+    assert_json_keys_match_schema("issues attach", &json["attachments"][0], &["issue"]);
+}
+
+#[tokio::test]
+async fn issues_download_attachment_json_field_names_match_schema_contract() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(attachment_json(
+            "10001",
+            "report.pdf",
+            4,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "download-attachment",
+            "10001",
+            "--dir",
+            dest.path().to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues download-attachment", &json, &[]);
+}
+
+#[tokio::test]
+async fn issues_delete_attachment_json_field_names_match_schema_contract() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "delete-attachment", "10001"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues delete-attachment", &json, &[]);
+}
+
+/// A user-supplied attachment id that isn't numeric must be rejected as an
+/// input error before any request reaches Jira. `download-attachment` is used
+/// (rather than a mutating command) so the exit code can only come from id
+/// validation, not the read-only write guard.
+#[tokio::test]
+async fn issues_download_attachment_with_non_numeric_id_is_rejected_before_any_request() {
+    let server = MockServer::start().await;
+
+    let output = run_jira_against(&server, &["issues", "download-attachment", "not-a-number"]);
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not-a-number"), "stderr: {stderr}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn issues_attachments_text_table_renders_sizes_at_unit_boundaries() {
+    let cases = [
+        (1023u64, "1023 B"),
+        (1024, "1.0 KB"),
+        (1024 * 1024, "1.0 MB"),
+        (1024 * 1024 * 1024, "1.0 GB"),
+    ];
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(issue_with_attachments(
+                cases
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (size, _))| attachment_json(&i.to_string(), "f.bin", *size))
+                    .collect(),
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &["issues", "attachments", "PROJ-1", "--output", "text"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for (size, rendered) in cases {
+        assert!(
+            stdout.contains(rendered),
+            "{size} bytes must render as {rendered:?}; stdout:\n{stdout}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn issues_attachments_degrades_absent_author_and_mime_type() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(issue_with_attachments(serde_json::json!([{
+                "id": "10001",
+                "filename": "notes.txt",
+                "created": "2024-01-15T10:00:00.000Z",
+                "size": 10,
+            }]))),
+        )
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "attachments", "PROJ-1"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let attachment = &json["attachments"][0];
+    assert!(
+        attachment["mimeType"].is_null(),
+        "mimeType must stay null when Jira omits it, got: {}",
+        attachment["mimeType"]
+    );
+    assert_eq!(attachment["author"], "-");
+
+    let output = run_jira_against(
+        &server,
+        &["issues", "attachments", "PROJ-1", "--output", "text"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("notes.txt"))
+        .unwrap_or_else(|| panic!("attachment row must be present, got:\n{stdout}"));
+    // Columns are: ID, Filename, Size (two tokens: number + unit), Type, Author, Created.
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(
+        cells.get(4),
+        Some(&"-"),
+        "Type column must show '-' when mimeType is absent; row: {row}"
+    );
+    assert_eq!(
+        cells.get(5),
+        Some(&"-"),
+        "Author column must show '-' when author is absent; row: {row}"
+    );
+}
