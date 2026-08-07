@@ -159,6 +159,12 @@ jira issues comments MYAPP-123
 jira issues log-work MYAPP-123 --time-spent 2h
 jira issues log-work MYAPP-123 --time-spent 30m --comment "Fixed the flaky test"
 
+# Attachments
+jira issues attachments MYAPP-123
+jira issues attach MYAPP-123 --file ./design.png --file ./spec.pdf
+jira issues download-attachment 10042 --dir ./downloads
+jira issues delete-attachment 10042
+
 # Links
 jira issues link-types
 jira issues link MYAPP-123 --to MYAPP-456 --type "Blocks"

@@ -1,7 +1,10 @@
+use std::path::{Path, PathBuf};
+
 use owo_colors::OwoColorize;
 
 use crate::api::{
-    ApiError, Issue, IssueDraft, IssueLink, IssueUpdate, JiraClient, Version, escape_jql,
+    ApiError, Attachment, Issue, IssueDraft, IssueLink, IssueUpdate, JiraClient, Version,
+    escape_jql,
 };
 use crate::output::{OutputConfig, use_color};
 
@@ -517,6 +520,133 @@ pub async fn log_work(
     Ok(())
 }
 
+/// List the attachments on an issue.
+pub async fn attachments(
+    client: &JiraClient,
+    out: &OutputConfig,
+    key: &str,
+) -> Result<(), ApiError> {
+    let attachments = client.list_attachments(key).await?;
+
+    if out.json {
+        out.print_data(
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "issue": key,
+                "total": attachments.len(),
+                "attachments": attachments.iter().map(attachment_to_json).collect::<Vec<_>>(),
+            }))
+            .expect("failed to serialize JSON"),
+        );
+        return Ok(());
+    }
+
+    if attachments.is_empty() {
+        out.print_message(&format!("No attachments on {key}."));
+        return Ok(());
+    }
+
+    let color = use_color();
+    let sizes: Vec<String> = attachments.iter().map(|a| format_size(a.size)).collect();
+    let id_w = col_width("ID", attachments.iter().map(|a| a.id.len()));
+    let name_w = col_width("Filename", attachments.iter().map(|a| a.filename.len()));
+    let size_w = col_width("Size", sizes.iter().map(String::len));
+    let type_w = col_width("Type", attachments.iter().map(|a| a.mime_type().len()));
+    let author_w = col_width("Author", attachments.iter().map(|a| a.author().len()));
+
+    let header = format!(
+        "{:<id_w$} {:<name_w$} {:<size_w$} {:<type_w$} {:<author_w$} {}",
+        "ID", "Filename", "Size", "Type", "Author", "Created"
+    );
+    if color {
+        println!("{}", header.bold());
+    } else {
+        println!("{header}");
+    }
+
+    for (a, size) in attachments.iter().zip(&sizes) {
+        let id = if color {
+            format!("{:<id_w$}", a.id).yellow().to_string()
+        } else {
+            format!("{:<id_w$}", a.id)
+        };
+        println!(
+            "{id} {:<name_w$} {:<size_w$} {:<type_w$} {:<author_w$} {}",
+            a.filename,
+            size,
+            a.mime_type(),
+            a.author(),
+            format_date(&a.created),
+        );
+    }
+    out.print_message(&format!("{} attachments", attachments.len()));
+    Ok(())
+}
+
+/// Upload one or more local files to an issue.
+pub async fn attach(
+    client: &JiraClient,
+    out: &OutputConfig,
+    key: &str,
+    files: &[PathBuf],
+) -> Result<(), ApiError> {
+    let uploaded = client.upload_attachments(key, files).await?;
+    let names: Vec<&str> = uploaded.iter().map(|a| a.filename.as_str()).collect();
+    out.print_result(
+        &serde_json::json!({
+            "issue": key,
+            "attachments": uploaded.iter().map(attachment_to_json).collect::<Vec<_>>(),
+        }),
+        &format!("Attached {} to {key}", names.join(", ")),
+    );
+    Ok(())
+}
+
+/// Download an attachment into `dir`, using the filename Jira reports for it.
+pub async fn download_attachment(
+    client: &JiraClient,
+    out: &OutputConfig,
+    id: &str,
+    dir: &Path,
+) -> Result<(), ApiError> {
+    let attachment = client.get_attachment(id).await?;
+    let file_name = safe_file_name(&attachment.filename).ok_or_else(|| {
+        ApiError::Other(format!(
+            "Attachment {id} has an unusable filename '{}'",
+            attachment.filename
+        ))
+    })?;
+
+    let data = client.download_attachment(id).await?;
+    let path = dir.join(file_name);
+    std::fs::write(&path, &data)
+        .map_err(|e| ApiError::Other(format!("cannot write {}: {e}", path.display())))?;
+
+    out.print_result(
+        &serde_json::json!({
+            "id": attachment.id,
+            "filename": file_name,
+            "path": path.display().to_string(),
+            "size": data.len(),
+        }),
+        &format!("Downloaded {file_name} to {}", path.display()),
+    );
+    Ok(())
+}
+
+/// Delete an attachment by its ID.
+pub async fn delete_attachment(
+    client: &JiraClient,
+    out: &OutputConfig,
+    id: &str,
+) -> Result<(), ApiError> {
+    client.delete_attachment(id).await?;
+    out.print_result(
+        &serde_json::json!({ "id": id, "deleted": true }),
+        &format!("Deleted attachment {id}"),
+    );
+    Ok(())
+}
+
 /// Transition all issues matching a JQL query to a new status.
 pub async fn bulk_transition(
     client: &JiraClient,
@@ -913,6 +1043,17 @@ pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
     })
 }
 
+fn attachment_to_json(a: &Attachment) -> serde_json::Value {
+    serde_json::json!({
+        "id": a.id,
+        "filename": a.filename,
+        "size": a.size,
+        "mimeType": a.mime_type,
+        "author": a.author(),
+        "created": a.created,
+    })
+}
+
 fn version_to_json(v: &Version) -> serde_json::Value {
     serde_json::json!({
         "id": v.id,
@@ -1123,6 +1264,39 @@ fn truncate(s: &str, max: usize) -> String {
 /// Shorten an ISO-8601 timestamp to just the date portion.
 fn format_date(s: &str) -> String {
     s.chars().take(10).collect()
+}
+
+/// Width of a table column: the widest cell, but never narrower than the
+/// column header, plus a two-space gap.
+fn col_width(header: &str, cells: impl Iterator<Item = usize>) -> usize {
+    cells.max().unwrap_or(0).max(header.len()) + 2
+}
+
+/// Render a byte count as a short human-readable size.
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Reduce a filename reported by Jira to a single path component, so a crafted
+/// attachment name cannot write outside the target directory.
+fn safe_file_name(filename: &str) -> Option<&str> {
+    let name = filename.rsplit(['/', '\\']).next()?;
+    if name.is_empty() || name == "." || name == ".." || name.contains(':') {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// Minimum width to clamp narrow terminals to, so fixed columns (key, status,

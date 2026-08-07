@@ -134,6 +134,32 @@ impl Comment {
     }
 }
 
+/// A file attached to an issue.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    #[serde(deserialize_with = "attachment_id")]
+    pub id: String,
+    pub filename: String,
+    pub size: u64,
+    pub mime_type: Option<String>,
+    pub author: Option<UserField>,
+    pub created: String,
+}
+
+impl Attachment {
+    pub fn mime_type(&self) -> &str {
+        self.mime_type.as_deref().unwrap_or("-")
+    }
+
+    pub fn author(&self) -> &str {
+        self.author
+            .as_ref()
+            .map(|a| a.display_name.as_str())
+            .unwrap_or("-")
+    }
+}
+
 /// A Jira user returned from the user search endpoint.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -524,6 +550,18 @@ fn collect_text(node: &serde_json::Value, buf: &mut String) {
 /// JQL escapes double quotes as `\"` inside a quoted string.
 pub fn escape_jql(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Read an attachment ID as a string: the `attachment/{id}` endpoint reports it
+/// as a number, the `attachment` field of an issue reports it as a string.
+fn attachment_id<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    match serde_json::Value::deserialize(de)? {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        other => Err(serde::de::Error::custom(format!(
+            "expected attachment id as string or number, got {other}"
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::ApiError;
 use super::AuthType;
@@ -199,6 +200,18 @@ impl JiraClient {
             return Err(Self::map_status(status.as_u16(), body_text));
         }
         Ok(())
+    }
+
+    /// Send a request whose response body is not JSON, mapping a non-success
+    /// status to an `ApiError` like the helpers above.
+    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
+        let resp = request.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_status(status.as_u16(), body));
+        }
+        Ok(resp)
     }
 
     // ── Issues ────────────────────────────────────────────────────────────────
@@ -619,6 +632,94 @@ impl JiraClient {
         }
     }
 
+    // ── Attachments ───────────────────────────────────────────────────────────
+
+    /// List the attachments on an issue.
+    pub async fn list_attachments(&self, key: &str) -> Result<Vec<Attachment>, ApiError> {
+        validate_issue_key(key)?;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            fields: AttachmentField,
+        }
+        #[derive(serde::Deserialize)]
+        struct AttachmentField {
+            #[serde(default)]
+            attachment: Vec<Attachment>,
+        }
+        let w: Wrapper = self.get(&format!("issue/{key}?fields=attachment")).await?;
+        Ok(w.fields.attachment)
+    }
+
+    /// Upload one or more local files to an issue.
+    ///
+    /// Jira rejects this endpoint unless the `X-Atlassian-Token: no-check`
+    /// header is present (XSRF protection) and every file is sent under the
+    /// multipart field name `file`.
+    pub async fn upload_attachments(
+        &self,
+        key: &str,
+        paths: &[PathBuf],
+    ) -> Result<Vec<Attachment>, ApiError> {
+        validate_issue_key(key)?;
+
+        let mut form = reqwest::multipart::Form::new();
+        for path in paths {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    ApiError::InvalidInput(format!(
+                        "'{}' does not name a file to upload",
+                        path.display()
+                    ))
+                })?
+                .to_string();
+            let content_type = mime_guess::from_path(&file_name).first_or_octet_stream();
+            let data = std::fs::read(path)
+                .map_err(|e| ApiError::Other(format!("cannot read {}: {e}", path.display())))?;
+            let part = reqwest::multipart::Part::bytes(data)
+                .file_name(file_name)
+                .mime_str(content_type.as_ref())
+                .map_err(|e| ApiError::Other(e.to_string()))?;
+            form = form.part("file", part);
+        }
+
+        let url = format!("{}/issue/{key}/attachments", self.base_url);
+        let request = self
+            .http
+            .post(&url)
+            .header("X-Atlassian-Token", "no-check")
+            .multipart(form);
+        let resp = self.send(request).await?;
+        resp.json::<Vec<Attachment>>().await.map_err(ApiError::Http)
+    }
+
+    /// Fetch the metadata of a single attachment.
+    pub async fn get_attachment(&self, id: &str) -> Result<Attachment, ApiError> {
+        validate_attachment_id(id)?;
+        self.get(&format!("attachment/{id}")).await
+    }
+
+    /// Download the binary content of an attachment.
+    ///
+    /// Jira answers with a redirect to the storage backend; reqwest follows it
+    /// and drops the `Authorization` header when the target is another origin.
+    pub async fn download_attachment(&self, id: &str) -> Result<Vec<u8>, ApiError> {
+        validate_attachment_id(id)?;
+        let url = format!("{}/attachment/content/{id}", self.base_url);
+        let resp = self.send(self.http.get(&url)).await?;
+        let bytes = resp.bytes().await.map_err(ApiError::Http)?;
+        Ok(bytes.to_vec())
+    }
+
+    /// Delete an attachment by its ID.
+    pub async fn delete_attachment(&self, id: &str) -> Result<(), ApiError> {
+        validate_attachment_id(id)?;
+        let url = format!("{}/attachment/{id}", self.base_url);
+        self.send(self.http.delete(&url)).await?;
+        Ok(())
+    }
+
     // ── Users ─────────────────────────────────────────────────────────────────
 
     /// Search for users matching a query string.
@@ -912,6 +1013,17 @@ fn validate_issue_key(key: &str) -> Result<(), ApiError> {
     } else {
         Err(ApiError::InvalidInput(format!(
             "Invalid issue key '{key}'. Expected format: PROJECT-123"
+        )))
+    }
+}
+
+/// Validate that an attachment ID is numeric before using it in a URL path.
+fn validate_attachment_id(id: &str) -> Result<(), ApiError> {
+    if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidInput(format!(
+            "Invalid attachment ID '{id}'. Expected a number."
         )))
     }
 }
