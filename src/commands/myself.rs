@@ -9,12 +9,17 @@ pub async fn show(client: &JiraClient, out: &OutputConfig) -> Result<(), ApiErro
             &serde_json::to_string_pretty(&serde_json::json!({
                 "accountId": me.account_id,
                 "displayName": me.display_name,
+                "email": me.email_address,
             }))
             .expect("failed to serialize JSON"),
         );
     } else {
         println!("Account ID:   {}", me.account_id);
         println!("Display name: {}", me.display_name);
+        println!(
+            "Email:        {}",
+            me.email_address.as_deref().unwrap_or("-")
+        );
     }
     Ok(())
 }

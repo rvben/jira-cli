@@ -627,7 +627,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     jira_cli::config::init(&out, cli.host.as_deref()).await;
                 }
                 ConfigCommand::Remove { profile } => {
-                    jira_cli::config::remove_profile(&profile);
+                    jira_cli::config::remove_profile(&out, &profile)?;
                 }
             }
             return Ok(());

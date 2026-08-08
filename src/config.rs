@@ -144,6 +144,17 @@ impl Config {
     }
 }
 
+/// Render the set of selectable profile names. An empty set is named
+/// explicitly, so a config with no named profiles never produces a message
+/// ending in a bare `Available:` that reads as a truncated list.
+fn format_available(names: &[&str]) -> String {
+    if names.is_empty() {
+        "none defined".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
 fn config_path() -> PathBuf {
     config_dir()
         .unwrap_or_else(|| PathBuf::from(".config"))
@@ -229,9 +240,9 @@ fn load_file_profile(profile: Option<&str>) -> Result<ProfileConfig, ApiError> {
             // BTreeMap gives sorted, deterministic output in error messages
             let available: Vec<&str> = raw.profiles.keys().map(String::as_str).collect();
             raw.profiles.get(&name).cloned().ok_or_else(|| {
-                ApiError::Other(format!(
-                    "Profile '{name}' not found in config. Available: {}",
-                    available.join(", ")
+                ApiError::NotFound(format!(
+                    "profile '{name}' in config. Available: {}",
+                    format_available(&available)
                 ))
             })
         }
@@ -747,45 +758,63 @@ fn write_profile_to_config(
 /// The "default" profile is removed by deleting the `[default]` section. Named profiles
 /// are removed from the `[profiles]` table. Prints a success or error message; does not
 /// write to stdout so it is safe in JSON mode.
-pub fn remove_profile(profile_name: &str) {
+pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiError> {
     let path = config_path();
 
     if !path.exists() {
-        eprintln!("No config file found at {}", path.display());
-        std::process::exit(crate::output::exit_codes::GENERAL_ERROR);
+        return Err(ApiError::NotFound(format!(
+            "config file at {}",
+            path.display()
+        )));
     }
 
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(&path)?;
-        let mut doc: toml::Value = toml::from_str(&content)?;
-        let root = doc.as_table_mut().ok_or("config is not a TOML table")?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ApiError::Other(format!("Failed to read config: {e}")))?;
+    let mut doc: toml::Value = toml::from_str(&content)
+        .map_err(|e| ApiError::Other(format!("Failed to parse config: {e}")))?;
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| ApiError::Other("config is not a TOML table".to_string()))?;
 
-        let removed = if profile_name == "default" {
-            root.remove("default").is_some()
-        } else {
-            root.get_mut("profiles")
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|t| t.remove(profile_name))
-                .is_some()
-        };
+    let removed = if profile_name == "default" {
+        root.remove("default").is_some()
+    } else {
+        root.get_mut("profiles")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|t| t.remove(profile_name))
+            .is_some()
+    };
 
-        if !removed {
-            return Err(format!("profile '{profile_name}' not found").into());
-        }
-
-        std::fs::write(&path, toml::to_string_pretty(&doc)?)?;
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            eprintln!("  {} Removed profile '{profile_name}'", sym_ok());
-        }
-        Err(e) => {
-            eprintln!("  {} {e}", sym_fail());
-            std::process::exit(crate::output::exit_codes::GENERAL_ERROR);
-        }
+    if !removed {
+        return Err(ApiError::NotFound(format!(
+            "profile '{profile_name}' in config. Available: {}",
+            format_available(&removable_profiles(root))
+        )));
     }
+
+    let serialized = toml::to_string_pretty(&doc)
+        .map_err(|e| ApiError::Other(format!("Failed to serialize config: {e}")))?;
+    std::fs::write(&path, serialized)
+        .map_err(|e| ApiError::Other(format!("Failed to write config: {e}")))?;
+
+    out.print_result(
+        &serde_json::json!({ "profile": profile_name, "removed": true }),
+        &format!("{} Removed profile '{profile_name}'", sym_ok()),
+    );
+    Ok(())
+}
+
+/// Names `config remove` accepts, in deterministic order: the `default`
+/// section when present, then each `[profiles.*]` key.
+fn removable_profiles(root: &toml::Table) -> Vec<&str> {
+    let mut names: Vec<&str> = Vec::new();
+    if root.contains_key("default") {
+        names.push("default");
+    }
+    if let Some(profiles) = root.get("profiles").and_then(toml::Value::as_table) {
+        names.extend(profiles.keys().map(String::as_str));
+    }
+    names
 }
 
 const PAT_PATH: &str = "/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens";
@@ -1226,7 +1255,11 @@ token = "alpha-tok"
         let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
         let err = Config::load(None, None, Some("nonexistent".into())).unwrap_err();
-        assert!(matches!(err, ApiError::Other(_)));
+        assert!(
+            matches!(err, ApiError::NotFound(_)),
+            "selecting a profile that is not in the config is a not_found condition, \
+             not an unexpected error: {err:?}"
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("nonexistent"),
@@ -1400,7 +1433,7 @@ token = "supersecrettoken"
         .unwrap();
 
         let _config_dir = set_config_dir_env(dir.path());
-        remove_profile("default");
+        remove_profile(&OutputConfig::new(true, false, true), "default").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.contains("[default]"));
@@ -1419,7 +1452,7 @@ token = "supersecrettoken"
         .unwrap();
 
         let _config_dir = set_config_dir_env(dir.path());
-        remove_profile("work");
+        remove_profile(&OutputConfig::new(true, false, true), "work").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1444,7 +1477,7 @@ token = "supersecrettoken"
         .unwrap();
 
         let _config_dir = set_config_dir_env(dir.path());
-        remove_profile("staging");
+        remove_profile(&OutputConfig::new(true, false, true), "staging").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(

@@ -394,6 +394,9 @@ pub struct Myself {
     #[serde(alias = "name")]
     pub account_id: String,
     pub display_name: String,
+    /// Absent when the account's email is private, which Jira Cloud applies by
+    /// default. A missing field deserializes to `None`, never an empty string.
+    pub email_address: Option<String>,
 }
 
 /// Fields for creating a new issue.

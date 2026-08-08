@@ -134,6 +134,146 @@ fn config_show_invalid_config_returns_input_exit_code() {
     assert!(stderr.contains("No Jira host configured"));
 }
 
+/// Parse the structured error envelope, which the CLI writes as the last line
+/// of stderr. Panics with the raw stderr if no line parses as an envelope.
+fn error_envelope(stderr: &str) -> serde_json::Value {
+    stderr
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v.get("error").is_some())
+        .unwrap_or_else(|| panic!("no error envelope on stderr, got:\n{stderr}"))
+}
+
+#[test]
+fn config_remove_emits_declared_json_contract() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    let path = write_config(
+        dir.path(),
+        "[default]\nhost = \"first.atlassian.net\"\ntoken = \"tok1\"\n\n\
+         [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n",
+    )
+    .unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["config", "remove", "work"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "removal must succeed");
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be JSON when piped, got {:?}: {e}",
+            output.stdout
+        )
+    });
+
+    // Exactly the fields `jira schema` declares for `config remove`.
+    assert_eq!(json["profile"], "work");
+    assert_eq!(json["removed"], true);
+    let keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["profile", "removed"], "output must match schema");
+
+    // The JSON must not lie about what happened on disk.
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(!content.contains("work.atlassian.net"), "work must be gone");
+    assert!(content.contains("first.atlassian.net"), "default preserved");
+}
+
+#[test]
+fn config_remove_missing_profile_is_not_found() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        "[default]\nhost = \"first.atlassian.net\"\ntoken = \"tok1\"\n\n\
+         [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n",
+    )
+    .unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["config", "remove", "nosuchprofile"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::NOT_FOUND));
+    assert!(output.stdout.is_empty(), "no data on stdout for a failure");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let envelope = error_envelope(&stderr);
+    assert_eq!(envelope["error"]["kind"], "not_found");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("nosuchprofile"),
+        "names the profile asked for"
+    );
+    assert!(
+        message.contains("work"),
+        "lists what is available: {message}"
+    );
+}
+
+#[test]
+fn unknown_profile_selection_is_not_found() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    write_config(dir.path(), config_fixture()).unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+    let _host = EnvVarGuard::unset("JIRA_HOST");
+    let _email = EnvVarGuard::unset("JIRA_EMAIL");
+    let _token = EnvVarGuard::unset("JIRA_TOKEN");
+    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["--profile", "nosuchprofile", "config", "show"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::NOT_FOUND));
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let envelope = error_envelope(&stderr);
+    assert_eq!(envelope["error"]["kind"], "not_found");
+}
+
+#[test]
+fn unknown_profile_with_no_named_profiles_does_not_render_an_empty_list() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    // `config_fixture` defines [default] only, so there are no named profiles.
+    write_config(dir.path(), config_fixture()).unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["--profile", "nosuchprofile", "config", "show"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let message = error_envelope(&stderr)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !message.trim_end().ends_with("Available:"),
+        "an empty profile list must not be rendered as a value: {message}"
+    );
+}
+
 #[test]
 fn completions_install_powershell_returns_input_error() {
     let output = Command::cargo_bin("jira")
@@ -175,6 +315,63 @@ fn run_jira_against(server: &MockServer, args: &[&str]) -> std::process::Output 
         .env("NO_COLOR", "1")
         .output()
         .unwrap()
+}
+
+#[tokio::test]
+async fn myself_emits_the_email_field_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "user-abc-123",
+            "displayName": "Test User",
+            "emailAddress": "test@example.com"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["myself", "--json"]);
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["accountId"], "user-abc-123");
+    assert_eq!(json["displayName"], "Test User");
+    assert_eq!(
+        json["email"], "test@example.com",
+        "schema declares `email`, so it must be emitted"
+    );
+}
+
+#[tokio::test]
+async fn myself_renders_a_withheld_email_as_null_rather_than_dropping_it() {
+    let server = MockServer::start().await;
+
+    // Jira omits emailAddress entirely when the account's email is private.
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "user-private-456",
+            "displayName": "Private User"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["myself", "--json"]);
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let obj = json.as_object().unwrap();
+    assert!(
+        obj.contains_key("email"),
+        "a withheld email must still appear as a key, not vanish: {json}"
+    );
+    assert!(
+        json["email"].is_null(),
+        "a withheld email must be null, never an empty string: {json}"
+    );
 }
 
 #[tokio::test]
