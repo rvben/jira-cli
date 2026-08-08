@@ -6,9 +6,11 @@ build:
 release:
 	cargo build --release
 
+# Every test target except e2e, which needs live Jira credentials. Selecting by
+# exclusion means a new test file is covered the moment it is added; naming the
+# included targets instead is how tests/cli.rs went unrun.
 test:
-	cargo nextest run --test integration
-	cargo nextest run --lib --bin jira
+	cargo nextest run -E 'not binary(e2e)'
 
 # Run end-to-end tests against a real Jira instance.
 # Requires: JIRA_E2E_HOST, JIRA_E2E_EMAIL, JIRA_E2E_TOKEN
