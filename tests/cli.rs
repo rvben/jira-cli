@@ -773,6 +773,116 @@ async fn issues_download_attachment_with_non_numeric_id_is_rejected_before_any_r
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+/// An existing target file makes `download-attachment` exit with code 7 and
+/// an error envelope of kind `conflict` naming the path, and nothing is
+/// printed to stdout. Only the metadata request is expected to reach the
+/// server — the content endpoint must not be hit once the local file check
+/// refuses the download.
+#[tokio::test]
+async fn issues_download_attachment_without_force_exits_conflict_and_reports_kind() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+    let target = dest.path().join("report.pdf");
+    std::fs::write(&target, b"original bytes").unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(attachment_json(
+            "10001",
+            "report.pdf",
+            4,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "download-attachment",
+            "10001",
+            "--dir",
+            dest.path().to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(exit_codes::CONFLICT));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay clean on refusal; got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let last_line = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("stderr must not be empty");
+    let envelope: serde_json::Value = serde_json::from_str(last_line)
+        .unwrap_or_else(|_| panic!("last stderr line must be a JSON error envelope: {last_line}"));
+    assert_eq!(envelope["error"]["kind"], "conflict");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&target.display().to_string()),
+        "conflict message must name the path; got: {message}"
+    );
+
+    assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+}
+
+/// `--force` overwrites an existing target file reached through the CLI.
+#[tokio::test]
+async fn issues_download_attachment_force_overwrites_via_cli() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+    let target = dest.path().join("report.pdf");
+    std::fs::write(&target, b"original bytes").unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(attachment_json(
+            "10001",
+            "report.pdf",
+            4,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new data".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "download-attachment",
+            "10001",
+            "--dir",
+            dest.path().to_str().unwrap(),
+            "--force",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"new data");
+}
+
 #[tokio::test]
 async fn issues_attachments_text_table_renders_sizes_at_unit_boundaries() {
     let cases = [

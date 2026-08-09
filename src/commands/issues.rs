@@ -602,11 +602,15 @@ pub async fn attach(
 }
 
 /// Download an attachment into `dir`, using the filename Jira reports for it.
+///
+/// The directory is created and the target checked for an existing file before
+/// any content is fetched, so a refusal never happens after the download.
 pub async fn download_attachment(
     client: &JiraClient,
     out: &OutputConfig,
     id: &str,
     dir: &Path,
+    force: bool,
 ) -> Result<(), ApiError> {
     let attachment = client.get_attachment(id).await?;
     let file_name = safe_file_name(&attachment.filename).ok_or_else(|| {
@@ -616,8 +620,18 @@ pub async fn download_attachment(
         ))
     })?;
 
-    let data = client.download_attachment(id).await?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| ApiError::Other(format!("cannot create {}: {e}", dir.display())))?;
+
     let path = dir.join(file_name);
+    if !force && path.exists() {
+        return Err(ApiError::Conflict(format!(
+            "{} already exists. Pass --force to overwrite.",
+            path.display()
+        )));
+    }
+
+    let data = client.download_attachment(id).await?;
     std::fs::write(&path, &data)
         .map_err(|e| ApiError::Other(format!("cannot write {}: {e}", path.display())))?;
 

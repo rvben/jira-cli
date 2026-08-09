@@ -25,6 +25,8 @@ pub enum ApiError {
     NotFound(String),
     /// Invalid user input (bad key format, missing required value, etc.).
     InvalidInput(String),
+    /// The operation would overwrite something that already exists.
+    Conflict(String),
     /// HTTP 429 rate limit.
     RateLimit,
     /// Non-2xx response from the Jira API.
@@ -44,6 +46,7 @@ impl fmt::Display for ApiError {
             ),
             ApiError::NotFound(msg) => write!(f, "Not found: {msg}"),
             ApiError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
+            ApiError::Conflict(msg) => write!(f, "Conflict: {msg}"),
             ApiError::RateLimit => write!(f, "Rate limited by Jira. Please wait and try again."),
             ApiError::Api { status, message } => write!(f, "API error {status}: {message}"),
             ApiError::Http(e) => write!(f, "HTTP error: {e}"),

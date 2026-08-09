@@ -460,9 +460,13 @@ enum IssuesCommand {
         /// Attachment ID (shown in `issues attachments` output)
         id: String,
 
-        /// Directory to write the file into
+        /// Directory to write the file into (created if missing)
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
+
+        /// Overwrite the target file if it already exists
+        #[arg(long)]
+        force: bool,
     },
 
     /// Delete an attachment by ID
@@ -623,6 +627,7 @@ fn error_kind_and_message(err: &(dyn std::error::Error + 'static)) -> (&'static 
             ApiError::Auth(_) => "auth",
             ApiError::NotFound(_) => "not_found",
             ApiError::InvalidInput(_) => "invalid_input",
+            ApiError::Conflict(_) => "conflict",
             ApiError::RateLimit => "rate_limit",
             ApiError::Api { .. } => "api_error",
             ApiError::Http(_) | ApiError::Other(_) => "unexpected_error",
@@ -889,8 +894,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             IssuesCommand::Attach { key, file } => {
                 commands::issues::attach(&client, &out, &key, &file).await?
             }
-            IssuesCommand::DownloadAttachment { id, dir } => {
-                commands::issues::download_attachment(&client, &out, &id, &dir).await?
+            IssuesCommand::DownloadAttachment { id, dir, force } => {
+                commands::issues::download_attachment(&client, &out, &id, &dir, force).await?
             }
             IssuesCommand::DeleteAttachment { id } => {
                 commands::issues::delete_attachment(&client, &out, &id).await?
@@ -1438,6 +1443,7 @@ fn schema_json() -> serde_json::Value {
             {"kind": "auth", "exit_code": 3, "retryable": false, "description": "Authentication failed - bad or missing credentials"},
             {"kind": "not_found", "exit_code": 4, "retryable": false, "description": "Requested resource does not exist"},
             {"kind": "invalid_input", "exit_code": 2, "retryable": false, "description": "Bad user input or config error"},
+            {"kind": "conflict", "exit_code": 7, "retryable": false, "description": "Target already exists - pass --force to overwrite"},
             {"kind": "confirmation_required", "exit_code": 2, "retryable": false, "description": "Destructive operation requires explicit confirmation (--yes)"},
             {"kind": "rate_limit", "exit_code": 6, "retryable": true, "description": "Rate limited by Jira - wait and retry"},
             {"kind": "api_error", "exit_code": 5, "retryable": false, "description": "Non-2xx response from the Jira API"},
@@ -1829,6 +1835,10 @@ mod tests {
         assert!(
             kinds.contains(&"not_found"),
             "errors must include not_found kind"
+        );
+        assert!(
+            kinds.contains(&"conflict"),
+            "errors must include conflict kind (Principle 5: Idempotent Operations)"
         );
     }
 

@@ -102,6 +102,8 @@ pub mod exit_codes {
     pub const API_ERROR: i32 = 5;
     /// Rate limited by Jira.
     pub const RATE_LIMIT: i32 = 6;
+    /// Operation would overwrite an existing resource.
+    pub const CONFLICT: i32 = 7;
 }
 
 /// Map an error to a specific exit code by downcasting to ApiError.
@@ -111,6 +113,7 @@ pub fn exit_code_for_error(err: &(dyn std::error::Error + 'static)) -> i32 {
             crate::api::ApiError::Auth(_) => exit_codes::AUTH_ERROR,
             crate::api::ApiError::NotFound(_) => exit_codes::NOT_FOUND,
             crate::api::ApiError::InvalidInput(_) => exit_codes::INPUT_ERROR,
+            crate::api::ApiError::Conflict(_) => exit_codes::CONFLICT,
             crate::api::ApiError::RateLimit => exit_codes::RATE_LIMIT,
             crate::api::ApiError::Api { .. } => exit_codes::API_ERROR,
             crate::api::ApiError::Http(_) | crate::api::ApiError::Other(_) => {

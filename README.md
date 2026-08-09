@@ -163,6 +163,7 @@ jira issues log-work MYAPP-123 --time-spent 30m --comment "Fixed the flaky test"
 jira issues attachments MYAPP-123
 jira issues attach MYAPP-123 --file ./design.png --file ./spec.pdf
 jira issues download-attachment 10042 --dir ./downloads
+jira issues download-attachment 10042 --dir ./downloads --force  # overwrite an existing file
 jira issues delete-attachment 10042
 
 # Links
@@ -281,6 +282,7 @@ Any agent that supports environment variable configuration can use the same appr
 | 4 | Resource not found |
 | 5 | Jira API error |
 | 6 | Rate limited |
+| 7 | Target already exists (pass `--force` to overwrite) |
 
 ## Output flags
 
