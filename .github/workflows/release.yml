@@ -29,9 +29,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.11
         with:
           tool: nextest
       - run: cargo check --locked
@@ -56,7 +56,7 @@ jobs:
             os: [self-hosted, macOS, ARM64]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Preserve target/ between runs on self-hosted runners for cargo
           # incremental rebuild. GitHub-hosted runners start clean each job
@@ -94,7 +94,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Install uv
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v9.0.0
       - name: Install maturin and zig
         # maturin-action provides its own maturin inside the manylinux
         # container for the arm64 linux build, so skip the host install
@@ -108,7 +108,7 @@ jobs:
           echo "${RUNNER_TEMP}/build-venv/bin" >> "$GITHUB_PATH"
       - name: Build wheel (arm64 linux via maturin-action)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.51.0
         with:
           target: aarch64-unknown-linux-gnu
           args: --release --out dist
@@ -159,7 +159,7 @@ jobs:
           cp "${BIN_PATH}" "${ARCHIVE_NAME}/"
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -171,8 +171,8 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Install maturin
         shell: bash
         run: |
@@ -181,7 +181,7 @@ jobs:
           echo "${RUNNER_TEMP}/build-venv/bin" >> "$GITHUB_PATH"
       - name: Build sdist
         run: maturin sdist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: target/wheels/*.tar.gz
@@ -190,8 +190,8 @@ jobs:
     needs: [build, sdist]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/artifacts
       - uses: dtolnay/rust-toolchain@stable
@@ -213,7 +213,7 @@ jobs:
         run: echo "Skipping crates.io publishing as requested"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v9.0.0
 
       - name: Publish to PyPI
         # actions/upload-artifact preserves the `dist/` prefix from the build
@@ -246,7 +246,7 @@ jobs:
     if: ${{ inputs.dry_run != true }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/artifacts
 
