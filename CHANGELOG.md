@@ -4,23 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.16](https://github.com/rvben/jira-cli/compare/v0.3.15...v0.3.16) - 2026-08-09
 
+### Fixed
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- **errors**: make declared error kinds reachable and stderr single-format ([400250b](https://github.com/rvben/jira-cli/commit/400250bb725ada3338da3d0905549c764f5ccfed))
+- emit the JSON output and error kinds that schema declares ([5435ed1](https://github.com/rvben/jira-cli/commit/5435ed1d56700fc57a94116c28437dc6eeacd3e7))
 
 ## [0.3.15](https://github.com/rvben/jira-cli/compare/v0.3.14...v0.3.15) - 2026-06-20
 
