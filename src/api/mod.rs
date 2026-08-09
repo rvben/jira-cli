@@ -31,9 +31,10 @@ pub enum ApiError {
     ConfirmationRequired(String),
     /// HTTP 429 rate limit.
     RateLimit,
-    /// HTTP 409: the request conflicts with the resource's current state.
-    /// Retrying unchanged reproduces the conflict, so the caller has to resolve
-    /// it first.
+    /// The request conflicts with the current state of something it would
+    /// change: an HTTP 409 from Jira, or a local file the command would
+    /// overwrite. Retrying unchanged reproduces the conflict, so the caller has
+    /// to resolve it first.
     Conflict(String),
     /// Non-2xx response from the Jira API.
     Api { status: u16, message: String },

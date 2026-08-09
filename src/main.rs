@@ -461,9 +461,13 @@ enum IssuesCommand {
         /// Attachment ID (shown in `issues attachments` output)
         id: String,
 
-        /// Directory to write the file into
+        /// Directory to write the file into (created if missing)
         #[arg(long, default_value = ".")]
         dir: std::path::PathBuf,
+
+        /// Overwrite the target file if it already exists
+        #[arg(long)]
+        force: bool,
     },
 
     /// Delete an attachment by ID
@@ -894,8 +898,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             IssuesCommand::Attach { key, file } => {
                 commands::issues::attach(&client, &out, &key, &file).await?
             }
-            IssuesCommand::DownloadAttachment { id, dir } => {
-                commands::issues::download_attachment(&client, &out, &id, &dir).await?
+            IssuesCommand::DownloadAttachment { id, dir, force } => {
+                commands::issues::download_attachment(&client, &out, &id, &dir, force).await?
             }
             IssuesCommand::DeleteAttachment { id } => {
                 commands::issues::delete_attachment(&client, &out, &id).await?
@@ -1834,6 +1838,10 @@ mod tests {
         assert!(
             kinds.contains(&"not_found"),
             "errors must include not_found kind"
+        );
+        assert!(
+            kinds.contains(&"conflict"),
+            "errors must include conflict kind (Principle 5: Idempotent Operations)"
         );
     }
 

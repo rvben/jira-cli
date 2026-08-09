@@ -4418,9 +4418,14 @@ async fn download_attachment_command_reduces_reported_filename_to_a_basename() {
 
         let client = test_client(&server);
         let out = json_out();
-        let result =
-            jira_cli::commands::issues::download_attachment(&client, &out, &id_str, dest.path())
-                .await;
+        let result = jira_cli::commands::issues::download_attachment(
+            &client,
+            &out,
+            &id_str,
+            dest.path(),
+            false,
+        )
+        .await;
 
         let entries: Vec<_> = std::fs::read_dir(dest.path())
             .unwrap()
@@ -4444,4 +4449,184 @@ async fn download_attachment_command_reduces_reported_filename_to_a_basename() {
             }
         }
     }
+}
+
+/// A local file already at the download target must be left byte-for-byte
+/// untouched when the download is refused, and the refusal must surface as
+/// `ApiError::Conflict` (exit code 7, kind `conflict`) naming the path. Only
+/// the metadata request is expected to reach the server — a local conflict
+/// must be detected before the attachment content is fetched.
+#[tokio::test]
+async fn download_attachment_refuses_existing_file_and_leaves_it_untouched() {
+    use jira_cli::output::{exit_code_for_error, exit_codes};
+
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+    let target = dest.path().join("report.pdf");
+    std::fs::write(&target, b"original bytes").unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(attachment_response(
+                serde_json::json!("10001"),
+                "report.pdf",
+                4,
+            )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let out = json_out();
+    let err =
+        jira_cli::commands::issues::download_attachment(&client, &out, "10001", dest.path(), false)
+            .await
+            .unwrap_err();
+
+    match &err {
+        ApiError::Conflict(msg) => {
+            assert!(
+                msg.contains(&target.display().to_string()),
+                "conflict message must name the path; got: {msg}"
+            );
+        }
+        other => panic!("expected ApiError::Conflict, got: {other:?}"),
+    }
+    assert_eq!(exit_code_for_error(&err), exit_codes::CONFLICT);
+    assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+}
+
+/// `--force` (`force = true`) overwrites an existing target file.
+#[tokio::test]
+async fn download_attachment_force_replaces_existing_file() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+    let target = dest.path().join("report.pdf");
+    std::fs::write(&target, b"original bytes").unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(attachment_response(
+                serde_json::json!("10001"),
+                "report.pdf",
+                4,
+            )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new data".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let out = json_out();
+    jira_cli::commands::issues::download_attachment(&client, &out, "10001", dest.path(), true)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&target).unwrap(), b"new data");
+}
+
+/// A missing `--dir`, including several nested levels that don't exist yet,
+/// is created before the attachment content is fetched.
+#[tokio::test]
+async fn download_attachment_creates_missing_dir_recursively() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+    let nested = dest.path().join("a").join("b").join("c");
+    assert!(!nested.exists(), "nested dir must not exist yet");
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(attachment_response(
+                serde_json::json!("10001"),
+                "report.pdf",
+                4,
+            )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let out = json_out();
+    jira_cli::commands::issues::download_attachment(&client, &out, "10001", &nested, false)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(nested.join("report.pdf")).unwrap(), b"data");
+}
+
+/// A `--dir` that points at something that already exists but is not a
+/// directory (here, a regular file) must fail as an ordinary error rather
+/// than a conflict — the conflict kind is reserved for an existing *target
+/// file*, not an unusable directory. No content request must be made, since
+/// the failure happens while establishing the target directory.
+#[tokio::test]
+async fn download_attachment_dir_that_is_a_file_is_an_ordinary_error_not_conflict() {
+    let server = MockServer::start().await;
+    let dest = TempDir::new().unwrap();
+    let not_a_dir = dest.path().join("not-a-directory");
+    std::fs::write(&not_a_dir, b"i am a file").unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10001"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(attachment_response(
+                serde_json::json!("10001"),
+                "report.pdf",
+                4,
+            )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/content/10001"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let out = json_out();
+    let err =
+        jira_cli::commands::issues::download_attachment(&client, &out, "10001", &not_a_dir, false)
+            .await
+            .unwrap_err();
+
+    assert!(
+        matches!(err, ApiError::Other(_)),
+        "expected ApiError::Other, got: {err:?}"
+    );
+    assert_eq!(std::fs::read(&not_a_dir).unwrap(), b"i am a file");
+}
+
+// ── invalid input exit code (continued) ───────────────────────────────────────
+
+#[test]
+fn conflicting_download_maps_to_conflict_exit_code() {
+    use jira_cli::output::{exit_code_for_error, exit_codes};
+    let err = ApiError::Conflict("/tmp/report.pdf already exists".into());
+    assert_eq!(exit_code_for_error(&err), exit_codes::CONFLICT);
 }
