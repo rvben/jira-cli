@@ -4,3 +4,6 @@ CLAUDE.local.md
 AGENTS.md
 docker/backup/
 .claude/investigations/
+.claude/plans/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
