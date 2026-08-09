@@ -25,8 +25,16 @@ pub enum ApiError {
     NotFound(String),
     /// Invalid user input (bad key format, missing required value, etc.).
     InvalidInput(String),
+    /// A destructive operation was refused because it was not explicitly
+    /// confirmed. Distinct from `InvalidInput` because the command line was
+    /// well formed: adding `--yes` makes the identical request succeed.
+    ConfirmationRequired(String),
     /// HTTP 429 rate limit.
     RateLimit,
+    /// HTTP 409: the request conflicts with the resource's current state.
+    /// Retrying unchanged reproduces the conflict, so the caller has to resolve
+    /// it first.
+    Conflict(String),
     /// Non-2xx response from the Jira API.
     Api { status: u16, message: String },
     /// Network / TLS error.
@@ -44,7 +52,9 @@ impl fmt::Display for ApiError {
             ),
             ApiError::NotFound(msg) => write!(f, "Not found: {msg}"),
             ApiError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
+            ApiError::ConfirmationRequired(msg) => write!(f, "Confirmation required: {msg}"),
             ApiError::RateLimit => write!(f, "Rate limited by Jira. Please wait and try again."),
+            ApiError::Conflict(msg) => write!(f, "Conflict: {msg}"),
             ApiError::Api { status, message } => write!(f, "API error {status}: {message}"),
             ApiError::Http(e) => write!(f, "HTTP error: {e}"),
             ApiError::Other(msg) => write!(f, "{msg}"),
@@ -144,7 +154,31 @@ mod tests {
         assert!(ApiError::Auth("x".into()).source().is_none());
         assert!(ApiError::NotFound("x".into()).source().is_none());
         assert!(ApiError::InvalidInput("x".into()).source().is_none());
+        assert!(
+            ApiError::ConfirmationRequired("x".into())
+                .source()
+                .is_none()
+        );
         assert!(ApiError::RateLimit.source().is_none());
+        assert!(ApiError::Conflict("x".into()).source().is_none());
         assert!(ApiError::Other("x".into()).source().is_none());
+    }
+
+    #[test]
+    fn conflict_error_display_includes_message() {
+        let err = ApiError::Conflict("issue was edited by someone else".into());
+        let msg = err.to_string();
+        assert!(msg.contains("Conflict"));
+        assert!(msg.contains("issue was edited by someone else"));
+    }
+
+    /// The refusal names the flag that resolves it, so the caller does not have
+    /// to guess how to proceed.
+    #[test]
+    fn confirmation_required_display_names_the_remedy() {
+        let err = ApiError::ConfirmationRequired("bulk-assign requires --yes".into());
+        let msg = err.to_string();
+        assert!(msg.contains("Confirmation required"));
+        assert!(msg.contains("--yes"));
     }
 }

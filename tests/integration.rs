@@ -3754,6 +3754,43 @@ async fn search_429_returns_rate_limit_error() {
     );
 }
 
+/// Jira answers 409 when a request contradicts the resource's current state,
+/// for instance a transition another writer has already applied. That is not a
+/// generic API error: retrying it unchanged reproduces it, so it gets its own
+/// kind and exit code for an agent to branch on.
+#[tokio::test]
+async fn transition_409_returns_conflict_error() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "errorMessages": ["The issue is not in a state that allows this transition."]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let err = client.do_transition("PROJ-1", "31").await.unwrap_err();
+
+    assert!(
+        matches!(err, ApiError::Conflict(_)),
+        "409 must map to ApiError::Conflict, got: {err}"
+    );
+    assert_eq!(
+        jira_cli::output::exit_code_for_error(&err),
+        jira_cli::output::exit_codes::CONFLICT
+    );
+    assert_eq!(jira_cli::output::contract_for(&err).kind, "conflict");
+}
+
+/// A conflict is not retryable, so an agent looping on it would spin forever.
+#[tokio::test]
+async fn conflict_is_declared_non_retryable() {
+    let err = ApiError::Conflict("already transitioned".into());
+    assert!(!jira_cli::output::contract_for(&err).retryable);
+}
+
 #[tokio::test]
 async fn create_issue_422_returns_api_error_with_status() {
     let server = MockServer::start().await;

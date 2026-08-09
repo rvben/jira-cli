@@ -128,6 +128,7 @@ impl JiraClient {
         match status {
             401 | 403 => ApiError::Auth(message),
             404 => ApiError::NotFound(message),
+            409 => ApiError::Conflict(message),
             429 => ApiError::RateLimit,
             _ => ApiError::Api { status, message },
         }
@@ -1013,6 +1014,7 @@ fn default_status_message(status: u16) -> String {
     match status {
         401 | 403 => "request unauthorized".into(),
         404 => "resource not found".into(),
+        409 => "conflicts with the current state of the resource".into(),
         429 => "rate limited by Jira".into(),
         400..=499 => format!("request failed with status {status}"),
         _ => format!("Jira request failed with status {status}"),

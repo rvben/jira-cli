@@ -134,15 +134,19 @@ fn config_show_invalid_config_returns_input_exit_code() {
     assert!(stderr.contains("No Jira host configured"));
 }
 
-/// Parse the structured error envelope, which the CLI writes as the last line
-/// of stderr. Panics with the raw stderr if no line parses as an envelope.
+/// Parse the structured error envelope. In machine-readable mode the whole of
+/// stderr is the envelope and nothing else, so a caller can pipe stderr
+/// straight into a JSON parser. Locating the envelope by line would accept a
+/// stray prose line alongside it, which is the defect this asserts against.
 fn error_envelope(stderr: &str) -> serde_json::Value {
-    stderr
-        .lines()
-        .rev()
-        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|v| v.get("error").is_some())
-        .unwrap_or_else(|| panic!("no error envelope on stderr, got:\n{stderr}"))
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("the whole of stderr must parse as one JSON error envelope ({e}), got:\n{stderr}")
+    });
+    assert!(
+        envelope.get("error").is_some(),
+        "envelope needs an `error` key, got: {envelope}"
+    );
+    envelope
 }
 
 #[test]
@@ -612,18 +616,169 @@ fn unrecognized_subcommand_emits_error_envelope() {
     assert!(!output.status.success());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let last_line = stderr
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .expect("stderr must not be empty");
+    let envelope = error_envelope(&stderr);
 
-    let envelope: serde_json::Value = serde_json::from_str(last_line).unwrap_or_else(|_| {
-        panic!("last line of stderr must be a JSON error envelope; got: {last_line:?}")
-    });
-
+    assert_eq!(envelope["error"]["kind"], "invalid_input");
+    // Clap's suggestion is the most useful part of a usage error, so routing the
+    // error through the envelope has to carry it rather than drop it.
+    let message = envelope["error"]["message"].as_str().unwrap();
     assert!(
-        envelope["error"]["kind"].as_str().is_some(),
-        "error envelope must contain a 'kind' field; got: {envelope}"
+        message.contains("__no_such_subcommand__"),
+        "envelope must carry clap's own message; got: {message}"
     );
+}
+
+/// `--help` and `--version` are clap "errors" that exit 0. Successful output
+/// must not carry an error envelope, or an agent that treats any envelope on
+/// stderr as a failure reads a working `--help` as a broken one.
+#[test]
+fn help_is_success_output_with_a_silent_stderr() {
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::SUCCESS));
+    assert!(
+        output.stderr.is_empty(),
+        "--help must not write to stderr, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage:"), "help goes to stdout: {stdout}");
+}
+
+#[test]
+fn version_is_success_output_with_a_silent_stderr() {
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::SUCCESS));
+    assert!(
+        output.stderr.is_empty(),
+        "--version must not write to stderr, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("jira "));
+}
+
+/// The whole of stderr is the envelope in machine mode. Emitting a prose line
+/// beside it makes `2>&1 | jq` fail on the prose, which is the whole reason an
+/// agent has a structured envelope to read.
+#[test]
+fn machine_mode_stderr_is_only_the_envelope() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+    let _host = EnvVarGuard::unset("JIRA_HOST");
+    let _email = EnvVarGuard::unset("JIRA_EMAIL");
+    let _token = EnvVarGuard::unset("JIRA_TOKEN");
+    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["--json", "issues", "show", "PROJ-1"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let envelope = error_envelope(&stderr);
+    assert_eq!(envelope["error"]["kind"], "invalid_input");
+    assert!(
+        !stderr.contains("Error:"),
+        "the prose rendering must not accompany the envelope, got:\n{stderr}"
+    );
+}
+
+/// The mirror image: a human asking for text gets prose, not a JSON blob.
+#[test]
+fn text_mode_stderr_is_only_prose() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+    let _host = EnvVarGuard::unset("JIRA_HOST");
+    let _email = EnvVarGuard::unset("JIRA_EMAIL");
+    let _token = EnvVarGuard::unset("JIRA_TOKEN");
+    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["-o", "text", "issues", "show", "PROJ-1"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("No Jira host configured"),
+        "text mode explains the failure in prose, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("\"error\""),
+        "text mode must not emit the JSON envelope, got:\n{stderr}"
+    );
+}
+
+/// A usage error in text mode keeps clap's own rendering, including its
+/// suggestion, rather than being replaced by JSON.
+#[test]
+fn text_mode_usage_error_keeps_clap_prose() {
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args(["-o", "text", "__no_such_subcommand__"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized subcommand"), "got:\n{stderr}");
+    assert!(
+        !stderr.contains("\"error\""),
+        "text mode must not emit the JSON envelope, got:\n{stderr}"
+    );
+}
+
+/// Refusing an unconfirmed destructive bulk operation is its own failure mode:
+/// the command line was well formed and re-running it with `--yes` succeeds,
+/// which is a different recovery from fixing malformed input. The schema has
+/// declared this kind since v0.3; this asserts the binary can actually emit it.
+#[test]
+fn bulk_transition_without_yes_reports_confirmation_required() {
+    let _env = ProcessEnvLock::acquire().unwrap();
+    let dir = TempDir::new().unwrap();
+    write_config(dir.path(), config_fixture()).unwrap();
+    let _config_dir = set_config_dir_env(dir.path());
+    let _host = EnvVarGuard::unset("JIRA_HOST");
+    let _email = EnvVarGuard::unset("JIRA_EMAIL");
+    let _token = EnvVarGuard::unset("JIRA_TOKEN");
+    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+    // stdin is a pipe under `output()`, so the confirmation cannot be prompted
+    // for and the command must refuse instead of proceeding.
+    let output = Command::cargo_bin("jira")
+        .unwrap()
+        .args([
+            "--json",
+            "issues",
+            "bulk-transition",
+            "--jql",
+            "project = TST",
+            "--to",
+            "Done",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let envelope = error_envelope(&stderr);
+    assert_eq!(
+        envelope["error"]["kind"], "confirmation_required",
+        "refusing for want of --yes is not a malformed-input error"
+    );
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
 }

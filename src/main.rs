@@ -3,10 +3,11 @@
 use jira_cli::api::{ApiError, IssueDraft, IssueUpdate, JiraClient};
 use jira_cli::commands;
 use jira_cli::config::Config;
-use jira_cli::output::{OutputConfig, exit_code_for_error};
+use jira_cli::output::{OutputConfig, exit_codes, machine_readable_errors};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use std::io::IsTerminal;
 
 /// Parse a comma-separated `--fields` argument into a list of field names.
 fn parse_fields_arg(s: &str) -> Vec<String> {
@@ -561,12 +562,26 @@ async fn main() {
         Ok(cli) => cli,
         Err(e) => {
             // Clap handles usage errors (unrecognized subcommands, bad flags, etc.)
-            // before any Rust code runs. Print the clap message, then append the
-            // structured error envelope so consumers can branch on `kind` without
-            // parsing prose.
+            // before any Rust code runs, so the output mode has to be recovered
+            // from the raw arguments.
             let msg = e.to_string();
-            e.print().unwrap_or_else(|_| eprintln!("{msg}"));
-            jira_cli::output::print_error_envelope("invalid_input", &msg);
+            if e.exit_code() == exit_codes::SUCCESS {
+                // `--help` and `--version` surface as clap errors that exit 0.
+                // They are successful output, not failures, so they carry no
+                // error envelope: an agent treating any envelope as a failure
+                // would otherwise read a successful `--help` as a broken one.
+                e.print().unwrap_or_else(|_| println!("{msg}"));
+            } else if machine_readable_errors(
+                std::env::args().skip(1),
+                std::io::stdout().is_terminal(),
+            ) {
+                // The envelope carries clap's full message, including its
+                // "did you mean" hint, so emitting it alone loses nothing and
+                // leaves stderr parseable in one piece.
+                jira_cli::output::print_error_envelope(jira_cli::output::INVALID_INPUT.kind, &msg);
+            } else {
+                e.print().unwrap_or_else(|_| eprintln!("{msg}"));
+            }
             std::process::exit(e.exit_code());
         }
     };
@@ -577,27 +592,17 @@ async fn main() {
     let result = run(cli, out).await;
 
     if let Err(ref e) = result {
-        let (kind, message) = error_kind_and_message(e.as_ref());
-        eprintln!("Error: {e}");
-        jira_cli::output::print_error_envelope(kind, &message);
-        std::process::exit(exit_code_for_error(e.as_ref()));
-    }
-}
-
-fn error_kind_and_message(err: &(dyn std::error::Error + 'static)) -> (&'static str, String) {
-    use jira_cli::api::ApiError;
-    if let Some(api_err) = err.downcast_ref::<ApiError>() {
-        let kind = match api_err {
-            ApiError::Auth(_) => "auth",
-            ApiError::NotFound(_) => "not_found",
-            ApiError::InvalidInput(_) => "invalid_input",
-            ApiError::RateLimit => "rate_limit",
-            ApiError::Api { .. } => "api_error",
-            ApiError::Http(_) | ApiError::Other(_) => "unexpected_error",
-        };
-        (kind, api_err.to_string())
-    } else {
-        ("unexpected_error", err.to_string())
+        // One rendering per mode, so stderr is either wholly parseable as the
+        // error envelope or wholly prose. Emitting both leaves `2>&1 | jq`
+        // choking on the prose line.
+        let contract = jira_cli::output::contract_for_dyn(e.as_ref());
+        let message = e.to_string();
+        if out.json {
+            jira_cli::output::print_error_envelope(contract.kind, &message);
+        } else {
+            eprintln!("Error: {message}");
+        }
+        std::process::exit(contract.exit_code);
     }
 }
 
@@ -855,9 +860,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 dry_run,
                 yes,
             } => {
-                use std::io::IsTerminal;
                 if !yes && !dry_run && !std::io::stdin().is_terminal() {
-                    return Err(jira_cli::api::ApiError::InvalidInput(
+                    return Err(jira_cli::api::ApiError::ConfirmationRequired(
                         "bulk-transition requires --yes when stdin is not a terminal".into(),
                     )
                     .into());
@@ -870,9 +874,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 dry_run,
                 yes,
             } => {
-                use std::io::IsTerminal;
                 if !yes && !dry_run && !std::io::stdin().is_terminal() {
-                    return Err(jira_cli::api::ApiError::InvalidInput(
+                    return Err(jira_cli::api::ApiError::ConfirmationRequired(
                         "bulk-assign requires --yes when stdin is not a terminal".into(),
                     )
                     .into());
@@ -1345,15 +1348,17 @@ fn schema_json() -> serde_json::Value {
             {"name": "--email", "type": "string", "required": false, "description": "Account email (overrides config/env)"},
             {"name": "--profile", "type": "string", "required": false, "description": "Config profile to use"},
         ],
-        "errors": [
-            {"kind": "auth", "exit_code": 3, "retryable": false, "description": "Authentication failed - bad or missing credentials"},
-            {"kind": "not_found", "exit_code": 4, "retryable": false, "description": "Requested resource does not exist"},
-            {"kind": "invalid_input", "exit_code": 2, "retryable": false, "description": "Bad user input or config error"},
-            {"kind": "confirmation_required", "exit_code": 2, "retryable": false, "description": "Destructive operation requires explicit confirmation (--yes)"},
-            {"kind": "rate_limit", "exit_code": 6, "retryable": true, "description": "Rate limited by Jira - wait and retry"},
-            {"kind": "api_error", "exit_code": 5, "retryable": false, "description": "Non-2xx response from the Jira API"},
-            {"kind": "unexpected_error", "exit_code": 1, "retryable": false, "description": "Unexpected or unclassified error"},
-        ],
+        // Rendered from the one error contract table the binary itself uses, so
+        // the schema cannot declare a kind the CLI never emits.
+        "errors": jira_cli::output::ALL_ERRORS
+            .iter()
+            .map(|e| serde_json::json!({
+                "kind": e.kind,
+                "exit_code": e.exit_code,
+                "retryable": e.retryable,
+                "description": e.description,
+            }))
+            .collect::<Vec<_>>(),
         "auth": {
             "note": format!(
                 "Provide host and email via CLI flags, environment variables, or the config file at {config_path}. Provide the API token via JIRA_TOKEN or that config file."
@@ -1741,6 +1746,44 @@ mod tests {
             kinds.contains(&"not_found"),
             "errors must include not_found kind"
         );
+    }
+
+    /// The published schema is the contract table verbatim. Reading it back
+    /// this way means a kind can only reach agents by being reachable in the
+    /// binary first, which is what `every_declared_error_kind_is_reachable`
+    /// enforces on the table itself.
+    #[test]
+    fn schema_errors_match_the_error_contract() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let errors = schema["errors"].as_array().unwrap();
+
+        assert_eq!(errors.len(), jira_cli::output::ALL_ERRORS.len());
+        for (declared, contract) in errors.iter().zip(jira_cli::output::ALL_ERRORS) {
+            assert_eq!(declared["kind"], contract.kind);
+            assert_eq!(declared["exit_code"], contract.exit_code);
+            assert_eq!(declared["retryable"], contract.retryable);
+            assert_eq!(declared["description"], contract.description);
+        }
+    }
+
+    /// Pinned because agents branch on these two numbers, so a reordering of
+    /// the contract table must not silently renumber a failure mode.
+    #[test]
+    fn schema_declares_conflict_as_non_retryable_exit_seven() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let conflict = schema["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "conflict")
+            .expect("schema must declare the conflict kind");
+
+        assert_eq!(conflict["exit_code"], 7);
+        assert_eq!(conflict["retryable"], false);
     }
 
     #[test]
