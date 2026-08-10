@@ -351,7 +351,7 @@ pub struct SearchJqlPage {
 
 /// Lightweight page response used when walking the cursor forward with
 /// `fields=["id"]`. The returned issue objects then lack a `fields`
-/// sub-object, so the regular `Issue` deserialization would fail — we only
+/// sub-object, so the regular `Issue` deserialization would fail - we only
 /// need the issue count and the next cursor here.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -367,7 +367,7 @@ pub struct SearchJqlSkipPage {
 /// Response from the Jira search endpoint.
 ///
 /// `total` is `None` on Jira Cloud (API v3): the new `/search/jql` endpoint
-/// no longer returns an exact total. `is_last` is authoritative — use it to
+/// no longer returns an exact total. `is_last` is authoritative - use it to
 /// decide whether more pages exist.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SearchResponse {
@@ -456,9 +456,9 @@ pub struct IssueUpdate<'a> {
     pub fix_versions: Option<&'a [&'a str]>,
     pub labels: Option<&'a [&'a str]>,
     /// Three-state assignee:
-    /// - `None` — leave untouched (assignee key absent from PUT body)
-    /// - `Some(None)` — unassign (PUT sends `"assignee": null`)
-    /// - `Some(Some(id))` — set to account ID (PUT sends `{"accountId": id}` on v3, `{"name": id}` on v2)
+    /// - `None` - leave untouched (assignee key absent from PUT body)
+    /// - `Some(None)` - unassign (PUT sends `"assignee": null`)
+    /// - `Some(Some(id))` - set to account ID (PUT sends `{"accountId": id}` on v3, `{"name": id}` on v2)
     ///
     /// Sentinels (`"none"`, `"me"`) are CLI-layer concepts only. By the time
     /// a value reaches `IssueUpdate.assignee` it must already be resolved:
@@ -617,7 +617,7 @@ mod tests {
         let content = adf["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         // The blank middle line must produce an empty content array, not a text node
-        // with an empty string — the latter is rejected by some Jira Cloud instances.
+        // with an empty string - the latter is rejected by some Jira Cloud instances.
         let blank_paragraph = &content[1];
         assert_eq!(blank_paragraph["type"], "paragraph");
         let blank_content = blank_paragraph["content"].as_array().unwrap();

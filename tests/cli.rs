@@ -1080,7 +1080,7 @@ async fn issues_download_attachment_with_non_numeric_id_is_rejected_before_any_r
 /// An existing target file makes `download-attachment` exit with code 7 and
 /// an error envelope of kind `conflict` naming the path, and nothing is
 /// printed to stdout. Only the metadata request is expected to reach the
-/// server — the content endpoint must not be hit once the local file check
+/// server - the content endpoint must not be hit once the local file check
 /// refuses the download.
 #[tokio::test]
 async fn issues_download_attachment_without_force_exits_conflict_and_reports_kind() {
@@ -2571,5 +2571,60 @@ fn every_mutating_command_is_either_guarded_or_excused() {
     assert!(
         stale.is_empty(),
         "these are listed here but the schema no longer declares them mutating: {stale:?}"
+    );
+}
+
+// ── House style ───────────────────────────────────────────────────────────────
+
+/// Em and en dashes must not appear in anything this repository publishes.
+///
+/// The rule is easy to state and easy to lose: dashes arrive by imitation, since
+/// the surrounding prose is what gets copied. Enforcing it here means CI catches
+/// a new one instead of a reader catching it after release.
+///
+/// The scan covers printed output and help text as well as prose, because both
+/// reach a user. It skips the working notes under `.claude/`, which are local and
+/// not published.
+#[test]
+fn no_em_or_en_dashes_in_published_files() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut scanned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+
+    let mut stack = vec![root.join("src"), root.join("tests")];
+    let mut files: Vec<std::path::PathBuf> =
+        vec![root.join("README.md"), root.join("CHANGELOG.md")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        scanned += 1;
+        for (number, line) in text.lines().enumerate() {
+            if line.contains('\u{2014}') || line.contains('\u{2013}') {
+                let name = path.strip_prefix(root).unwrap_or(&path).display();
+                offenders.push(format!("{name}:{}: {}", number + 1, line.trim()));
+            }
+        }
+    }
+
+    // Without this the check passes just as happily on a scan that found nothing
+    // to read, which is the failure mode a clean result cannot distinguish.
+    assert!(
+        scanned > 5,
+        "the scan read {scanned} files, so it is broken rather than clean"
+    );
+    assert!(
+        offenders.is_empty(),
+        "use a hyphen, a comma, or two sentences instead:\n{}",
+        offenders.join("\n")
     );
 }

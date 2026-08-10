@@ -383,7 +383,7 @@ async fn search_v3_uses_post_with_fields_and_no_start_at() {
     let long_clause = "x".repeat(2000);
     let jql = format!("summary ~ \"{long_clause}\"");
 
-    // GET must NEVER be used — the new endpoint is always called via POST.
+    // GET must NEVER be used - the new endpoint is always called via POST.
     Mock::given(method("GET"))
         .and(path("/rest/api/3/search/jql"))
         .respond_with(ResponseTemplate::new(500).set_body_string("should not use GET"))
@@ -567,7 +567,7 @@ async fn show_issue_json_includes_components() {
     let client = test_client(&server);
     let issue = client.get_issue("PROJ-1").await.unwrap();
 
-    // Verify the typed field round-trips through serde — this pins the invariant
+    // Verify the typed field round-trips through serde - this pins the invariant
     // that components serialize correctly in the JSON envelope produced by
     // issue_detail_to_json (which uses `issue.fields.components` directly).
     let envelope = serde_json::to_value(serde_json::json!({
@@ -745,7 +745,7 @@ async fn add_comment_404_returns_not_found_error() {
 async fn get_issue_fetches_additional_comment_pages() {
     let server = MockServer::start().await;
 
-    // Issue with 1 embedded comment but total=3 — client must fetch 2 more
+    // Issue with 1 embedded comment but total=3 - client must fetch 2 more
     let issue_body = serde_json::json!({
         "id": "10001",
         "key": "PROJ-1",
@@ -1066,7 +1066,7 @@ async fn search_encodes_jql_in_query_string() {
         .await;
 
     let client = test_client(&server);
-    // JQL with special characters — should not panic or produce a malformed URL
+    // JQL with special characters - should not panic or produce a malformed URL
     client
         .search(
             r#"project = "My Project" AND status = "In Progress""#,
@@ -1095,7 +1095,7 @@ fn text_to_adf_blank_line_produces_empty_content_array() {
     let adf = text_to_adf("Before\n\nAfter");
     let content = adf["content"].as_array().unwrap();
     assert_eq!(content.len(), 3);
-    // The blank line must produce an empty content array — not a text node
+    // The blank line must produce an empty content array - not a text node
     // with "" which some Jira Cloud instances reject with 400.
     let blank = &content[1];
     assert_eq!(blank["type"], "paragraph");
@@ -1223,7 +1223,7 @@ async fn update_issue_sends_put_request() {
         .await
         .unwrap();
 
-    // Verify only specified fields appear — unset fields must be omitted, not sent as null
+    // Verify only specified fields appear - unset fields must be omitted, not sent as null
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["fields"]["summary"], "New summary");
@@ -1729,7 +1729,7 @@ async fn api_v2_add_comment_sends_plain_string_body() {
     let comment = client.add_comment("PROJ-1", "Hello world").await.unwrap();
     assert_eq!(comment.id, "10100");
 
-    // v2 must send a plain JSON string, not an ADF object — Jira DC/Server rejects ADF
+    // v2 must send a plain JSON string, not an ADF object - Jira DC/Server rejects ADF
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert!(
@@ -3204,7 +3204,7 @@ async fn move_to_sprint_command_resolves_name_and_posts_to_agile() {
 async fn bulk_assign_me_resolves_current_user_and_assigns() {
     let server = MockServer::start().await;
 
-    // myself — called once to resolve "me"
+    // myself - called once to resolve "me"
     Mock::given(method("GET"))
         .and(path("/rest/api/3/myself"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -3391,7 +3391,7 @@ async fn fields_list_custom_only_filters_system_fields() {
 
     let client = test_client(&server);
     let out = json_out();
-    // custom_only = true — system field must be excluded
+    // custom_only = true - system field must be excluded
     jira_cli::commands::fields::list(&client, &out, true)
         .await
         .unwrap();
@@ -3401,7 +3401,7 @@ async fn fields_list_custom_only_filters_system_fields() {
 async fn fields_list_sorted_system_before_custom() {
     let server = MockServer::start().await;
 
-    // Return fields out of order — command must sort system first, then custom
+    // Return fields out of order - command must sort system first, then custom
     Mock::given(method("GET"))
         .and(path("/rest/api/3/field"))
         .respond_with(ResponseTemplate::new(200).set_body_json(fields_response(&[
@@ -3568,7 +3568,7 @@ async fn sprints_list_json_includes_board_context() {
 async fn sprints_list_filtered_by_board_name() {
     let server = MockServer::start().await;
 
-    // Two boards — command must only query the matched one
+    // Two boards - command must only query the matched one
     Mock::given(method("GET"))
         .and(path("/rest/agile/1.0/board"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -3718,7 +3718,7 @@ async fn search_run_json_shape() {
 async fn search_run_shows_pagination_info_when_more_results() {
     let server = MockServer::start().await;
 
-    // Two issues returned with isLast=false — command must indicate more pages exist
+    // Two issues returned with isLast=false - command must indicate more pages exist
     // on the new Cloud endpoint.
     Mock::given(method("POST"))
         .and(path("/rest/api/3/search/jql"))
@@ -3884,7 +3884,7 @@ async fn auth_error_message_includes_actionable_guidance() {
     assert!(msg.contains("config show") || msg.contains("config init"));
 }
 
-// ── commands::projects — text output paths ───────────────────────────────────
+// ── commands::projects - text output paths ───────────────────────────────────
 
 fn text_out() -> OutputConfig {
     OutputConfig {
@@ -4430,7 +4430,7 @@ async fn attachments_command_lists_via_issue_fields_endpoint() {
 #[tokio::test]
 async fn download_attachment_command_reduces_reported_filename_to_a_basename() {
     // (attachment id as Jira reports it, filename Jira reports, file expected
-    // in the destination directory — `None` means the download must be refused)
+    // in the destination directory - `None` means the download must be refused)
     let cases: [(serde_json::Value, &str, Option<&str>); 6] = [
         (
             serde_json::json!("10001"),
@@ -4511,7 +4511,7 @@ async fn download_attachment_command_reduces_reported_filename_to_a_basename() {
 /// A local file already at the download target must be left byte-for-byte
 /// untouched when the download is refused, and the refusal must surface as
 /// `ApiError::Conflict` (exit code 7, kind `conflict`) naming the path. Only
-/// the metadata request is expected to reach the server — a local conflict
+/// the metadata request is expected to reach the server - a local conflict
 /// must be detected before the attachment content is fetched.
 #[tokio::test]
 async fn download_attachment_refuses_existing_file_and_leaves_it_untouched() {
@@ -4636,7 +4636,7 @@ async fn download_attachment_creates_missing_dir_recursively() {
 
 /// A `--dir` that points at something that already exists but is not a
 /// directory (here, a regular file) must fail as an ordinary error rather
-/// than a conflict — the conflict kind is reserved for an existing *target
+/// than a conflict - the conflict kind is reserved for an existing *target
 /// file*, not an unusable directory. No content request must be made, since
 /// the failure happens while establishing the target directory.
 #[tokio::test]

@@ -222,7 +222,7 @@ impl JiraClient {
     /// `/rest/api/2/search` endpoint with offset-based pagination.
     ///
     /// On API v3 (Jira Cloud) this uses the replacement
-    /// `/rest/api/3/search/jql` endpoint — the original `/search` was retired
+    /// `/rest/api/3/search/jql` endpoint - the original `/search` was retired
     /// on 2025-10-31 and returns 410 Gone. The new endpoint only supports
     /// cursor-based pagination and does not return an exact total, so we
     /// simulate the `start_at` offset by walking the cursor forward.
@@ -895,7 +895,7 @@ impl JiraClient {
     /// List all components for a project.
     ///
     /// Returns a flat array on both Jira Cloud (API v3) and DC/Server (API v2)
-    /// — the `project/{key}/components` endpoint is not paginated.
+    /// - the `project/{key}/components` endpoint is not paginated.
     pub async fn list_components(&self, project_key: &str) -> Result<Vec<Component>, ApiError> {
         self.get::<Vec<Component>>(&format!("project/{project_key}/components"))
             .await
@@ -904,7 +904,7 @@ impl JiraClient {
     /// List all versions for a project.
     ///
     /// Returns a flat array on both Jira Cloud (API v3) and DC/Server (API v2)
-    /// — the `project/{key}/versions` endpoint is not paginated.
+    /// - the `project/{key}/versions` endpoint is not paginated.
     pub async fn list_versions(&self, project_key: &str) -> Result<Vec<Version>, ApiError> {
         self.get::<Vec<Version>>(&format!("project/{project_key}/versions"))
             .await

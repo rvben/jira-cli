@@ -63,7 +63,7 @@ impl Config {
     /// Load config with priority: CLI args > env vars > config file.
     ///
     /// The API token must be supplied via the `JIRA_TOKEN` environment variable
-    /// or the config file — not via a CLI flag, to avoid leaking it in process
+    /// or the config file - not via a CLI flag, to avoid leaking it in process
     /// argument lists visible to other users.
     pub fn load(
         host_arg: Option<String>,
@@ -372,8 +372,8 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
     // Decide what to do: first run, update an existing profile, or add a new one.
     //
     // `target_name` holds the profile name to write:
-    //   Some(name) — already known (first run → "default"; update → chosen name)
-    //   None       — "add new" path, ask for name after credentials
+    //   Some(name) - already known (first run → "default"; update → chosen name)
+    //   None       - "add new" path, ask for name after credentials
     let (target_name, existing): (Option<String>, Option<ProfileConfig>) = if path.exists() {
         let profiles = list_profile_names(&path)?;
 
@@ -425,7 +425,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         (Some("default".to_owned()), None)
     };
 
-    // Instance type — derive from existing config, or ask.
+    // Instance type - derive from existing config, or ask.
     let is_cloud = if let Some(ref p) = existing {
         p.auth_type.as_deref() != Some("pat")
     } else {
@@ -469,7 +469,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
             existing
                 .as_ref()
                 .and_then(|p| p.token.clone())
-                .ok_or("No existing token — please enter a token.")?
+                .ok_or("No existing token. Please enter a token.")?
         } else {
             raw
         };
@@ -487,7 +487,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
             existing
                 .as_ref()
                 .and_then(|p| p.token.clone())
-                .ok_or("No existing token — please enter a token.")?
+                .ok_or("No existing token. Please enter a token.")?
         } else {
             raw
         };
@@ -543,7 +543,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    // Profile name — ask only when adding a new named profile.
+    // Profile name - ask only when adding a new named profile.
     let profile_name = match target_name {
         Some(name) => name,
         None => {
@@ -850,7 +850,7 @@ fn dc_pat_url(host: Option<&str>) -> String {
 /// Mask a token for display, showing only the last 4 characters.
 ///
 /// Atlassian tokens begin with a predictable prefix, so showing the
-/// start provides no meaningful identification — the end is more useful.
+/// start provides no meaningful identification - the end is more useful.
 fn mask_token(token: &str) -> String {
     let n = token.chars().count();
     if n > 4 {
@@ -1515,7 +1515,7 @@ token = "supersecrettoken"
     #[tokio::test]
     async fn init_json_output_includes_example_and_paths() {
         let out = crate::output::OutputConfig::new(true, false, true);
-        // No env or config needed — init() never loads credentials in JSON mode
+        // No env or config needed - init() never loads credentials in JSON mode
         init(&out, Some("jira.corp.com")).await;
     }
 
@@ -1527,7 +1527,7 @@ token = "supersecrettoken"
             json: false,
             quiet: false,
         };
-        // stdin is not a TTY in tests — must return immediately, not hang
+        // stdin is not a TTY in tests - must return immediately, not hang
         init(&out, None).await;
     }
 

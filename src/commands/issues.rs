@@ -131,7 +131,7 @@ pub async fn comments(client: &JiraClient, out: &OutputConfig, key: &str) -> Res
                     } else {
                         c.author.display_name.clone()
                     };
-                    println!("  {} — {}", author, format_date(&c.created));
+                    println!("  {} - {}", author, format_date(&c.created));
                     for line in c.body_text().lines() {
                         println!("    {line}");
                     }
@@ -1009,7 +1009,7 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
             } else {
                 c.author.display_name.clone()
             };
-            writeln!(out, "  {} — {}", author, format_date(&c.created))?;
+            writeln!(out, "  {} - {}", author, format_date(&c.created))?;
             let body = c.body_text();
             for line in body.lines() {
                 writeln!(out, "    {line}")?;
@@ -1023,14 +1023,14 @@ fn write_issue_link<W: std::io::Write>(out: &mut W, link: &IssueLink) -> std::io
     if let Some(ref out_issue) = link.outward_issue {
         writeln!(
             out,
-            "  [{}] {} {} — {}",
+            "  [{}] {} {} - {}",
             link.id, link.link_type.outward, out_issue.key, out_issue.fields.summary
         )?;
     }
     if let Some(ref in_issue) = link.inward_issue {
         writeln!(
             out,
-            "  [{}] {} {} — {}",
+            "  [{}] {} {} - {}",
             link.id, link.link_type.inward, in_issue.key, in_issue.fields.summary
         )?;
     }
@@ -1328,7 +1328,7 @@ fn safe_file_name(filename: &str) -> Option<&str> {
 /// assignee, type) still leave at least 20 characters for the summary.
 const MIN_TERMINAL_WIDTH: usize = 60;
 
-/// Fallback width used when neither the TTY nor `COLUMNS` advertises a size —
+/// Fallback width used when neither the TTY nor `COLUMNS` advertises a size -
 /// matches the historical default.
 const DEFAULT_TERMINAL_WIDTH: usize = 120;
 

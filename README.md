@@ -5,10 +5,10 @@
 
 An agent-friendly Jira CLI for Jira Cloud and Jira Data Center / Server.
 
-- **Auto-JSON** when stdout is not a TTY — pipe it anywhere, get structured data
+- **Auto-JSON** when stdout is not a TTY, so you can pipe it anywhere and get structured data
 - **`jira schema`** dumps every command, flag, and JSON shape as machine-readable JSON for agent introspection
-- **Structured exit codes** — agents can branch on auth failures, rate limits, not-found, and input errors without parsing text
-- **Clean stdout/stderr split** — data on stdout, messages on stderr, `--quiet` suppresses all non-data output
+- **Structured exit codes**, so agents can branch on auth failures, rate limits, not-found, and input errors without parsing text
+- **Clean stdout/stderr split**: data on stdout, messages on stderr, `--quiet` suppresses all non-data output
 
 ```
 $ jira issues list --project MYAPP --status "In Progress"
@@ -67,7 +67,7 @@ Run `jira config show` to confirm the resolved path and active credentials (toke
 
 ### Environment variables
 
-All credentials can be set via environment variables — useful for CI and scripts:
+All credentials can be set via environment variables, which is useful for CI and scripts:
 
 | Variable | Description |
 |----------|-------------|

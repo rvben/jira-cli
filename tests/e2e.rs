@@ -2,10 +2,10 @@
 //!
 //! Skipped automatically unless the following environment variables are set:
 //!
-//!   JIRA_E2E_HOST   — Jira host, e.g. `http://localhost:8080` or `mycompany.atlassian.net`
-//!   JIRA_E2E_EMAIL  — Account email (leave blank for PAT auth)
-//!   JIRA_E2E_TOKEN  — API token or PAT
-//!   JIRA_E2E_PROJECT — Project key to create test issues in (default: TST)
+//!   JIRA_E2E_HOST   - Jira host, e.g. `http://localhost:8080` or `mycompany.atlassian.net`
+//!   JIRA_E2E_EMAIL  - Account email (leave blank for PAT auth)
+//!   JIRA_E2E_TOKEN  - API token or PAT
+//!   JIRA_E2E_PROJECT - Project key to create test issues in (default: TST)
 //!
 //! Run with:
 //!   JIRA_E2E_HOST=http://localhost:8080 JIRA_E2E_EMAIL=ruben JIRA_E2E_TOKEN=test \
@@ -111,7 +111,7 @@ async fn e2e_boards_and_sprints_list() {
     };
     let boards = client.list_boards().await.expect("list_boards failed");
     if boards.is_empty() {
-        eprintln!("No boards found — skipping sprint check");
+        eprintln!("No boards found, skipping sprint check");
         return;
     }
     let sprints = client
