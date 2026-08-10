@@ -438,6 +438,63 @@ async fn search_v2_uses_classic_endpoint_with_start_at() {
     client.search("project = PROJ", 25, 25).await.unwrap();
 }
 
+#[tokio::test]
+async fn search_v2_without_a_total_reports_it_as_unknown_and_keeps_paging() {
+    let server = MockServer::start().await;
+
+    // A v2 response that omits `total`. Reading that as 0 makes a full page of
+    // results look like the end of the list, so `--all` stops after page one.
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issues": [issue_fixture("PROJ-1", "First", "To Do"),
+                       issue_fixture("PROJ-2", "Second", "To Do")],
+            "startAt": 0,
+            "maxResults": 2,
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client_v2(&server);
+    let page = client.search("project = PROJ", 2, 0).await.unwrap();
+
+    assert_eq!(page.issues.len(), 2);
+    assert_eq!(
+        page.total, None,
+        "an absent total must be reported as unknown, not as a count of zero"
+    );
+    assert!(
+        !page.is_last,
+        "a full page with no total may have more behind it, so paging must continue"
+    );
+}
+
+#[tokio::test]
+async fn search_v2_without_a_total_ends_on_a_short_page() {
+    let server = MockServer::start().await;
+
+    // The negative control for the test above: without a total, a page shorter
+    // than the one requested is the only reliable end-of-results signal.
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issues": [issue_fixture("PROJ-1", "Only", "To Do")],
+            "startAt": 0,
+            "maxResults": 50,
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client_v2(&server);
+    let page = client.search("project = PROJ", 50, 0).await.unwrap();
+
+    assert_eq!(page.total, None);
+    assert!(
+        page.is_last,
+        "a page shorter than requested is the last one"
+    );
+}
+
 // ── Issue detail ──────────────────────────────────────────────────────────────
 
 #[tokio::test]

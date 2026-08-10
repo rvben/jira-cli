@@ -247,15 +247,18 @@ impl JiraClient {
     ) -> Result<SearchResponse, ApiError> {
         let fields = SEARCH_FIELDS.join(",");
         let encoded_jql = percent_encode(jql);
+        // Every counter is optional because a response that omits one must stay
+        // distinguishable from one reporting zero. Defaulting `total` to 0 made
+        // `is_last` below true for any page, silently ending `--all` after the
+        // first one while the JSON reported no results next to the results.
         #[derive(serde::Deserialize)]
         struct RawV2 {
             issues: Vec<Issue>,
-            #[serde(default)]
-            total: usize,
-            #[serde(rename = "startAt", default)]
-            start_at: usize,
-            #[serde(rename = "maxResults", default)]
-            max_results: usize,
+            total: Option<usize>,
+            #[serde(rename = "startAt")]
+            start_at: Option<usize>,
+            #[serde(rename = "maxResults")]
+            max_results: Option<usize>,
         }
         let raw: RawV2 = if encoded_jql.len() <= SEARCH_GET_JQL_LIMIT {
             let path = format!(
@@ -274,12 +277,20 @@ impl JiraClient {
             )
             .await?
         };
-        let is_last = raw.start_at + raw.issues.len() >= raw.total;
+        // An absent offset or page size is reported as what was asked for, which
+        // is true of the request even when the server does not echo it back.
+        let echoed_start_at = raw.start_at.unwrap_or(start_at);
+        let is_last = match raw.total {
+            Some(total) => echoed_start_at + raw.issues.len() >= total,
+            // Without a total, a page shorter than the one requested is the only
+            // reliable end-of-results signal.
+            None => raw.issues.len() < max_results,
+        };
         Ok(SearchResponse {
             issues: raw.issues,
-            total: Some(raw.total),
-            start_at: raw.start_at,
-            max_results: raw.max_results,
+            total: raw.total,
+            start_at: echoed_start_at,
+            max_results: raw.max_results.unwrap_or(max_results),
             is_last,
         })
     }
