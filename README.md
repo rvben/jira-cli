@@ -296,6 +296,10 @@ Any agent that supports environment variable configuration can use the same appr
 | 6 | Rate limited |
 | 7 | Target already exists (pass `--force` to overwrite) |
 
+A downstream that stops reading, as in `jira issues list | head -5`, terminates
+the CLI with `SIGPIPE` rather than any of these codes. That is what every other
+member of a pipeline does, and shells report it as 141.
+
 ## Output flags
 
 | Flag | Effect |

@@ -592,8 +592,27 @@ enum FieldsCommand {
     },
 }
 
+/// Restore the default disposition of `SIGPIPE`, which Rust replaces with
+/// `SIG_IGN` before `main` runs. Under `SIG_IGN` a closed downstream turns every
+/// write into `EPIPE`, and `println!` panics on that: `jira issues list | head`
+/// exits 101 with a backtrace, which is neither a declared exit code nor what a
+/// shell pipeline expects. With the default restored the process is terminated
+/// by the signal, the way every other tool in a pipeline is.
+#[cfg(unix)]
+fn restore_default_sigpipe() {
+    // SAFETY: this is a plain FFI call with no invariants for the caller to
+    // uphold. `SIG_DFL` is the disposition the process is given at exec time.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_default_sigpipe() {}
+
 #[tokio::main]
 async fn main() {
+    restore_default_sigpipe();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

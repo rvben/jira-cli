@@ -2628,3 +2628,95 @@ fn no_em_or_en_dashes_in_published_files() {
         offenders.join("\n")
     );
 }
+
+// -- a downstream that stops reading (`jira ... | head`) ----------------------
+
+/// A `/search/jql` page carrying enough issues that the rendered output cannot
+/// fit in a pipe buffer, so the writer is still writing when the reader leaves.
+fn oversized_search_page() -> serde_json::Value {
+    let issues: Vec<serde_json::Value> = (1..=600)
+        .map(|n| {
+            serde_json::json!({
+                "id": n.to_string(),
+                "key": format!("PROJ-{n}"),
+                "fields": {
+                    "summary": "A summary long enough that six hundred of them add up to far more than any pipe buffer holds",
+                    "status": { "name": "To Do" },
+                    "issuetype": { "name": "Task" }
+                }
+            })
+        })
+        .collect();
+    serde_json::json!({ "issues": issues, "isLast": true })
+}
+
+/// Rust sets `SIGPIPE` to `SIG_IGN` before `main`, which turns a closed
+/// downstream into an `EPIPE` error that `println!` panics on. Piping into
+/// `head` is the most ordinary thing a caller does, so it must not produce a
+/// backtrace and an exit code the schema never declares.
+#[tokio::test]
+async fn a_downstream_that_stops_reading_does_not_panic_the_writer() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(oversized_search_page()))
+        .mount(&server)
+        .await;
+
+    let args = ["issues", "list", "--limit", "600", "--json"];
+
+    // Control: the whole output has to outgrow any pipe buffer. Below that the
+    // reader can leave without the writer ever noticing, and this test would
+    // pass against a binary that panics.
+    let whole = run_jira_against(&server, &args);
+    assert!(
+        whole.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&whole.stderr)
+    );
+    assert!(
+        whole.stdout.len() > 128 * 1024,
+        "the fixture renders {} bytes, too few to fill a pipe buffer",
+        whole.stdout.len()
+    );
+
+    let dir = TempDir::new().unwrap();
+    let mut child = jira_cmd(&dir)
+        .args(args)
+        .env("JIRA_HOST", server.uri())
+        .env("JIRA_EMAIL", "test@example.com")
+        .env("JIRA_TOKEN", "test-token")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Take one line's worth and leave, the way `head` does.
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0u8; 40];
+    std::io::Read::read_exact(&mut stdout, &mut first).unwrap();
+    drop(stdout);
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "a reader that stops early must not panic the writer:\n{stderr}"
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "101 is a panic, and is not one of the declared exit codes"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            output.status.signal(),
+            Some(13),
+            "the writer must die of SIGPIPE the way any other member of a pipeline does"
+        );
+    }
+}
