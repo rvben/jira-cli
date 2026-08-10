@@ -1802,3 +1802,72 @@ mod tests {
         assert_eq!(result, Some(Some("literal-id-999".to_string())));
     }
 }
+
+#[cfg(test)]
+mod attachment_filename_tests {
+    use super::safe_file_name;
+    use std::path::Path;
+
+    /// Jira reports the filename, so it is attacker-influenced whenever an
+    /// attacker can attach a file to an issue. Whatever comes back must land
+    /// directly in the requested directory and nowhere else.
+    #[test]
+    fn a_crafted_filename_cannot_escape_the_target_directory() {
+        let hostile = [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "....//....//etc/passwd",
+            "..\\..\\windows\\system32\\config\\sam",
+            "foo/../../bar",
+            "./../../x",
+            "~/.ssh/authorized_keys",
+            "a/b/c/deep.txt",
+        ];
+        let dir = Path::new("/tmp/jira-cli-downloads");
+        for name in hostile {
+            let Some(reduced) = safe_file_name(name) else {
+                continue;
+            };
+            let joined = dir.join(reduced);
+            assert_eq!(
+                joined.parent(),
+                Some(dir),
+                "{name:?} reduced to {reduced:?}, which lands outside the target directory"
+            );
+            assert!(
+                !reduced.contains('/') && !reduced.contains('\\'),
+                "{name:?} reduced to {reduced:?}, which is still a path rather than a name"
+            );
+        }
+    }
+
+    #[test]
+    fn names_that_are_not_usable_as_a_file_are_refused() {
+        for name in ["", ".", "..", "foo/..", "bar/", "C:file.txt"] {
+            assert_eq!(
+                safe_file_name(name),
+                None,
+                "{name:?} must be refused rather than turned into a filename"
+            );
+        }
+    }
+
+    /// The negative control. Without this the test above passes just as happily
+    /// on a guard that refuses everything, which would break every download.
+    #[test]
+    fn an_ordinary_filename_is_passed_through_untouched() {
+        for name in [
+            "report.pdf",
+            ".hidden",
+            "with space.txt",
+            "..leading",
+            "e\u{0301}.png",
+        ] {
+            assert_eq!(
+                safe_file_name(name),
+                Some(name),
+                "{name:?} is a perfectly good filename and must not be altered"
+            );
+        }
+    }
+}
