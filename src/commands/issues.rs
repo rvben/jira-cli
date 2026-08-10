@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use owo_colors::OwoColorize;
 
 use crate::api::{
-    ApiError, Attachment, Issue, IssueDraft, IssueLink, IssueUpdate, JiraClient, Version,
-    escape_jql,
+    ApiError, Attachment, Issue, IssueDraft, IssueLink, IssueUpdate, JiraClient, UserField,
+    Version, escape_jql,
 };
 use crate::output::{OutputConfig, use_color};
 
@@ -95,10 +95,7 @@ pub async fn comments(client: &JiraClient, out: &OutputConfig, key: &str) -> Res
                     .map(|c| {
                         serde_json::json!({
                             "id": c.id,
-                            "author": {
-                                "displayName": c.author.display_name,
-                                "accountId": c.author.account_id,
-                            },
+                            "author": user_to_json(Some(&c.author)),
                             "body": c.body_text(),
                             "created": c.created,
                             "updated": c.updated,
@@ -414,7 +411,10 @@ pub async fn assign(
     } else if assignee == "none" || assignee == "unassign" {
         client.assign_issue(key, None).await?;
         out.print_result(
-            &serde_json::json!({ "issue": key, "assignee": null }),
+            // Both paths emit the same keys. A null `accountId` is the unassigned
+            // state; a separate `assignee` key here would make the shape of the
+            // response depend on which path ran.
+            &serde_json::json!({ "issue": key, "accountId": null }),
             &format!("Unassigned {key}"),
         );
         return Ok(());
@@ -795,7 +795,7 @@ pub async fn bulk_assign(
         if dry_run {
             results.push(serde_json::json!({
                 "key": issue.key,
-                "currentAssignee": issue.assignee(),
+                "currentAssignee": issue.fields.assignee.as_ref().map(|a| a.display_name.as_str()),
                 "action": "would assign",
                 "to": assignee,
             }));
@@ -1039,6 +1039,22 @@ fn write_issue_link<W: std::io::Write>(out: &mut W, link: &IssueLink) -> std::io
 
 // ── JSON serialization ────────────────────────────────────────────────────────
 
+/// Render a user as JSON, or `null` when Jira reported none.
+///
+/// The table accessors collapse an absent user to `"-"`, which is the right
+/// placeholder for a column but a lie in JSON: it makes "nobody is assigned"
+/// indistinguishable from a user whose display name is literally `-`. JSON
+/// carries the absence itself.
+fn user_to_json(user: Option<&UserField>) -> serde_json::Value {
+    match user {
+        Some(u) => serde_json::json!({
+            "displayName": u.display_name,
+            "accountId": u.account_id,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
 pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::Value {
     serde_json::json!({
         "key": issue.key,
@@ -1046,11 +1062,10 @@ pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "url": client.browse_url(&issue.key),
         "summary": issue.summary(),
         "status": issue.status(),
-        "assignee": {
-            "displayName": issue.assignee(),
-            "accountId": issue.fields.assignee.as_ref().and_then(|a| a.account_id.as_deref()),
-        },
-        "priority": issue.priority(),
+        "assignee": user_to_json(issue.fields.assignee.as_ref()),
+        // Projects can leave priority unset, so the field is nullable for the
+        // same reason `assignee` is.
+        "priority": issue.fields.priority.as_ref().map(|p| p.name.as_str()),
         "type": issue.issue_type(),
         "created": issue.fields.created,
         "updated": issue.fields.updated,
@@ -1093,10 +1108,7 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
                 .map(|c| {
                     serde_json::json!({
                         "id": c.id,
-                        "author": {
-                            "displayName": c.author.display_name,
-                            "accountId": c.author.account_id,
-                        },
+                        "author": user_to_json(Some(&c.author)),
                         "body": c.body_text(),
                         "created": c.created,
                         "updated": c.updated,
@@ -1150,15 +1162,9 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "summary": issue.summary(),
         "status": issue.status(),
         "type": issue.issue_type(),
-        "priority": issue.priority(),
-        "assignee": {
-            "displayName": issue.assignee(),
-            "accountId": issue.fields.assignee.as_ref().and_then(|a| a.account_id.as_deref()),
-        },
-        "reporter": issue.fields.reporter.as_ref().map(|r| serde_json::json!({
-            "displayName": r.display_name,
-            "accountId": r.account_id,
-        })),
+        "priority": issue.fields.priority.as_ref().map(|p| p.name.as_str()),
+        "assignee": user_to_json(issue.fields.assignee.as_ref()),
+        "reporter": user_to_json(issue.fields.reporter.as_ref()),
         "labels": issue.fields.labels,
         "components": issue.fields.components,
         "fixVersions": issue.fields.fix_versions.as_ref().map(|fvs| {
@@ -1167,7 +1173,9 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "affectedVersions": issue.fields.versions.as_ref().map(|vs| {
             vs.iter().map(version_to_json).collect::<Vec<_>>()
         }),
-        "description": issue.description_text(),
+        // Null when the issue has no description at all, so that state stays
+        // distinguishable from a description that is present but empty.
+        "description": issue.fields.description.as_ref().map(|_| issue.description_text()),
         "created": issue.fields.created,
         "updated": issue.fields.updated,
         "comments": comments,
