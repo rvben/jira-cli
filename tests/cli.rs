@@ -770,9 +770,26 @@ fn schema_command(command: &str) -> serde_json::Value {
 /// A field declared `optional` may be absent, since that is what the declaration
 /// promises. Everything else is checked both ways: an undeclared key is an
 /// undocumented contract and a missing declared key is a broken one.
+///
+/// Nested objects are checked to the same standard, recursively, wherever the
+/// declaration carries its own `fields`. Without that, a declared `assignee`
+/// could name any keys it liked one level down and nothing would notice, which
+/// is the same defect this helper exists to catch at the top level.
 fn assert_json_keys_match_schema(command: &str, actual: &serde_json::Value, extra: &[&str]) {
     let schema = schema_command(command);
     let fields = schema["output_fields"].as_array().unwrap();
+    assert_fields_match(command, fields, actual, extra);
+}
+
+/// `path` is the dotted location inside the command's output, starting as the
+/// command name, so a failure says which nested object is wrong rather than
+/// leaving the reader to guess which level broke.
+fn assert_fields_match(
+    path: &str,
+    fields: &[serde_json::Value],
+    actual: &serde_json::Value,
+    extra: &[&str],
+) {
     let declared: std::collections::BTreeSet<&str> =
         fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
     let required: std::collections::BTreeSet<&str> = fields
@@ -782,7 +799,7 @@ fn assert_json_keys_match_schema(command: &str, actual: &serde_json::Value, extr
         .collect();
     let mut emitted: std::collections::BTreeSet<&str> = actual
         .as_object()
-        .unwrap_or_else(|| panic!("{command} output must be a JSON object; got: {actual}"))
+        .unwrap_or_else(|| panic!("{path} must be a JSON object; got: {actual}"))
         .keys()
         .map(String::as_str)
         .collect();
@@ -791,14 +808,38 @@ fn assert_json_keys_match_schema(command: &str, actual: &serde_json::Value, extr
     let undeclared: Vec<&str> = emitted.difference(&declared).copied().collect();
     assert!(
         undeclared.is_empty(),
-        "{command} emits {undeclared:?}, which `jira schema` does not declare"
+        "{path} emits {undeclared:?}, which `jira schema` does not declare"
     );
     let missing: Vec<&str> = required.difference(&emitted).copied().collect();
     assert!(
         missing.is_empty(),
-        "`jira schema` declares {missing:?} for {command}, which it does not emit \
+        "`jira schema` declares {missing:?} for {path}, which it does not emit \
          (mark the field `optional` if it is genuinely conditional)"
     );
+
+    for field in fields {
+        let Some(nested) = field["fields"].as_array() else {
+            continue;
+        };
+        let name = field["name"].as_str().unwrap();
+        let value = &actual[name];
+        // Absent or null is the declaration's business, already checked above.
+        if value.is_null() {
+            continue;
+        }
+        let child = format!("{path}.{name}");
+        match field["type"].as_str() {
+            Some("object[]") => {
+                let items = value
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{child} is declared object[]; got: {value}"));
+                for (i, item) in items.iter().enumerate() {
+                    assert_fields_match(&format!("{child}[{i}]"), nested, item, &[]);
+                }
+            }
+            _ => assert_fields_match(&child, nested, value, &[]),
+        }
+    }
 }
 
 /// Verify that `jira issues attach --help` documents the flag used to select
@@ -2158,5 +2199,71 @@ fn every_command_declaring_output_fields_has_a_conformance_test() {
     assert!(
         stale.is_empty(),
         "these commands are listed as checked but no longer declare output_fields: {stale:?}"
+    );
+}
+
+/// Object-typed fields that deliberately declare no nested `fields`, with the
+/// reason they cannot.
+///
+/// `assert_json_keys_match_schema` recurses only where a declaration carries
+/// `fields`, so an object without them is unchecked. That is right only when the
+/// keys are genuinely not fixed; everywhere else it is a gap. Pinning the list
+/// means a new opaque object fails this test until someone decides which it is.
+const OBJECTS_WITHOUT_A_DECLARED_SHAPE: &[(&str, &str)] = &[
+    (
+        "config init.example.profiles",
+        "keyed by profile name, chosen by the user",
+    ),
+    (
+        "init.example.profiles",
+        "keyed by profile name, chosen by the user",
+    ),
+];
+
+#[test]
+fn every_declared_object_either_has_a_shape_or_a_stated_reason() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    fn collect(path: &str, fields: &[serde_json::Value], out: &mut Vec<String>) {
+        for f in fields {
+            let name = f["name"].as_str().unwrap();
+            let child = format!("{path}.{name}");
+            let is_object = matches!(f["type"].as_str(), Some("object") | Some("object[]"));
+            match f["fields"].as_array() {
+                Some(nested) => collect(&child, nested, out),
+                None if is_object => out.push(child),
+                None => {}
+            }
+        }
+    }
+
+    let mut opaque = Vec::new();
+    for command in schema["commands"].as_array().unwrap() {
+        let Some(fields) = command["output_fields"].as_array() else {
+            continue;
+        };
+        collect(command["name"].as_str().unwrap(), fields, &mut opaque);
+    }
+    opaque.sort();
+
+    let excused: std::collections::BTreeSet<&str> = OBJECTS_WITHOUT_A_DECLARED_SHAPE
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    let found: std::collections::BTreeSet<&str> = opaque.iter().map(String::as_str).collect();
+
+    let undeclared: Vec<&str> = found.difference(&excused).copied().collect();
+    assert!(
+        undeclared.is_empty(),
+        "these object fields declare no nested shape, so nothing checks their keys: \
+         {undeclared:?} (add `fields`, or list it in OBJECTS_WITHOUT_A_DECLARED_SHAPE \
+         with the reason its keys are not fixed)"
+    );
+    let stale: Vec<&str> = excused.difference(&found).copied().collect();
+    assert!(
+        stale.is_empty(),
+        "these are excused from declaring a shape but no longer need to be: {stale:?}"
     );
 }
