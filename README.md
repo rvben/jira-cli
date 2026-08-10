@@ -77,8 +77,10 @@ All credentials can be set via environment variables — useful for CI and scrip
 | `JIRA_PROFILE` | Config profile name |
 | `JIRA_AUTH_TYPE` | `basic` (default) or `pat` |
 | `JIRA_API_VERSION` | `3` (Cloud, default) or `2` (Data Center / Server) |
-| `JIRA_READ_ONLY` | Block write operations (`1`, `true`, `yes`, `on`) |
-| `JIRA_DEBUG_HTTP` | Include the raw Jira response body in API error messages (`1`, `true`, `yes`). Useful when the default summary is ambiguous. |
+| `JIRA_READ_ONLY` | Block write operations. On: `1`, `true`, `yes`, `on`. Off: `0`, `false`, `no`, `off`. Any other value is an error, not "off" |
+| `JIRA_DEBUG_HTTP` | Include the raw Jira response body in API error messages (`1`, `true`, `yes`, `on`). Useful when the default summary is ambiguous. |
+
+Values are matched case-insensitively. `JIRA_AUTH_TYPE` and `JIRA_API_VERSION` reject anything outside the values listed above rather than falling back to the default, so a typo surfaces as a config error instead of an unexplained authentication failure.
 
 ### Multiple profiles
 

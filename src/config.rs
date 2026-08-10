@@ -89,30 +89,22 @@ impl Config {
                 )
             })?;
 
-        let auth_type = env_var("JIRA_AUTH_TYPE")
-            .as_deref()
-            .map(|v| {
-                if v.eq_ignore_ascii_case("pat") {
-                    AuthType::Pat
-                } else {
-                    AuthType::Basic
-                }
-            })
-            .or_else(|| {
-                file_profile.auth_type.as_deref().map(|v| {
-                    if v.eq_ignore_ascii_case("pat") {
-                        AuthType::Pat
-                    } else {
-                        AuthType::Basic
-                    }
-                })
-            })
-            .unwrap_or_default();
+        // A blank value is absent, the same as for host, email and token: only a
+        // value someone actually wrote is worth rejecting.
+        let auth_type = match env_var("JIRA_AUTH_TYPE")
+            .or_else(|| normalize_value(file_profile.auth_type.clone()))
+        {
+            Some(v) => parse_auth_type(&v)?,
+            None => AuthType::default(),
+        };
 
-        let api_version = env_var("JIRA_API_VERSION")
-            .and_then(|v| v.parse::<u8>().ok())
-            .or(file_profile.api_version)
-            .unwrap_or(3);
+        let api_version = match env_var("JIRA_API_VERSION") {
+            Some(v) => parse_api_version(&v)?,
+            None => match file_profile.api_version {
+                Some(v) => validate_api_version(v)?,
+                None => 3,
+            },
+        };
 
         // Email is required for Basic auth; PAT auth uses a token only.
         let email = normalize_value(email_arg)
@@ -128,10 +120,10 @@ impl Config {
             AuthType::Pat => email.unwrap_or_default(),
         };
 
-        let read_only = env_var("JIRA_READ_ONLY")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .or(file_profile.read_only)
-            .unwrap_or(false);
+        let read_only = match env_var("JIRA_READ_ONLY") {
+            Some(v) => parse_read_only(&v)?,
+            None => file_profile.read_only.unwrap_or(false),
+        };
 
         Ok(Self {
             host,
@@ -875,6 +867,89 @@ fn env_var(name: &str) -> Option<String> {
         .and_then(|value| normalize_value(Some(value)))
 }
 
+/// The values every boolean environment variable in this CLI reads as on and
+/// off, matched case-insensitively.
+///
+/// Public because `jira schema` declares them: an agent should not have to guess
+/// which spellings the safety switch accepts.
+pub const TRUTHY: &[&str] = &["1", "true", "yes", "on"];
+pub const FALSY: &[&str] = &["0", "false", "no", "off"];
+
+/// Whether a diagnostics-only toggle is switched on.
+///
+/// An unrecognised value means off here, because failing a command outright over
+/// a typo in a debug switch costs more than the missed logging. Safety switches
+/// use `parse_read_only` instead, which refuses.
+pub fn is_truthy(value: &str) -> bool {
+    TRUTHY.contains(&value.trim().to_ascii_lowercase().as_str())
+}
+
+/// Parse `JIRA_READ_ONLY`, rejecting anything that is neither an on nor an off
+/// value.
+///
+/// The guard is a safety control, so an unrecognised value must not resolve to
+/// "off": `JIRA_READ_ONLY=enabled` would then read as protection while every
+/// write went through. Refusing to start is the only answer that cannot be
+/// mistaken for the setting having worked.
+fn parse_read_only(value: &str) -> Result<bool, ApiError> {
+    let v = value.to_ascii_lowercase();
+    if TRUTHY.contains(&v.as_str()) {
+        Ok(true)
+    } else if FALSY.contains(&v.as_str()) {
+        Ok(false)
+    } else {
+        Err(ApiError::InvalidInput(format!(
+            "JIRA_READ_ONLY is set to '{value}', which is neither on ({}) nor off ({}). \
+             Refusing to run rather than guess whether writes are meant to be blocked.",
+            TRUTHY.join(", "),
+            FALSY.join(", ")
+        )))
+    }
+}
+
+/// Parse an `auth_type` from the environment or the config file.
+///
+/// A typo must not fall back to basic auth: on a Data Center instance that turns
+/// "you misspelled pat" into an opaque 401 from Jira.
+fn parse_auth_type(value: &str) -> Result<AuthType, ApiError> {
+    if value.eq_ignore_ascii_case("basic") {
+        Ok(AuthType::Basic)
+    } else if value.eq_ignore_ascii_case("pat") {
+        Ok(AuthType::Pat)
+    } else {
+        Err(ApiError::InvalidInput(format!(
+            "auth_type '{value}' is not recognised. Use 'basic' (Jira Cloud) or \
+             'pat' (Jira Data Center/Server)."
+        )))
+    }
+}
+
+/// Jira REST API versions this CLI knows how to talk to.
+const API_VERSIONS: &[u8] = &[2, 3];
+
+fn parse_api_version(value: &str) -> Result<u8, ApiError> {
+    let parsed = value.parse::<u8>().map_err(|_| {
+        ApiError::InvalidInput(format!(
+            "api_version '{value}' is not a number. Use 3 (Jira Cloud) or 2 \
+             (Jira Data Center/Server)."
+        ))
+    })?;
+    validate_api_version(parsed)
+}
+
+/// Reject a version the client has no URL scheme for, rather than building
+/// requests against `/rest/api/<n>/` and reporting Jira's 404 as the problem.
+fn validate_api_version(version: u8) -> Result<u8, ApiError> {
+    if API_VERSIONS.contains(&version) {
+        Ok(version)
+    } else {
+        Err(ApiError::InvalidInput(format!(
+            "api_version {version} is not supported. Use 3 (Jira Cloud) or 2 \
+             (Jira Data Center/Server)."
+        )))
+    }
+}
+
 fn normalize_value(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -908,6 +983,99 @@ mod tests {
         let masked = mask_token("ATATxxx1234abcd");
         assert!(masked.starts_with("***"));
         assert!(masked.ends_with("abcd"));
+    }
+
+    #[test]
+    fn read_only_accepts_its_documented_values_in_any_case() {
+        for on in ["1", "true", "TRUE", "True", "yes", "YES", "on", "On"] {
+            assert!(parse_read_only(on).unwrap(), "{on} should enable the guard");
+        }
+        for off in ["0", "false", "FALSE", "no", "No", "off", "OFF"] {
+            assert!(
+                !parse_read_only(off).unwrap(),
+                "{off} should disable the guard"
+            );
+        }
+    }
+
+    /// The dangerous direction: a value nobody recognises must not quietly mean
+    /// "writes allowed", because the operator who set it believes the opposite.
+    #[test]
+    fn read_only_refuses_a_value_it_does_not_understand() {
+        for bad in ["enabled", "ture", "2", "y", "readonly"] {
+            let err = parse_read_only(bad).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains(bad),
+                "the rejection must quote the offending value; got: {message}"
+            );
+            assert!(
+                matches!(err, ApiError::InvalidInput(_)),
+                "{bad} must be reported as bad input, not as a Jira failure"
+            );
+        }
+    }
+
+    /// A diagnostics switch reads an unknown value as off, which is the opposite
+    /// policy from the read-only guard above and deliberately so.
+    #[test]
+    fn is_truthy_accepts_any_case_and_treats_the_unknown_as_off() {
+        for on in ["1", "true", "TRUE", "True", "yes", "YES", "on", "  on  "] {
+            assert!(is_truthy(on), "{on} should read as on");
+        }
+        for off in ["0", "false", "no", "off", "enabled", "ture", ""] {
+            assert!(!is_truthy(off), "{off} should read as off");
+        }
+    }
+
+    /// A blank `auth_type` is an unset one, not a typo to refuse. Otherwise a
+    /// config file with an empty placeholder stops every command.
+    #[test]
+    fn load_blank_auth_type_in_the_config_file_is_treated_as_unset() {
+        let _lock = ProcessEnvLock::acquire();
+        let dir = TempDir::new().unwrap();
+        write_config(
+            dir.path(),
+            "[default]\nhost = \"x.atlassian.net\"\nemail = \"me@example.com\"\n\
+             token = \"t\"\nauth_type = \"  \"\n",
+        )
+        .unwrap();
+        let _config_dir = set_config_dir_env(dir.path());
+        let _token = EnvVarGuard::unset("JIRA_TOKEN");
+        let _auth = EnvVarGuard::unset("JIRA_AUTH_TYPE");
+
+        let config = Config::load(None, None, None).unwrap();
+        assert_eq!(config.auth_type, AuthType::Basic);
+    }
+
+    #[test]
+    fn auth_type_refuses_a_typo_rather_than_falling_back_to_basic() {
+        assert_eq!(parse_auth_type("pat").unwrap(), AuthType::Pat);
+        assert_eq!(parse_auth_type("PAT").unwrap(), AuthType::Pat);
+        assert_eq!(parse_auth_type("basic").unwrap(), AuthType::Basic);
+
+        let err = parse_auth_type("ptt").unwrap_err().to_string();
+        assert!(err.contains("ptt"), "got: {err}");
+        assert!(
+            err.contains("pat"),
+            "the message must name the real spelling"
+        );
+    }
+
+    #[test]
+    fn api_version_refuses_anything_the_client_cannot_address() {
+        assert_eq!(parse_api_version("2").unwrap(), 2);
+        assert_eq!(parse_api_version("3").unwrap(), 3);
+
+        for bad in ["v3", "", "3.0", "latest"] {
+            assert!(
+                parse_api_version(bad).is_err(),
+                "{bad} is not a version number"
+            );
+        }
+        // Parses as a u8 and is still wrong: there is no /rest/api/7/.
+        let err = parse_api_version("7").unwrap_err().to_string();
+        assert!(err.contains('7'), "got: {err}");
     }
 
     #[test]

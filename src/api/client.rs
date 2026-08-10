@@ -1134,10 +1134,7 @@ fn default_status_message(status: u16) -> String {
 }
 
 fn should_include_raw_error_body() -> bool {
-    matches!(
-        std::env::var("JIRA_DEBUG_HTTP").ok().as_deref(),
-        Some("1" | "true" | "TRUE" | "yes" | "YES")
-    )
+    std::env::var("JIRA_DEBUG_HTTP").is_ok_and(|value| crate::config::is_truthy(&value))
 }
 
 #[derive(Debug, serde::Deserialize)]
