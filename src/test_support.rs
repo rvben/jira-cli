@@ -94,7 +94,14 @@ pub fn write_config(dir: &Path, body: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn config_dir_env_name() -> &'static str {
+/// The environment variable config discovery reads to locate the config
+/// directory on this platform.
+///
+/// Tests that spawn the binary set it on the child rather than on themselves,
+/// which is why this is public: handing the child its own environment means
+/// they need no `ProcessEnvLock` and cannot inherit a real token from the
+/// developer's shell.
+pub fn config_dir_env_name() -> &'static str {
     #[cfg(target_os = "windows")]
     {
         "APPDATA"

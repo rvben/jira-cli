@@ -2,7 +2,7 @@ use std::process::Command;
 
 use assert_cmd::prelude::*;
 use jira_cli::output::exit_codes;
-use jira_cli::test_support::{EnvVarGuard, ProcessEnvLock, set_config_dir_env, write_config};
+use jira_cli::test_support::{config_dir_env_name, write_config};
 use tempfile::TempDir;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -16,22 +16,31 @@ token = "secret-token"
 "#
 }
 
+/// A `jira` invocation whose config lives in `dir` and whose `JIRA_*` variables
+/// start out unset.
+///
+/// The child is handed its own environment instead of inheriting one this
+/// process mutated. That keeps a real `JIRA_TOKEN` in the developer's shell out
+/// of the test, and it means these tests need no cross-process lock, so adding
+/// one does not push another over a lock timeout.
+fn jira_cmd(dir: &TempDir) -> Command {
+    let mut cmd = Command::cargo_bin("jira").unwrap();
+    cmd.env(config_dir_env_name(), dir.path())
+        .env("NO_COLOR", "1")
+        .env_remove("JIRA_HOST")
+        .env_remove("JIRA_EMAIL")
+        .env_remove("JIRA_TOKEN")
+        .env_remove("JIRA_PROFILE")
+        .env_remove("JIRA_READ_ONLY");
+    cmd
+}
+
 #[test]
 fn config_show_auto_json_when_piped() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
     let config_path = write_config(dir.path(), config_fixture()).unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _host = EnvVarGuard::unset("JIRA_HOST");
-    let _email = EnvVarGuard::unset("JIRA_EMAIL");
-    let _token = EnvVarGuard::unset("JIRA_TOKEN");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["config", "show"])
-        .output()
-        .unwrap();
+    let output = jira_cmd(&dir).args(["config", "show"]).output().unwrap();
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -45,15 +54,9 @@ fn config_show_auto_json_when_piped() {
 
 #[test]
 fn config_init_auto_json_when_piped() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["config", "init"])
-        .output()
-        .unwrap();
+    let output = jira_cmd(&dir).args(["config", "init"]).output().unwrap();
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -83,15 +86,9 @@ fn config_init_auto_json_when_piped() {
 
 #[test]
 fn init_alias_matches_config_init_json_contract() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["init"])
-        .output()
-        .unwrap();
+    let output = jira_cmd(&dir).args(["init"]).output().unwrap();
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -113,19 +110,9 @@ fn init_alias_matches_config_init_json_contract() {
 
 #[test]
 fn config_show_invalid_config_returns_input_exit_code() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _host = EnvVarGuard::unset("JIRA_HOST");
-    let _email = EnvVarGuard::unset("JIRA_EMAIL");
-    let _token = EnvVarGuard::unset("JIRA_TOKEN");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["config", "show"])
-        .output()
-        .unwrap();
+    let output = jira_cmd(&dir).args(["config", "show"]).output().unwrap();
 
     assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
     assert!(output.stdout.is_empty());
@@ -151,7 +138,6 @@ fn error_envelope(stderr: &str) -> serde_json::Value {
 
 #[test]
 fn config_remove_emits_declared_json_contract() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
     let path = write_config(
         dir.path(),
@@ -159,10 +145,8 @@ fn config_remove_emits_declared_json_contract() {
          [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n",
     )
     .unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args(["config", "remove", "work"])
         .output()
         .unwrap();
@@ -195,7 +179,6 @@ fn config_remove_emits_declared_json_contract() {
 
 #[test]
 fn config_remove_missing_profile_is_not_found() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
     write_config(
         dir.path(),
@@ -203,10 +186,8 @@ fn config_remove_missing_profile_is_not_found() {
          [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n",
     )
     .unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args(["config", "remove", "nosuchprofile"])
         .output()
         .unwrap();
@@ -230,17 +211,10 @@ fn config_remove_missing_profile_is_not_found() {
 
 #[test]
 fn unknown_profile_selection_is_not_found() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
     write_config(dir.path(), config_fixture()).unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _host = EnvVarGuard::unset("JIRA_HOST");
-    let _email = EnvVarGuard::unset("JIRA_EMAIL");
-    let _token = EnvVarGuard::unset("JIRA_TOKEN");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args(["--profile", "nosuchprofile", "config", "show"])
         .output()
         .unwrap();
@@ -254,15 +228,11 @@ fn unknown_profile_selection_is_not_found() {
 
 #[test]
 fn unknown_profile_with_no_named_profiles_does_not_render_an_empty_list() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
     // `config_fixture` defines [default] only, so there are no named profiles.
     write_config(dir.path(), config_fixture()).unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args(["--profile", "nosuchprofile", "config", "show"])
         .output()
         .unwrap();
@@ -299,24 +269,14 @@ fn completions_install_powershell_returns_input_error() {
 /// Run the `jira` binary against a MockServer. Sets all required env vars, runs
 /// the process to completion, and returns its output.
 fn run_jira_against(server: &MockServer, args: &[&str]) -> std::process::Output {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    // All `_`-prefixed guards below MUST remain in scope past `.output()`.
-    // They are RAII guards that restore the prior environment on drop, and
-    // their drop point is the end of this function — moving any of them
-    // (or the `Command::output()` call) into a separate statement would
-    // release the env vars before the child process inherits them.
-    let _config_dir = set_config_dir_env(dir.path());
-    // JiraClient::new preserves the http:// scheme, so the MockServer URI works as JIRA_HOST.
-    let host = server.uri();
-    let _host = EnvVarGuard::set("JIRA_HOST", &host);
-    let _email = EnvVarGuard::set("JIRA_EMAIL", "test@example.com");
-    let _token = EnvVarGuard::set("JIRA_TOKEN", "test-token");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
-    Command::cargo_bin("jira")
-        .unwrap()
+    jira_cmd(&dir)
         .args(args)
-        .env("NO_COLOR", "1")
+        // JiraClient::new preserves the http:// scheme, so the MockServer URI
+        // works as JIRA_HOST.
+        .env("JIRA_HOST", server.uri())
+        .env("JIRA_EMAIL", "test@example.com")
+        .env("JIRA_TOKEN", "test-token")
         .output()
         .unwrap()
 }
@@ -546,16 +506,8 @@ async fn issues_update_dispatch_combined_flags_send_one_put() {
 /// the schema structure diverges from the spec.
 #[test]
 fn schema_output_validates_against_clispec_v0_2() {
-    use jira_cli::test_support::{ProcessEnvLock, unset_config_dir_env};
-
-    let _env = ProcessEnvLock::acquire().unwrap();
-    let _config_dir = unset_config_dir_env();
-
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["schema"])
-        .output()
-        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
 
     assert!(
         output.status.success(),
@@ -671,16 +623,9 @@ fn version_is_success_output_with_a_silent_stderr() {
 /// agent has a structured envelope to read.
 #[test]
 fn machine_mode_stderr_is_only_the_envelope() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _host = EnvVarGuard::unset("JIRA_HOST");
-    let _email = EnvVarGuard::unset("JIRA_EMAIL");
-    let _token = EnvVarGuard::unset("JIRA_TOKEN");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args(["--json", "issues", "show", "PROJ-1"])
         .output()
         .unwrap();
@@ -698,16 +643,9 @@ fn machine_mode_stderr_is_only_the_envelope() {
 /// The mirror image: a human asking for text gets prose, not a JSON blob.
 #[test]
 fn text_mode_stderr_is_only_prose() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _host = EnvVarGuard::unset("JIRA_HOST");
-    let _email = EnvVarGuard::unset("JIRA_EMAIL");
-    let _token = EnvVarGuard::unset("JIRA_TOKEN");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args(["-o", "text", "issues", "show", "PROJ-1"])
         .output()
         .unwrap();
@@ -749,19 +687,12 @@ fn text_mode_usage_error_keeps_clap_prose() {
 /// declared this kind since v0.3; this asserts the binary can actually emit it.
 #[test]
 fn bulk_transition_without_yes_reports_confirmation_required() {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
     write_config(dir.path(), config_fixture()).unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let _host = EnvVarGuard::unset("JIRA_HOST");
-    let _email = EnvVarGuard::unset("JIRA_EMAIL");
-    let _token = EnvVarGuard::unset("JIRA_TOKEN");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
 
     // stdin is a pipe under `output()`, so the confirmation cannot be prompted
     // for and the command must refuse instead of proceeding.
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&dir)
         .args([
             "--json",
             "issues",
@@ -788,19 +719,13 @@ fn bulk_transition_without_yes_reports_confirmation_required() {
 /// Same as `run_jira_against`, but with `JIRA_READ_ONLY` set, to exercise the
 /// read-only write guard against a real subprocess.
 fn run_jira_against_read_only(server: &MockServer, args: &[&str]) -> std::process::Output {
-    let _env = ProcessEnvLock::acquire().unwrap();
     let dir = TempDir::new().unwrap();
-    let _config_dir = set_config_dir_env(dir.path());
-    let host = server.uri();
-    let _host = EnvVarGuard::set("JIRA_HOST", &host);
-    let _email = EnvVarGuard::set("JIRA_EMAIL", "test@example.com");
-    let _token = EnvVarGuard::set("JIRA_TOKEN", "test-token");
-    let _profile = EnvVarGuard::unset("JIRA_PROFILE");
-    let _read_only = EnvVarGuard::set("JIRA_READ_ONLY", "1");
-    Command::cargo_bin("jira")
-        .unwrap()
+    jira_cmd(&dir)
         .args(args)
-        .env("NO_COLOR", "1")
+        .env("JIRA_HOST", server.uri())
+        .env("JIRA_EMAIL", "test@example.com")
+        .env("JIRA_TOKEN", "test-token")
+        .env("JIRA_READ_ONLY", "1")
         .output()
         .unwrap()
 }
@@ -824,13 +749,8 @@ fn issue_with_attachments(attachments: serde_json::Value) -> serde_json::Value {
 
 /// The declaration `jira schema` emits for `command`.
 fn schema_command(command: &str) -> serde_json::Value {
-    let _env = ProcessEnvLock::acquire().unwrap();
-    let _config_dir = jira_cli::test_support::unset_config_dir_env();
-    let output = Command::cargo_bin("jira")
-        .unwrap()
-        .args(["schema"])
-        .output()
-        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
     assert!(output.status.success());
     let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     schema["commands"]
@@ -846,12 +766,18 @@ fn schema_command(command: &str) -> serde_json::Value {
 /// what a command's JSON output looks like. Assert that the keys of `actual`,
 /// plus `extra` (fields the command emits outside that object), are exactly the
 /// fields declared for `command`.
+///
+/// A field declared `optional` may be absent, since that is what the declaration
+/// promises. Everything else is checked both ways: an undeclared key is an
+/// undocumented contract and a missing declared key is a broken one.
 fn assert_json_keys_match_schema(command: &str, actual: &serde_json::Value, extra: &[&str]) {
     let schema = schema_command(command);
-    let declared: std::collections::BTreeSet<&str> = schema["output_fields"]
-        .as_array()
-        .unwrap()
+    let fields = schema["output_fields"].as_array().unwrap();
+    let declared: std::collections::BTreeSet<&str> =
+        fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    let required: std::collections::BTreeSet<&str> = fields
         .iter()
+        .filter(|f| f["optional"] != serde_json::Value::Bool(true))
         .map(|f| f["name"].as_str().unwrap())
         .collect();
     let mut emitted: std::collections::BTreeSet<&str> = actual
@@ -861,9 +787,17 @@ fn assert_json_keys_match_schema(command: &str, actual: &serde_json::Value, extr
         .map(String::as_str)
         .collect();
     emitted.extend(extra.iter().copied());
-    assert_eq!(
-        emitted, declared,
-        "{command} JSON keys must match the fields `jira schema` declares"
+
+    let undeclared: Vec<&str> = emitted.difference(&declared).copied().collect();
+    assert!(
+        undeclared.is_empty(),
+        "{command} emits {undeclared:?}, which `jira schema` does not declare"
+    );
+    let missing: Vec<&str> = required.difference(&emitted).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "`jira schema` declares {missing:?} for {command}, which it does not emit \
+         (mark the field `optional` if it is genuinely conditional)"
     );
 }
 
@@ -1330,5 +1264,899 @@ async fn issues_attachments_degrades_absent_author_and_mime_type() {
         cells.get(5),
         Some(&"-"),
         "Author column must show '-' when author is absent; row: {row}"
+    );
+}
+
+// ── schema conformance: what the binary prints vs what `jira schema` declares ──
+
+/// A `/search/jql` page carrying one issue.
+fn search_page(issue: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "issues": [issue], "isLast": true })
+}
+
+/// A fully populated issue: every optional field Jira can return is present, so
+/// a key missing from the output is a defect rather than absent source data.
+fn full_issue() -> serde_json::Value {
+    serde_json::json!({
+        "id": "10001",
+        "key": "PROJ-1",
+        "self": "https://test.atlassian.net/rest/api/3/issue/PROJ-1",
+        "fields": {
+            "summary": "A summary",
+            "status": { "name": "To Do" },
+            "assignee": { "displayName": "Alice", "accountId": "abc123" },
+            "reporter": { "displayName": "Bob", "accountId": "def456" },
+            "priority": { "name": "Medium" },
+            "issuetype": { "name": "Bug" },
+            "description": {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Body"}]}]
+            },
+            "labels": ["backend"],
+            "components": [{ "id": "1", "name": "api", "description": "API" }],
+            "fixVersions": [{ "id": "2", "name": "1.0" }],
+            "versions": [{ "id": "3", "name": "0.9" }],
+            "created": "2024-01-15T10:00:00.000Z",
+            "updated": "2024-01-20T15:30:00.000Z",
+            "comment": {
+                "comments": [{
+                    "id": "10100",
+                    "author": { "displayName": "Alice", "accountId": "abc123" },
+                    "body": { "type": "doc", "version": 1, "content": [] },
+                    "created": "2024-01-21T09:00:00.000Z",
+                    "updated": "2024-01-21T09:05:00.000Z"
+                }],
+                "total": 1
+            },
+            "issuelinks": [{
+                "id": "20001",
+                "type": { "id": "10", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+                "outwardIssue": { "key": "PROJ-2", "fields": { "summary": "Other", "status": { "name": "Done" } } }
+            }]
+        }
+    })
+}
+
+/// An issue with every optional field omitted, which is what Jira returns for an
+/// unassigned issue in a project that does not use priorities.
+fn bare_issue() -> serde_json::Value {
+    serde_json::json!({
+        "id": "10002",
+        "key": "PROJ-2",
+        "fields": {
+            "summary": "A summary",
+            "status": { "name": "To Do" },
+            "issuetype": { "name": "Task" }
+        }
+    })
+}
+
+/// `issues list`, `issues mine` and `search` all render issues through the same
+/// function, so one wrong declaration is three wrong contracts.
+#[tokio::test]
+async fn issue_summary_commands_emit_exactly_the_fields_they_declare() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_page(full_issue())))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "abc123", "displayName": "Alice"
+        })))
+        .mount(&server)
+        .await;
+
+    for (command, args) in [
+        ("issues list", &["issues", "list", "--json"][..]),
+        ("issues mine", &["issues", "mine", "--json"][..]),
+        ("search", &["search", "project = PROJ", "--json"][..]),
+    ] {
+        let output = run_jira_against(&server, args);
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_json_keys_match_schema(command, &json["items"][0], &[]);
+    }
+}
+
+#[tokio::test]
+async fn issues_show_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(full_issue()))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "show", "PROJ-1", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues show", &json, &[]);
+}
+
+#[tokio::test]
+async fn issues_log_work_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/worklog"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "30001",
+            "author": { "displayName": "Alice", "accountId": "abc123" },
+            "timeSpent": "1h 30m",
+            "timeSpentSeconds": 5400,
+            "started": "2024-01-15T10:00:00.000+0000",
+            "created": "2024-01-15T10:01:00.000+0000"
+        })))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &["issues", "log-work", "PROJ-1", "--time", "1h 30m", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues log-work", &json, &[]);
+}
+
+/// The bulk commands report a count an agent uses to decide whether to retry, so
+/// the key that count lives under has to be the one the schema names.
+#[tokio::test]
+async fn bulk_commands_emit_exactly_the_fields_they_declare() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_page(full_issue())))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transitions": [{ "id": "31", "name": "Done", "to": { "name": "Done" } }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1/assignee"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    for (command, args) in [
+        (
+            "issues bulk-transition",
+            &[
+                "issues",
+                "bulk-transition",
+                "--jql",
+                "project = PROJ",
+                "--to",
+                "Done",
+                "--yes",
+                "--json",
+            ][..],
+        ),
+        (
+            "issues bulk-assign",
+            &[
+                "issues",
+                "bulk-assign",
+                "--jql",
+                "project = PROJ",
+                "--assignee",
+                "abc123",
+                "--yes",
+                "--json",
+            ][..],
+        ),
+    ] {
+        let output = run_jira_against(&server, args);
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_json_keys_match_schema(command, &json, &[]);
+    }
+}
+
+#[tokio::test]
+async fn projects_versions_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/PROJ/versions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "10000",
+                "name": "1.0",
+                "description": "First release",
+                "released": true,
+                "archived": false,
+                "releaseDate": "2024-02-01"
+            }])),
+        )
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["projects", "versions", "PROJ", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("projects versions", &json["versions"][0], &[]);
+}
+
+#[tokio::test]
+async fn sprints_list_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{ "id": 1, "name": "Board One", "type": "scrum" }],
+            "isLast": true,
+            "total": 1
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board/1/sprint"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{
+                "id": 5,
+                "name": "Sprint 5",
+                "state": "closed",
+                "startDate": "2024-01-01T00:00:00.000Z",
+                "endDate": "2024-01-14T00:00:00.000Z",
+                "completeDate": "2024-01-14T18:00:00.000Z"
+            }],
+            "isLast": true
+        })))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["sprints", "list", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("sprints list", &json["sprints"][0], &[]);
+}
+
+/// `init` reaches no network, so it is asserted against the binary directly.
+#[test]
+fn init_emits_exactly_the_fields_it_declares() {
+    for (command, args) in [
+        ("init", &["init", "--json"][..]),
+        ("config init", &["config", "init", "--json"][..]),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let output = jira_cmd(&dir).args(args).output().unwrap();
+        assert!(output.status.success());
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_json_keys_match_schema(command, &json, &[]);
+    }
+}
+
+/// Assigning and unassigning are two branches of one command. If they emit
+/// different keys, an agent has to know which branch ran to parse the result,
+/// and only one of the two can match the schema.
+#[tokio::test]
+async fn issues_assign_emits_the_same_keys_whether_it_assigns_or_unassigns() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1/assignee"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let assigned = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "assign",
+            "PROJ-1",
+            "--assignee",
+            "abc123",
+            "--json",
+        ],
+    );
+    assert!(
+        assigned.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&assigned.stderr)
+    );
+    let assigned: serde_json::Value = serde_json::from_slice(&assigned.stdout).unwrap();
+    assert_json_keys_match_schema("issues assign", &assigned, &[]);
+    assert_eq!(assigned["accountId"], "abc123");
+
+    let unassigned = run_jira_against(
+        &server,
+        &["issues", "assign", "PROJ-1", "--assignee", "none", "--json"],
+    );
+    assert!(
+        unassigned.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&unassigned.stderr)
+    );
+    let unassigned: serde_json::Value = serde_json::from_slice(&unassigned.stdout).unwrap();
+    assert_json_keys_match_schema("issues assign", &unassigned, &[]);
+    assert!(
+        unassigned["accountId"].is_null(),
+        "an unassigned issue is reported by a null accountId, got: {}",
+        unassigned["accountId"]
+    );
+}
+
+/// The table renders an absent assignee or priority as "-", which is the right
+/// placeholder for a column and a lie in JSON: it is indistinguishable from a
+/// user actually named "-", or from a priority literally called "-".
+#[tokio::test]
+async fn absent_issue_fields_are_null_in_json_and_dashes_only_in_the_table() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_page(bare_issue())))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(bare_issue()))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "list", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let item = &json["items"][0];
+    assert!(
+        item["assignee"].is_null(),
+        "an unassigned issue must report a null assignee, got: {}",
+        item["assignee"]
+    );
+    assert!(
+        item["priority"].is_null(),
+        "an issue with no priority must report null, got: {}",
+        item["priority"]
+    );
+
+    let output = run_jira_against(&server, &["issues", "show", "PROJ-2", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for field in ["assignee", "priority", "reporter", "description"] {
+        assert!(
+            json[field].is_null(),
+            "issues show must report an absent {field} as null, got: {}",
+            json[field]
+        );
+    }
+
+    // Same data, table mode: "-" is correct here, and its presence proves the
+    // JSON assertions above are not just testing an empty response.
+    let output = run_jira_against(&server, &["issues", "show", "PROJ-2", "--output", "text"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Assignee:   -"),
+        "table must still show a dash for an unassigned issue; got:\n{stdout}"
+    );
+}
+
+/// `issues comments` renders the same comment shape `issues show` nests, so its
+/// declaration has to describe the same keys.
+#[tokio::test]
+async fn issues_comments_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(full_issue()))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "comments", "PROJ-1", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues comments", &json["comments"][0], &[]);
+}
+
+/// `issues create` grows keys when `--parent` or `--sprint` is passed, which is
+/// why they are declared `optional`. Both shapes are asserted, so neither the
+/// bare form nor the enriched one can drift from the declaration.
+#[tokio::test]
+async fn issues_create_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "10001", "key": "PROJ-1",
+            "self": "https://test.atlassian.net/rest/api/3/issue/10001"
+        })))
+        .mount(&server)
+        .await;
+    // A numeric --sprint is resolved by ID, so no board scan is involved.
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/sprint/5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 5, "name": "Sprint 5", "state": "active"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/agile/1.0/sprint/5/issue"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let bare = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "create",
+            "--project",
+            "PROJ",
+            "--type",
+            "Task",
+            "--summary",
+            "S",
+            "--json",
+        ],
+    );
+    assert!(
+        bare.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    let bare: serde_json::Value = serde_json::from_slice(&bare.stdout).unwrap();
+    assert_json_keys_match_schema("issues create", &bare, &[]);
+    for optional in ["parent", "sprintId", "sprintName"] {
+        assert!(
+            bare.get(optional).is_none(),
+            "an unadorned create must not invent a {optional} key: {bare}"
+        );
+    }
+
+    let enriched = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "create",
+            "--project",
+            "PROJ",
+            "--type",
+            "Task",
+            "--summary",
+            "S",
+            "--parent",
+            "PROJ-9",
+            "--sprint",
+            "5",
+            "--json",
+        ],
+    );
+    assert!(
+        enriched.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&enriched.stderr)
+    );
+    let enriched: serde_json::Value = serde_json::from_slice(&enriched.stdout).unwrap();
+    assert_json_keys_match_schema("issues create", &enriched, &[]);
+    // Without this the optional keys could be declared but never emitted, and
+    // the relaxed check above would never notice.
+    for optional in ["parent", "sprintId", "sprintName"] {
+        assert!(
+            enriched.get(optional).is_some(),
+            "--parent/--sprint must produce a {optional} key: {enriched}"
+        );
+    }
+}
+
+/// The single-issue write commands, each asserted against its declaration.
+#[tokio::test]
+async fn issue_write_commands_emit_exactly_the_fields_they_declare() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/comment"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "10100",
+            "author": { "displayName": "Alice", "accountId": "abc123" },
+            "body": { "type": "doc", "version": 1, "content": [] },
+            "created": "2024-01-21T09:00:00.000Z",
+            "updated": "2024-01-21T09:00:00.000Z"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transitions": [{
+                "id": "31", "name": "Done",
+                "to": { "name": "Done", "statusCategory": { "key": "done", "name": "Done" } }
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    // A numeric --sprint is resolved by ID, so no board scan is involved.
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/sprint/5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 5, "name": "Sprint 5", "state": "active"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/agile/1.0/sprint/5/issue"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    for (command, args) in [
+        (
+            "issues update",
+            &["issues", "update", "PROJ-1", "--summary", "New", "--json"][..],
+        ),
+        (
+            "issues comment",
+            &["issues", "comment", "PROJ-1", "--body", "Hello", "--json"][..],
+        ),
+        (
+            "issues transition",
+            &["issues", "transition", "PROJ-1", "--to", "Done", "--json"][..],
+        ),
+        (
+            "issues move",
+            &["issues", "move", "PROJ-1", "--sprint", "5", "--json"][..],
+        ),
+    ] {
+        let output = run_jira_against(&server, args);
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_json_keys_match_schema(command, &json, &[]);
+    }
+}
+
+/// Issue links: listing types, creating a link, and removing one.
+#[tokio::test]
+async fn issue_link_commands_emit_exactly_the_fields_they_declare() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issueLinkType"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issueLinkTypes": [{
+                "id": "10000", "name": "Blocks",
+                "inward": "is blocked by", "outward": "blocks"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issueLink"))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/rest/api/3/issueLink/20001"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "link-types", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues link-types", &json[0], &[]);
+
+    for (command, args) in [
+        (
+            "issues link",
+            &[
+                "issues",
+                "link",
+                "PROJ-1",
+                "--to",
+                "PROJ-2",
+                "--link-type",
+                "Blocks",
+                "--json",
+            ][..],
+        ),
+        (
+            "issues unlink",
+            &["issues", "unlink", "20001", "--json"][..],
+        ),
+    ] {
+        let output = run_jira_against(&server, args);
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_json_keys_match_schema(command, &json, &[]);
+    }
+}
+
+/// `issues list-transitions` serializes the API type straight through, so its
+/// declaration is the only thing standing between an agent and a silent rename.
+#[tokio::test]
+async fn issues_list_transitions_emits_exactly_the_fields_it_declares() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "transitions": [{
+                "id": "31", "name": "Done",
+                "to": { "name": "Done", "statusCategory": { "key": "done", "name": "Done" } }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["issues", "list-transitions", "PROJ-1", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("issues list-transitions", &json[0], &[]);
+}
+
+/// The project, user, board and field listings.
+#[tokio::test]
+async fn read_only_listings_emit_exactly_the_fields_they_declare() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{ "id": "10000", "key": "PROJ", "name": "Project", "projectTypeKey": "software" }],
+            "startAt": 0, "maxResults": 50, "total": 1, "isLast": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/PROJ"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "10000", "key": "PROJ", "name": "Project", "projectTypeKey": "software"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/PROJ/components"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "1", "name": "api", "description": "API layer" }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/user/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "accountId": "abc123", "displayName": "Alice", "emailAddress": "alice@example.com" }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{ "id": 1, "name": "Board One", "type": "scrum" }],
+            "startAt": 0, "maxResults": 50, "total": 1, "isLast": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "summary", "name": "Summary", "custom": false,
+              "schema": { "type": "string" } }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "abc123",
+            "displayName": "Alice",
+            "emailAddress": "alice@example.com"
+        })))
+        .mount(&server)
+        .await;
+
+    // (command, args, the key the element list lives under, or "" for a bare object)
+    for (command, args, envelope) in [
+        (
+            "projects list",
+            &["projects", "list", "--json"][..],
+            "projects",
+        ),
+        (
+            "projects show",
+            &["projects", "show", "PROJ", "--json"][..],
+            "",
+        ),
+        (
+            "projects components",
+            &["projects", "components", "PROJ", "--json"][..],
+            "components",
+        ),
+        (
+            "users search",
+            &["users", "search", "alice", "--json"][..],
+            "users",
+        ),
+        ("boards list", &["boards", "list", "--json"][..], "boards"),
+        ("fields list", &["fields", "list", "--json"][..], "fields"),
+        ("myself", &["myself", "--json"][..], ""),
+    ] {
+        let output = run_jira_against(&server, args);
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let element = if envelope.is_empty() {
+            &json
+        } else {
+            &json[envelope][0]
+        };
+        assert_json_keys_match_schema(command, element, &[]);
+    }
+}
+
+/// The two config commands that emit data, asserted against the same contract
+/// as everything else. Neither reaches the network.
+#[test]
+fn config_commands_emit_exactly_the_fields_they_declare() {
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        "[default]\nhost = \"work.atlassian.net\"\nemail = \"me@example.com\"\ntoken = \"tok\"\n\n\
+         [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n",
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir).args(["config", "show"]).output().unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("config show", &json, &[]);
+
+    let output = jira_cmd(&dir)
+        .args(["config", "remove", "work"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("config remove", &json, &[]);
+}
+
+/// Every command whose JSON output is asserted against `jira schema` by a test
+/// in this file.
+///
+/// This is a tripwire, not proof: it forces a decision when a command starts
+/// declaring `output_fields`, because the test below fails until the command is
+/// listed. Adding a name here without writing the assertion defeats it, which is
+/// a deliberate act rather than the passive drift this guards against.
+const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
+    "boards list",
+    "config init",
+    "config remove",
+    "config show",
+    "fields list",
+    "init",
+    "issues assign",
+    "issues attach",
+    "issues attachments",
+    "issues bulk-assign",
+    "issues bulk-transition",
+    "issues comment",
+    "issues comments",
+    "issues create",
+    "issues delete-attachment",
+    "issues download-attachment",
+    "issues link",
+    "issues link-types",
+    "issues list",
+    "issues list-transitions",
+    "issues log-work",
+    "issues mine",
+    "issues move",
+    "issues show",
+    "issues transition",
+    "issues unlink",
+    "issues update",
+    "myself",
+    "projects components",
+    "projects list",
+    "projects show",
+    "projects versions",
+    "search",
+    "sprints list",
+    "users search",
+];
+
+/// A command that declares `output_fields` is making a promise to an agent, and
+/// an unasserted promise is how these declarations drifted from the binary in
+/// the first place.
+#[test]
+fn every_command_declaring_output_fields_has_a_conformance_test() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let declaring: std::collections::BTreeSet<&str> = schema["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["output_fields"].as_array().is_some_and(|f| !f.is_empty()))
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    let checked: std::collections::BTreeSet<&str> =
+        COMMANDS_WITH_A_CONFORMANCE_TEST.iter().copied().collect();
+
+    let unchecked: Vec<&str> = declaring.difference(&checked).copied().collect();
+    assert!(
+        unchecked.is_empty(),
+        "these commands declare output_fields with nothing asserting the binary \
+         agrees: {unchecked:?}"
+    );
+    let stale: Vec<&str> = checked.difference(&declaring).copied().collect();
+    assert!(
+        stale.is_empty(),
+        "these commands are listed as checked but no longer declare output_fields: {stale:?}"
     );
 }
