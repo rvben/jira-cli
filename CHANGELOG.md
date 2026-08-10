@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.2](https://github.com/rvben/jira-cli/compare/v0.4.1...v0.4.2) - 2026-08-10
+
+**Piping into a command that stops reading no longer panics.** `jira issues list
+--json | head -5` printed a Rust backtrace and exited 101, which is not one of
+the exit codes the CLI declares. Rust ignores `SIGPIPE`, so a closed downstream
+turned every write into an error that `println!` panics on. The default is now
+restored and the process is terminated by the signal like any other member of a
+pipeline, which shells report as 141.
+
+**Two paging paths could report partial results as complete.** Both read a
+counter that defaulted to zero when the server omitted it: on Data Center a
+missing `total` made the first page look like the last, and on Cloud a search
+page missing its `issues` array was read as a page of zero, which the cursor
+walk treats as the end of the results. Either way `--all` returned what it had
+and exited 0. Absent counters are now reported as unknown or rejected, never as
+zero.
+
+A config file defining `profiles` as something other than a table made `config
+setup` panic after the credentials had already been entered; it now says which
+file and key to fix.
+
+### Fixed
+
+- **search**: stop reading a malformed skip page as the end of the results ([bb0d377](https://github.com/rvben/jira-cli/commit/bb0d3770efc2a425e6443fcb376569bfd412a3e7))
+- **config**: report a non-table `profiles` key instead of panicking ([12f5111](https://github.com/rvben/jira-cli/commit/12f5111bc2c17941dfb5b868cc0d9f73258238f3))
+- exit quietly when a downstream stops reading ([1c6e055](https://github.com/rvben/jira-cli/commit/1c6e0554b95236b9857369f6f84a77d3d10fbfcf))
+- **search**: report an absent v2 total as unknown, not as zero ([b80f29e](https://github.com/rvben/jira-cli/commit/b80f29ea5528ea78f9ac72a2b54cad1108b83e8b))
+
 ## [0.4.1](https://github.com/rvben/jira-cli/compare/v0.4.0...v0.4.1) - 2026-08-10
 
 **`JIRA_READ_ONLY` could silently fail open.** It matched `1`, `true`, `yes` and
