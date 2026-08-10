@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.1](https://github.com/rvben/jira-cli/compare/v0.4.0...v0.4.1) - 2026-08-10
+
+**`JIRA_READ_ONLY` could silently fail open.** It matched `1`, `true`, `yes` and
+`on` exactly, so `JIRA_READ_ONLY=True` resolved to "off" and every write went
+through while the guard looked enabled. Values are now matched
+case-insensitively, and anything that is neither an on nor an off value is
+rejected as a config error instead of read as "off".
+
+`JIRA_AUTH_TYPE` and `JIRA_API_VERSION` had the same shape of bug: a typo fell
+back to basic auth (surfacing as an opaque 401 from Jira), and an unsupported
+version built requests against `/rest/api/<n>/` and reported Jira's 404 as the
+problem. Both now reject an unrecognised value and name what they accept.
+
+If you rely on one of those values being accepted loosely, the command now
+exits 2 rather than continuing with a default. `JIRA_DEBUG_HTTP` is unchanged in
+this respect: a typo there is still read as off, because failing a command over
+a debug switch costs more than the missed logging.
+
+### Added
+
+- **schema**: declare read-only mode and diagnostics in the schema ([8b37ab3](https://github.com/rvben/jira-cli/commit/8b37ab39a8d51181e8d0ca3db5bb379c94debddf))
+
+### Fixed
+
+- **config**: reject unrecognised environment values instead of defaulting ([af952bb](https://github.com/rvben/jira-cli/commit/af952bb35205363712d2136f44df6df89bfebef0))
+- **schema**: show auth_type and api_version in the example config ([8e781f2](https://github.com/rvben/jira-cli/commit/8e781f27125f2a7848914509e6da44c0cdd6519f))
+
 ## [0.4.0](https://github.com/rvben/jira-cli/compare/v0.3.16...v0.4.0) - 2026-08-10
 
 Attachment operations were contributed by [@phlppbmm](https://github.com/phlppbmm)
