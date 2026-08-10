@@ -245,7 +245,17 @@ jira schema | jq '.commands[] | select(.name == "issues list")'
 
 ### Read-only mode
 
-Set `JIRA_READ_ONLY=1` to block all write operations (create, update, transition, comment, assign, etc.). The CLI will return exit code 2 with a clear error message for any blocked command. This is useful when giving an AI agent read access to Jira without the risk of unintended modifications.
+Set `JIRA_READ_ONLY=1` to block every command that writes to Jira. The CLI returns exit code 2 with a structured error for any blocked command, before it opens a connection. This is useful when giving an AI agent read access to Jira without the risk of unintended modifications.
+
+The guard covers writes to Jira, not writes to your disk: `jira init`, `jira config init`, `jira config remove` and `jira issues download-attachment` still work, because they change local files only.
+
+`jira schema` lists the blocked commands under `read_only.blocked_commands`, so an agent can see what it is allowed to do without trying:
+
+```sh
+jira schema | jq '.read_only'
+```
+
+A value the CLI does not recognise (`JIRA_READ_ONLY=enabled`, or a typo) is rejected as a config error rather than read as "off", so a mis-set guard fails loudly instead of quietly allowing writes.
 
 You can set it in the config file:
 

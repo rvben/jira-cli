@@ -876,29 +876,6 @@ async fn issues_attach_missing_required_file_flag_is_rejected() {
 }
 
 #[tokio::test]
-async fn attachment_write_commands_are_blocked_in_read_only_mode() {
-    let server = MockServer::start().await;
-
-    for args in [
-        &["issues", "attach", "PROJ-1", "--file", "irrelevant.bin"][..],
-        &["issues", "delete-attachment", "10001"][..],
-    ] {
-        let output = run_jira_against_read_only(&server, args);
-        assert_eq!(
-            output.status.code(),
-            Some(exit_codes::INPUT_ERROR),
-            "args: {args:?}"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("read-only"),
-            "args: {args:?}, stderr: {stderr}"
-        );
-    }
-    assert!(server.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn attachment_read_commands_are_allowed_in_read_only_mode() {
     let server = MockServer::start().await;
     let dest = TempDir::new().unwrap();
@@ -2265,5 +2242,334 @@ fn every_declared_object_either_has_a_shape_or_a_stated_reason() {
     assert!(
         stale.is_empty(),
         "these are excused from declaring a shape but no longer need to be: {stale:?}"
+    );
+}
+
+// ── JIRA_READ_ONLY guard ─────────────────────────────────────────────────────
+
+/// Every command that writes to Jira, with the shortest invocation clap accepts.
+///
+/// Only the required arguments are given: the guard runs before the command is
+/// dispatched, so nothing here needs to be a request Jira would have honoured.
+const JIRA_WRITE_INVOCATIONS: &[(&str, &[&str])] = &[
+    (
+        "issues create",
+        &[
+            "issues",
+            "create",
+            "--project",
+            "PROJ",
+            "--summary",
+            "Summary",
+        ],
+    ),
+    ("issues update", &["issues", "update", "PROJ-1"]),
+    (
+        "issues move",
+        &["issues", "move", "PROJ-1", "--sprint", "5"],
+    ),
+    (
+        "issues comment",
+        &["issues", "comment", "PROJ-1", "--body", "text"],
+    ),
+    (
+        "issues transition",
+        &["issues", "transition", "PROJ-1", "--to", "Done"],
+    ),
+    (
+        "issues assign",
+        &["issues", "assign", "PROJ-1", "--assignee", "abc123"],
+    ),
+    (
+        "issues link",
+        &["issues", "link", "PROJ-1", "--to", "PROJ-2"],
+    ),
+    ("issues unlink", &["issues", "unlink", "10001"]),
+    (
+        "issues log-work",
+        &["issues", "log-work", "PROJ-1", "--time", "1h"],
+    ),
+    (
+        "issues attach",
+        &["issues", "attach", "PROJ-1", "--file", "irrelevant.bin"],
+    ),
+    (
+        "issues delete-attachment",
+        &["issues", "delete-attachment", "10001"],
+    ),
+    (
+        "issues bulk-transition",
+        &[
+            "issues",
+            "bulk-transition",
+            "--jql",
+            "project = PROJ",
+            "--to",
+            "Done",
+        ],
+    ),
+    (
+        "issues bulk-assign",
+        &[
+            "issues",
+            "bulk-assign",
+            "--jql",
+            "project = PROJ",
+            "--assignee",
+            "abc123",
+        ],
+    ),
+];
+
+/// An environment variable the CLI reads is part of its interface, and one the
+/// schema does not mention is one an agent has no way to find. `JIRA_DEBUG_HTTP`
+/// was exactly that: documented in the README, invisible to introspection.
+///
+/// Scanning the source for the literals keeps the check honest. A grep of the
+/// schema text would pass on a variable merely named in an error message, so the
+/// assertion is that every name appears in a `"name"` or `"env"` position.
+#[test]
+fn every_environment_variable_the_cli_reads_is_declared_in_the_schema() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut read_by_code = std::collections::BTreeSet::new();
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, _) in text.match_indices("\"JIRA_") {
+                let rest = &text[i + 1..];
+                let Some(end) = rest.find('"') else { continue };
+                let name = &rest[..end];
+                // A whole quoted literal that is nothing but an identifier. The
+                // error messages naming a variable mid-sentence are not uses.
+                if name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                {
+                    read_by_code.insert(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        read_by_code.contains("JIRA_HOST"),
+        "the scan found no known variable, so it is broken rather than clean"
+    );
+
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    /// Collect every value sitting under a `name` or `env` key, at any depth.
+    fn declared(value: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if let (true, Some(s)) =
+                        (matches!(key.as_str(), "name" | "env"), child.as_str())
+                    {
+                        out.insert(s.to_string());
+                    }
+                    declared(child, out);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|i| declared(i, out)),
+            _ => {}
+        }
+    }
+    let mut in_schema = std::collections::BTreeSet::new();
+    declared(&schema, &mut in_schema);
+
+    let undeclared: Vec<&String> = read_by_code.difference(&in_schema).collect();
+    assert!(
+        undeclared.is_empty(),
+        "these environment variables change how the CLI behaves but `jira schema` \
+         never names them: {undeclared:?}"
+    );
+}
+
+/// The commands `jira schema` claims `JIRA_READ_ONLY` blocks.
+fn schema_read_only_blocked() -> Vec<String> {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    schema["read_only"]["blocked_commands"]
+        .as_array()
+        .expect("schema must declare which commands read-only mode blocks")
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Commands `jira schema` marks `mutating` that `JIRA_READ_ONLY` deliberately
+/// still permits, with the reason.
+///
+/// `mutating` is the broader claim: it says the command persists state somewhere.
+/// The guard is narrower, and covers writes to Jira only, so these two sets are
+/// allowed to differ. They may not differ silently, which is what the test below
+/// is for.
+const MUTATING_WITHOUT_WRITING_TO_JIRA: &[(&str, &str)] = &[
+    ("init", "writes the local config file"),
+    ("config init", "writes the local config file"),
+    ("config remove", "edits the local config file"),
+    (
+        "issues download-attachment",
+        "reads from Jira, writes the bytes to a local path",
+    ),
+];
+
+/// `jira schema` tells an agent which commands read-only mode blocks, so every
+/// name on that list is run against a real subprocess rather than believed.
+///
+/// The mock server is the load-bearing assertion: a command that slipped past the
+/// guard would reach it, so an empty request log is what proves nothing was
+/// written.
+#[tokio::test]
+async fn every_command_the_schema_says_is_blocked_really_is() {
+    let server = MockServer::start().await;
+
+    let declared = schema_read_only_blocked();
+    let covered: std::collections::BTreeSet<&str> = JIRA_WRITE_INVOCATIONS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    let missing: Vec<&String> = declared
+        .iter()
+        .filter(|c| !covered.contains(c.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the schema claims these are blocked but nothing here runs them: {missing:?}"
+    );
+    let unclaimed: Vec<&str> = covered
+        .iter()
+        .filter(|c| !declared.iter().any(|d| d == *c))
+        .copied()
+        .collect();
+    assert!(
+        unclaimed.is_empty(),
+        "these are exercised here but the schema does not list them as blocked, \
+         so an agent reading the contract would not know: {unclaimed:?}"
+    );
+
+    for (command, args) in JIRA_WRITE_INVOCATIONS {
+        let output = run_jira_against_read_only(&server, args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(exit_codes::INPUT_ERROR),
+            "{command} was not refused; stderr: {stderr}"
+        );
+        let envelope = error_envelope(&stderr);
+        assert_eq!(
+            envelope["error"]["kind"], "invalid_input",
+            "{command} must be refused through the standard error envelope"
+        );
+        let message = envelope["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("read-only"),
+            "{command} failed for some other reason than the guard: {message}"
+        );
+    }
+
+    let requests = server.received_requests().await.unwrap();
+    let reached: Vec<String> = requests
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert!(
+        reached.is_empty(),
+        "read-only mode let these requests through: {reached:?}"
+    );
+}
+
+/// The guard covers writes to Jira, not writes to disk, and the README says so.
+/// Check the claim: a mutating command that only touches local files must still
+/// run under `JIRA_READ_ONLY=1`, or an agent given read access loses the ability
+/// to configure itself.
+#[test]
+fn config_writing_commands_still_work_in_read_only_mode() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir)
+        .args(["--host", "example.atlassian.net", "config", "init"])
+        .env("JIRA_READ_ONLY", "1")
+        .env("JIRA_EMAIL", "me@example.com")
+        .env("JIRA_TOKEN", "token")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "config init was refused under read-only; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = jira_cmd(&dir)
+        .args(["init"])
+        .env("JIRA_READ_ONLY", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "init was refused under read-only; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The guard is a hand-written `matches!` in `main.rs`, and the cost of
+/// forgetting an entry is asymmetric: a command missing from it is silently
+/// *permitted* to write to Jira under `JIRA_READ_ONLY=1`.
+///
+/// Every command the schema declares `mutating` must therefore be accounted for
+/// in one of two ways: listed as blocked, or excused here with the reason it
+/// writes nothing to Jira. A new mutating command fails this test until someone
+/// decides which it is, and neither answer can be given by accident.
+#[test]
+fn every_mutating_command_is_either_guarded_or_excused() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let mutating: std::collections::BTreeSet<&str> = schema["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["mutating"] == true)
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    let blocked = schema_read_only_blocked();
+    let guarded: std::collections::BTreeSet<&str> = blocked.iter().map(String::as_str).collect();
+    let excused: std::collections::BTreeSet<&str> = MUTATING_WITHOUT_WRITING_TO_JIRA
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+
+    let unaccounted: Vec<&str> = mutating
+        .iter()
+        .filter(|c| !guarded.contains(*c) && !excused.contains(*c))
+        .copied()
+        .collect();
+    assert!(
+        unaccounted.is_empty(),
+        "these commands are declared mutating but nothing says whether read-only \
+         mode stops them: {unaccounted:?} (add them to READ_ONLY_BLOCKED_COMMANDS \
+         and the guard in main.rs, or a reason to MUTATING_WITHOUT_WRITING_TO_JIRA)"
+    );
+
+    let stale: Vec<&str> = guarded
+        .union(&excused)
+        .filter(|c| !mutating.contains(*c))
+        .copied()
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these are listed here but the schema no longer declares them mutating: {stale:?}"
     );
 }

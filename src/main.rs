@@ -1539,9 +1539,55 @@ fn schema_json() -> serde_json::Value {
                 { "name": "JIRA_API_VERSION", "description": "Jira REST API version: 3 (default, Cloud) or 2 (Data Center/Server)", "required": false }
             ]
         },
+        // The guard exists so a Jira account can be handed to an agent without
+        // write access, which is worth nothing if the agent cannot see that it
+        // is on or which commands it stops.
+        "read_only": {
+            "description": "Blocks every command that writes to Jira. Local-only writes (the config file, downloaded attachments) are unaffected.",
+            "env": "JIRA_READ_ONLY",
+            "config_key": "read_only",
+            "values_on": jira_cli::config::TRUTHY,
+            "values_off": jira_cli::config::FALSY,
+            "unrecognized_value": "rejected with invalid_input rather than treated as off",
+            "error": { "kind": "invalid_input", "exit_code": jira_cli::output::exit_codes::INPUT_ERROR },
+            "blocked_commands": READ_ONLY_BLOCKED_COMMANDS,
+        },
+        "diagnostics": {
+            "description": "Opt-in detail for troubleshooting. Unlike read_only, an unrecognised value is read as off rather than rejected, so a typo here never fails a command.",
+            "env": [
+                {
+                    "name": "JIRA_DEBUG_HTTP",
+                    "description": "Include the raw Jira response body in API error messages, for when the default summary is ambiguous.",
+                    "values_on": jira_cli::config::TRUTHY,
+                }
+            ]
+        },
         "commands": commands
     })
 }
+
+/// The commands `JIRA_READ_ONLY` refuses, named as `jira schema` names them.
+///
+/// The guard itself is the `matches!` in `run`, which cannot read this list
+/// because it dispatches on enum variants. `tests/cli.rs` closes that gap from
+/// the outside: it runs every name here against a mock server under
+/// `JIRA_READ_ONLY=1` and fails if any request reaches it, so this list is
+/// checked against the binary rather than trusted.
+const READ_ONLY_BLOCKED_COMMANDS: &[&str] = &[
+    "issues create",
+    "issues update",
+    "issues move",
+    "issues comment",
+    "issues transition",
+    "issues assign",
+    "issues link",
+    "issues unlink",
+    "issues log-work",
+    "issues attach",
+    "issues delete-attachment",
+    "issues bulk-transition",
+    "issues bulk-assign",
+];
 
 /// Walk the clap command tree and emit a schema entry for every leaf command.
 ///
