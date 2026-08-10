@@ -1063,7 +1063,10 @@ fn attachment_to_json(a: &Attachment) -> serde_json::Value {
         "filename": a.filename,
         "size": a.size,
         "mimeType": a.mime_type,
-        "author": a.author(),
+        // `author()` renders "-" for the table. JSON carries the absence itself,
+        // so a consumer can tell an unattributed upload from one by a user
+        // literally named "-".
+        "author": a.author.as_ref().map(|u| u.display_name.as_str()),
         "created": a.created,
     })
 }

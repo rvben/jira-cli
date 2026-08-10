@@ -1303,7 +1303,12 @@ async fn issues_attachments_degrades_absent_author_and_mime_type() {
         "mimeType must stay null when Jira omits it, got: {}",
         attachment["mimeType"]
     );
-    assert_eq!(attachment["author"], "-");
+    assert!(
+        attachment["author"].is_null(),
+        "author must stay null when Jira omits it, so an unattributed upload is \
+         distinguishable from a user whose display name is literally '-'; got: {}",
+        attachment["author"]
+    );
 
     let output = run_jira_against(
         &server,

@@ -1052,7 +1052,11 @@ fn schema_json() -> serde_json::Value {
         ("issues log-work", true),
         ("issues attachments", false),
         ("issues attach", true),
-        ("issues download-attachment", false),
+        // Writes a file and creates its parent directories, and with --force
+        // overwrites an existing one. Mutating tracks persistent state of any
+        // kind, local included, the same way `config init` does; the read-only
+        // guard is a narrower question about writing to Jira.
+        ("issues download-attachment", true),
         ("issues delete-attachment", true),
         ("issues bulk-transition", true),
         ("issues bulk-assign", true),
@@ -1896,6 +1900,41 @@ mod tests {
                 cmd["name"]
             );
         }
+    }
+
+    /// `mutating` answers "does this change persistent state", which includes
+    /// the local filesystem: `config init` writes a config file and declares
+    /// itself mutating, and `download-attachment` writes a downloaded file. An
+    /// agent uses the flag to decide whether a command is safe to run
+    /// speculatively, so a command that can overwrite a local file must not
+    /// advertise itself as read-only.
+    #[test]
+    fn schema_marks_commands_that_write_local_files_as_mutating() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let commands = schema["commands"].as_array().unwrap();
+        let mutating_of = |name: &str| {
+            commands
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("schema must declare '{name}'"))["mutating"]
+                .as_bool()
+                .unwrap()
+        };
+
+        assert!(
+            mutating_of("issues download-attachment"),
+            "download-attachment creates directories and overwrites files with --force"
+        );
+        assert!(
+            mutating_of("config init"),
+            "config init writes a config file; it is the precedent for the rule above"
+        );
+        assert!(
+            !mutating_of("issues attachments"),
+            "listing attachments writes nothing"
+        );
     }
 
     #[test]
