@@ -242,7 +242,6 @@ pub struct BoardSearchResponse {
     pub is_last: bool,
     #[serde(default)]
     pub start_at: usize,
-    pub total: usize,
 }
 
 /// A Jira sprint.
@@ -306,8 +305,6 @@ pub struct ProjectSearchResponse {
     pub total: usize,
     #[serde(default)]
     pub start_at: usize,
-    #[serde(default)]
-    pub max_results: usize,
     pub is_last: bool,
 }
 
@@ -356,7 +353,10 @@ pub struct SearchJqlPage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchJqlSkipPage {
-    #[serde(default)]
+    /// Required, like the field of the same name on `SearchJqlPage`. The count
+    /// is what advances the cursor towards the requested offset, so an absent
+    /// array read as a page of zero would end the walk and report the results
+    /// so far as complete.
     pub issues: Vec<serde_json::Value>,
     #[serde(default)]
     pub is_last: bool,

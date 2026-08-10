@@ -378,6 +378,53 @@ async fn search_v3_walks_cursor_to_reach_offset() {
 }
 
 #[tokio::test]
+async fn search_v3_rejects_a_skip_page_with_no_issues_array() {
+    // Walking the cursor to an offset reads the issue count off each skip page.
+    // A page that omits `issues` entirely is a malformed response, not a page of
+    // zero, and reading it as zero ends `--all` early while reporting success.
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .and(body_partial_json(serde_json::json!({ "fields": ["id"] })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "nextPageToken": "cursor" })),
+        )
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let err = client.search("project = PROJ", 25, 25).await;
+    assert!(
+        err.is_err(),
+        "a page with no `issues` array must not read as the end of the results: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn search_v3_accepts_a_skip_page_whose_issues_array_is_empty() {
+    // The control for the test above: an explicit empty array is a real answer
+    // and still means the offset is past the end, so the check there cannot pass
+    // by rejecting every skip page.
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .and(body_partial_json(serde_json::json!({ "fields": ["id"] })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(search_jql_response(vec![], None, false)),
+        )
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let resp = client.search("project = PROJ", 25, 25).await.unwrap();
+    assert!(resp.issues.is_empty());
+    assert!(resp.is_last, "an offset past the end has no further pages");
+}
+
+#[tokio::test]
 async fn search_v3_uses_post_with_fields_and_no_start_at() {
     let server = MockServer::start().await;
     let long_clause = "x".repeat(2000);
@@ -1912,6 +1959,29 @@ async fn list_boards_returns_all_boards() {
     assert_eq!(boards[0].id, 1);
     assert_eq!(boards[0].name, "TST board");
     assert_eq!(boards[0].board_type, "scrum");
+}
+
+#[tokio::test]
+async fn list_boards_does_not_require_a_count_it_never_reads() {
+    // `isLast` drives the paging, so a page without `total` is complete data as
+    // far as this command is concerned. Demanding the field made the whole
+    // command fail on a response it could have answered from.
+    let server = MockServer::start().await;
+    let client = test_client(&server);
+
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{ "id": 7, "name": "TST board", "type": "scrum" }],
+            "startAt": 0,
+            "isLast": true
+        })))
+        .mount(&server)
+        .await;
+
+    let boards = client.list_boards().await.unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0].id, 7);
 }
 
 #[tokio::test]
