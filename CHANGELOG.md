@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0](https://github.com/rvben/jira-cli/compare/v0.3.16...v0.4.0) - 2026-08-10
+
+Attachment operations were contributed by [@phlppbmm](https://github.com/phlppbmm)
+in [#6](https://github.com/rvben/jira-cli/pull/6). Thank you.
+
+**Breaking, JSON output only.** `assignee`, `priority`, `reporter` and
+`description` now report `null` when the field is absent. They previously
+reported `"-"`, the placeholder meant for table output, which made an unassigned
+issue indistinguishable from one assigned to a user whose display name is `-`
+(an empty description was `""`). `issues assign` now emits `accountId: null` when
+it unassigns, instead of an undeclared `assignee` key, so both paths return the
+same keys. Table output is unchanged.
+
+### Added
+
+- **issues**: add attachment operations ([65d1a29](https://github.com/rvben/jira-cli/commit/65d1a290b08422fa0c2d44dbfe7d72a6522234c4))
+
+### Fixed
+
+- **schema**: declare the fields each command actually emits ([cdb43aa](https://github.com/rvben/jira-cli/commit/cdb43aac4dee30a5258e122f650af86d433861f4))
+- **issues**: report an absent field as null in JSON, not "-" ([8006386](https://github.com/rvben/jira-cli/commit/80063864c23bdb555d44334f1d608cff7ce7ab40))
+- **issues**: report an absent attachment author as null, not "-" ([6bf201d](https://github.com/rvben/jira-cli/commit/6bf201da88de994625dd063c674d98806344862e))
+- **issues**: add --force flag and pre-flight checks to download-attachment ([8398fd1](https://github.com/rvben/jira-cli/commit/8398fd19933587eb9e963fc335612913e56fd4db))
+
 ## [0.3.16](https://github.com/rvben/jira-cli/compare/v0.3.15...v0.3.16) - 2026-08-09
 
 ### Fixed
