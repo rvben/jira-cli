@@ -18,9 +18,11 @@ test:
 test-e2e:
 	cargo nextest run --test e2e
 
+# --all-targets so test code is linted too. Without it clippy sees only the
+# library and the binary, and the test suite goes unchecked.
 lint:
 	cargo fmt -- --check
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 fmt:
 	cargo fmt
