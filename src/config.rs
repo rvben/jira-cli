@@ -749,10 +749,16 @@ fn write_profile_to_config(
         let profiles = root
             .entry("profiles")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        profiles
-            .as_table_mut()
-            .expect("profiles is a TOML table")
-            .insert(profile_name.to_owned(), toml::Value::Table(section));
+        // A hand-edited config can carry `profiles` as a string or a number.
+        // Reporting that is the whole job here: panicking loses the reason, and
+        // replacing the value would delete whatever the user meant by it.
+        let profiles = profiles.as_table_mut().ok_or_else(|| {
+            format!(
+                "{} defines `profiles` as something other than a table, so the `{profile_name}` profile cannot be added to it",
+                path.display()
+            )
+        })?;
+        profiles.insert(profile_name.to_owned(), toml::Value::Table(section));
     }
 
     if let Some(parent) = path.parent() {
@@ -1569,6 +1575,34 @@ token = "supersecrettoken"
         assert!(content.contains("auth_type"));
         assert!(content.contains("api_version"));
         assert!(!content.contains("email"));
+    }
+
+    #[test]
+    fn a_profiles_key_that_is_not_a_table_is_reported_rather_than_panicked_on() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "profiles = 5\n").unwrap();
+
+        let err =
+            write_profile_to_config(&path, "work", "h.atlassian.net", None, "tok", "basic", 3)
+                .expect_err("a `profiles` integer cannot hold a profile")
+                .to_string();
+        assert!(
+            err.contains("profiles") && err.contains("work"),
+            "the message must name the key and the profile being added: {err}"
+        );
+        assert!(
+            err.contains(&path.display().to_string()),
+            "the message must name the file to edit: {err}"
+        );
+
+        // Control: the same call against a well-formed `profiles` table has to
+        // succeed, or the check above would pass by refusing everything.
+        let good = dir.path().join("good.toml");
+        std::fs::write(&good, "[profiles.other]\nhost = \"a.b\"\n").unwrap();
+        write_profile_to_config(&good, "work", "h.atlassian.net", None, "tok", "basic", 3).unwrap();
+        let written = std::fs::read_to_string(&good).unwrap();
+        assert!(written.contains("[profiles.work]") && written.contains("[profiles.other]"));
     }
 
     #[test]
