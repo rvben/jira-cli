@@ -189,6 +189,11 @@ jobs:
   release:
     needs: [build, sdist]
     runs-on: ubuntu-latest
+    # Spelled out because a job-level block replaces the workflow-level one:
+    # contents: write is what `gh release create` below needs.
+    permissions:
+      contents: write
+      id-token: write   # crates.io Trusted Publishing
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -196,11 +201,54 @@ jobs:
           path: /tmp/artifacts
       - uses: dtolnay/rust-toolchain@stable
 
+      # Exchange this job's GitHub OIDC identity for a short-lived crates.io
+      # token, so releasing stops depending on a long-lived CARGO_REGISTRY_TOKEN
+      # secret. v0.3.15 failed here with "403 Forbidden: authentication failed"
+      # because that secret had gone stale, and it only surfaced after the tag
+      # was pushed and every artifact was built. The action's post step revokes
+      # the token when the job ends.
+      #
+      # Pinned to an exact tag deliberately: rust-lang/crates-io-auth-action
+      # publishes only v1.0.x tags and has no floating `v1`, so the `@v1` its
+      # README shows does not resolve and fails the release at this step.
+      #
+      # continue-on-error covers the window before the trusted publisher is
+      # registered on crates.io: the publish step then falls back to the secret
+      # and says so in the log. Once a release has published over OIDC, drop the
+      # fallback here and delete the secret.
+      - name: Authenticate to crates.io via Trusted Publishing
+        id: crates_auth
+        if: ${{ !inputs.dry_run && !inputs.skip_crates_io }}
+        continue-on-error: true
+        uses: rust-lang/crates-io-auth-action@v1.0.5
+
       - name: Publish to crates.io
         if: ${{ !inputs.dry_run && !inputs.skip_crates_io }}
-        run: cargo publish --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          OIDC_TOKEN: ${{ steps.crates_auth.outputs.token }}
+          SECRET_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$OIDC_TOKEN" ]; then
+            echo "Authenticated to crates.io via Trusted Publishing."
+            export CARGO_REGISTRY_TOKEN="$OIDC_TOKEN"
+          elif [ -n "$SECRET_TOKEN" ]; then
+            echo "::warning::Trusted Publishing produced no token; using the CARGO_REGISTRY_TOKEN secret. Register the trusted publisher for this crate on crates.io, then remove this fallback."
+            export CARGO_REGISTRY_TOKEN="$SECRET_TOKEN"
+          else
+            echo "::error::No crates.io credential: Trusted Publishing produced no token and CARGO_REGISTRY_TOKEN is unset."
+            exit 1
+          fi
+          if ! output=$(cargo publish --locked 2>&1); then
+            # crates.io rejects a re-upload with "crate version `X` is already
+            # uploaded", so a re-run after a failure in a later step does not
+            # die on a crate this workflow already published.
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "Crate already published to crates.io, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          fi
 
       - name: Test crates.io publish (dry run)
         if: ${{ inputs.dry_run == true && inputs.skip_crates_io != true }}
