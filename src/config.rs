@@ -205,6 +205,14 @@ pub fn schema_recommended_permissions_example() -> &'static str {
     }
 }
 
+/// The `dcPatInstructions` value `init --json` prints when no host is known.
+///
+/// Rendered by the same function the command uses, so the schema example cannot
+/// drift from the URL a Data Center user is actually handed.
+pub fn schema_dc_pat_url_example() -> String {
+    dc_pat_url(None)
+}
+
 fn config_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {

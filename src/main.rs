@@ -1021,10 +1021,15 @@ fn schema_json() -> serde_json::Value {
     let config_path_description = jira_cli::config::schema_config_path_description();
     let permission_advice = jira_cli::config::schema_recommended_permissions_example();
 
+    let dc_pat_instructions = jira_cli::config::schema_dc_pat_url_example();
+
+    // Keys here and in `init_fields` below describe the same object and are kept
+    // in step by `schema_init_json_shape_and_output_fields_describe_the_same_keys`.
     let init_shape = serde_json::json!({
         "configPath": "/path/to/config.toml",
         "pathResolution": config_path_description,
         "tokenInstructions": "https://id.atlassian.com/manage-profile/security/api-tokens",
+        "dcPatInstructions": dc_pat_instructions,
         "configExists": false,
         "recommendedPermissions": permission_advice,
         "example": {
@@ -1032,6 +1037,16 @@ fn schema_json() -> serde_json::Value {
             "profiles": { "work": { "host": "...", "email": "...", "token": "..." } }
         }
     });
+
+    let init_fields = serde_json::json!([
+        {"name": "configPath", "type": "string"},
+        {"name": "pathResolution", "type": "string", "description": "How that path is resolved on this platform"},
+        {"name": "configExists", "type": "boolean"},
+        {"name": "tokenInstructions", "type": "string", "description": "Where to create a Jira Cloud API token"},
+        {"name": "dcPatInstructions", "type": "string", "description": "Where to create a Personal Access Token on Jira Data Center/Server"},
+        {"name": "recommendedPermissions", "type": "string"},
+        {"name": "example", "type": "object", "description": "A complete example config file"}
+    ]);
 
     // Mutating flag per command path.
     let mutating: HashMap<&str, bool> = [
@@ -1081,66 +1096,88 @@ fn schema_json() -> serde_json::Value {
     .collect();
 
     // Output fields per command path.
+    // `type` vocabulary: string, integer, boolean, object, string[], object[].
+    // `nullable` means the key is always present but its value may be JSON null.
+    // `optional` means the key may be absent entirely.
+    let user_fields = serde_json::json!([
+        {"name": "displayName", "type": "string"},
+        {"name": "accountId", "type": "string", "nullable": true}
+    ]);
+    let version_fields = serde_json::json!([
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "description", "type": "string", "nullable": true},
+        {"name": "released", "type": "boolean", "nullable": true},
+        {"name": "archived", "type": "boolean", "nullable": true},
+        {"name": "releaseDate", "type": "string", "nullable": true}
+    ]);
+    let comment_fields = serde_json::json!([
+        {"name": "id", "type": "string"},
+        {"name": "author", "type": "object", "fields": user_fields},
+        {"name": "body", "type": "string"},
+        {"name": "created", "type": "string"},
+        {"name": "updated", "type": "string", "nullable": true}
+    ]);
+    // Element shape shared by `issues list`, `issues mine` and `search`.
+    let issue_summary_fields = serde_json::json!([
+        {"name": "key", "type": "string", "description": "Issue key (e.g. PROJ-123)"},
+        {"name": "id", "type": "string", "description": "Internal Jira ID"},
+        {"name": "url", "type": "string", "description": "Browser URL for the issue"},
+        {"name": "summary", "type": "string"},
+        {"name": "status", "type": "string"},
+        {"name": "assignee", "type": "object", "nullable": true, "fields": user_fields, "description": "Null when the issue is unassigned"},
+        {"name": "priority", "type": "string", "nullable": true, "description": "Null when the project does not set a priority"},
+        {"name": "type", "type": "string"},
+        {"name": "created", "type": "string", "nullable": true},
+        {"name": "updated", "type": "string", "nullable": true}
+    ]);
     let output_fields: HashMap<&str, serde_json::Value> = [
-        (
-            "issues list",
-            serde_json::json!([
-                {"name": "key", "type": "string", "description": "Issue key (e.g. PROJ-123)"},
-                {"name": "id", "type": "string", "description": "Internal Jira ID"},
-                {"name": "summary", "type": "string"},
-                {"name": "status", "type": "string"},
-                {"name": "assignee", "type": "string"},
-                {"name": "priority", "type": "string"},
-                {"name": "type", "type": "string"},
-                {"name": "created", "type": "string"},
-                {"name": "updated", "type": "string"}
-            ]),
-        ),
-        (
-            "issues mine",
-            serde_json::json!([
-                {"name": "key", "type": "string"},
-                {"name": "id", "type": "string"},
-                {"name": "summary", "type": "string"},
-                {"name": "status", "type": "string"},
-                {"name": "priority", "type": "string"},
-                {"name": "type", "type": "string"}
-            ]),
-        ),
+        ("issues list", issue_summary_fields.clone()),
+        ("issues mine", issue_summary_fields.clone()),
+        ("search", issue_summary_fields),
         (
             "issues show",
             serde_json::json!([
                 {"name": "key", "type": "string"},
                 {"name": "id", "type": "string"},
+                {"name": "url", "type": "string"},
                 {"name": "summary", "type": "string"},
                 {"name": "status", "type": "string"},
                 {"name": "type", "type": "string"},
-                {"name": "priority", "type": "string"},
-                {"name": "description", "type": "string"},
-                {"name": "assignee", "type": "string"},
-                {"name": "reporter", "type": "string"},
-                {"name": "labels", "type": "string[]"},
-                {"name": "components", "type": "string[]"},
-                {"name": "created", "type": "string"},
-                {"name": "updated", "type": "string"}
+                {"name": "priority", "type": "string", "nullable": true},
+                {"name": "description", "type": "string", "nullable": true, "description": "Plain text extracted from the Atlassian Document Format body; null when the issue has no description"},
+                {"name": "assignee", "type": "object", "nullable": true, "fields": user_fields},
+                {"name": "reporter", "type": "object", "nullable": true, "fields": user_fields},
+                {"name": "labels", "type": "string[]", "nullable": true},
+                {"name": "components", "type": "object[]", "nullable": true, "fields": [
+                    {"name": "id", "type": "string"},
+                    {"name": "name", "type": "string"},
+                    {"name": "description", "type": "string", "nullable": true}
+                ]},
+                {"name": "fixVersions", "type": "object[]", "nullable": true, "fields": version_fields},
+                {"name": "affectedVersions", "type": "object[]", "nullable": true, "fields": version_fields},
+                {"name": "comments", "type": "object[]", "fields": comment_fields, "description": "Already included here - no separate `issues comments` call is needed"},
+                {"name": "issueLinks", "type": "object[]", "description": "Already included here - no separate call is needed", "fields": [
+                    {"name": "id", "type": "string"},
+                    {"name": "sentence", "type": "string", "description": "Human-readable form, e.g. \"PROJ-1 blocks PROJ-2\""},
+                    {"name": "type", "type": "object"},
+                    {"name": "outwardIssue", "type": "object", "nullable": true},
+                    {"name": "inwardIssue", "type": "object", "nullable": true}
+                ]},
+                {"name": "created", "type": "string", "nullable": true},
+                {"name": "updated", "type": "string", "nullable": true}
             ]),
         ),
-        (
-            "issues comments",
-            serde_json::json!([
-                {"name": "id", "type": "string"},
-                {"name": "author", "type": "string"},
-                {"name": "body", "type": "string"},
-                {"name": "created", "type": "string"},
-                {"name": "updated", "type": "string"}
-            ]),
-        ),
+        ("issues comments", comment_fields),
         (
             "issues create",
             serde_json::json!([
                 {"name": "key", "type": "string"},
                 {"name": "id", "type": "string"},
-                {"name": "url", "type": "string"}
+                {"name": "url", "type": "string"},
+                {"name": "parent", "type": "string", "optional": true, "description": "Present only when --parent was passed"},
+                {"name": "sprintId", "type": "integer", "optional": true, "description": "Present only when --sprint was passed"},
+                {"name": "sprintName", "type": "string", "optional": true, "description": "Present only when --sprint was passed"}
             ]),
         ),
         (
@@ -1182,14 +1219,17 @@ fn schema_json() -> serde_json::Value {
             serde_json::json!([
                 {"name": "id", "type": "string"},
                 {"name": "name", "type": "string"},
-                {"name": "to", "type": "string"}
+                {"name": "to", "type": "object", "nullable": true, "description": "Target status", "fields": [
+                    {"name": "name", "type": "string"},
+                    {"name": "statusCategory", "type": "object", "nullable": true}
+                ]}
             ]),
         ),
         (
             "issues assign",
             serde_json::json!([
                 {"name": "issue", "type": "string"},
-                {"name": "accountId", "type": "string"}
+                {"name": "accountId", "type": "string", "nullable": true, "description": "Null when the issue was unassigned"}
             ]),
         ),
         (
@@ -1218,8 +1258,13 @@ fn schema_json() -> serde_json::Value {
         (
             "issues log-work",
             serde_json::json!([
+                {"name": "id", "type": "string", "description": "Worklog entry ID"},
                 {"name": "issue", "type": "string"},
-                {"name": "timeSpent", "type": "string"}
+                {"name": "timeSpent", "type": "string", "description": "As Jira normalised it, e.g. \"1h 30m\""},
+                {"name": "timeSpentSeconds", "type": "integer"},
+                {"name": "author", "type": "string"},
+                {"name": "started", "type": "string"},
+                {"name": "created", "type": "string"}
             ]),
         ),
         (
@@ -1228,8 +1273,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "id", "type": "string", "description": "Attachment ID"},
                 {"name": "filename", "type": "string"},
                 {"name": "size", "type": "integer", "description": "Size in bytes"},
-                {"name": "mimeType", "type": "string"},
-                {"name": "author", "type": "string"},
+                {"name": "mimeType", "type": "string", "nullable": true},
+                {"name": "author", "type": "string", "nullable": true, "description": "Display name of the uploader; null when Jira reports none"},
                 {"name": "created", "type": "string"}
             ]),
         ),
@@ -1240,8 +1285,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "id", "type": "string", "description": "Attachment ID"},
                 {"name": "filename", "type": "string"},
                 {"name": "size", "type": "integer", "description": "Size in bytes"},
-                {"name": "mimeType", "type": "string"},
-                {"name": "author", "type": "string"},
+                {"name": "mimeType", "type": "string", "nullable": true},
+                {"name": "author", "type": "string", "nullable": true},
                 {"name": "created", "type": "string"}
             ]),
         ),
@@ -1264,15 +1309,36 @@ fn schema_json() -> serde_json::Value {
         (
             "issues bulk-transition",
             serde_json::json!([
-                {"name": "transitioned", "type": "integer"},
-                {"name": "failed", "type": "integer"}
+                {"name": "dryRun", "type": "boolean"},
+                {"name": "total", "type": "integer", "description": "Issues the JQL query matched"},
+                {"name": "succeeded", "type": "integer", "description": "Always 0 on a --dry-run, which changes nothing"},
+                {"name": "failed", "type": "integer"},
+                {"name": "issues", "type": "object[]", "description": "One entry per matched issue", "fields": [
+                    {"name": "key", "type": "string"},
+                    {"name": "from", "type": "string", "optional": true, "description": "Status before the transition; present only on a successful transition"},
+                    {"name": "to", "type": "string", "optional": true},
+                    {"name": "action", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
+                    {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
+                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"}
+                ]}
             ]),
         ),
         (
             "issues bulk-assign",
             serde_json::json!([
-                {"name": "assigned", "type": "integer"},
-                {"name": "failed", "type": "integer"}
+                {"name": "dryRun", "type": "boolean"},
+                {"name": "total", "type": "integer", "description": "Issues the JQL query matched"},
+                {"name": "succeeded", "type": "integer", "description": "Always 0 on a --dry-run, which changes nothing"},
+                {"name": "failed", "type": "integer"},
+                {"name": "issues", "type": "object[]", "description": "One entry per matched issue", "fields": [
+                    {"name": "key", "type": "string"},
+                    {"name": "currentAssignee", "type": "string", "nullable": true, "optional": true, "description": "Present only on a --dry-run entry; null when the issue is unassigned"},
+                    {"name": "action", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
+                    {"name": "to", "type": "string", "optional": true},
+                    {"name": "assignee", "type": "string", "optional": true, "description": "Present only on a successful assignment"},
+                    {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
+                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"}
+                ]}
             ]),
         ),
         (
@@ -1290,7 +1356,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "id", "type": "string"},
                 {"name": "key", "type": "string"},
                 {"name": "name", "type": "string"},
-                {"name": "type", "type": "string"}
+                {"name": "type", "type": "string", "nullable": true}
             ]),
         ),
         (
@@ -1298,36 +1364,16 @@ fn schema_json() -> serde_json::Value {
             serde_json::json!([
                 {"name": "id", "type": "string"},
                 {"name": "name", "type": "string"},
-                {"name": "description", "type": "string"}
+                {"name": "description", "type": "string", "nullable": true}
             ]),
         ),
-        (
-            "projects versions",
-            serde_json::json!([
-                {"name": "id", "type": "string"},
-                {"name": "name", "type": "string"},
-                {"name": "released", "type": "boolean"},
-                {"name": "releaseDate", "type": "string"}
-            ]),
-        ),
-        (
-            "search",
-            serde_json::json!([
-                {"name": "key", "type": "string"},
-                {"name": "id", "type": "string"},
-                {"name": "summary", "type": "string"},
-                {"name": "status", "type": "string"},
-                {"name": "assignee", "type": "string"},
-                {"name": "priority", "type": "string"},
-                {"name": "type", "type": "string"}
-            ]),
-        ),
+        ("projects versions", version_fields),
         (
             "users search",
             serde_json::json!([
                 {"name": "accountId", "type": "string"},
                 {"name": "displayName", "type": "string"},
-                {"name": "email", "type": "string"}
+                {"name": "email", "type": "string", "nullable": true, "description": "Null when the account keeps its email private"}
             ]),
         ),
         (
@@ -1346,8 +1392,9 @@ fn schema_json() -> serde_json::Value {
                 {"name": "state", "type": "string"},
                 {"name": "boardId", "type": "integer"},
                 {"name": "boardName", "type": "string"},
-                {"name": "startDate", "type": "string"},
-                {"name": "endDate", "type": "string"}
+                {"name": "startDate", "type": "string", "nullable": true},
+                {"name": "endDate", "type": "string", "nullable": true},
+                {"name": "completeDate", "type": "string", "nullable": true, "description": "Set once the sprint is closed"}
             ]),
         ),
         (
@@ -1355,7 +1402,7 @@ fn schema_json() -> serde_json::Value {
             serde_json::json!([
                 {"name": "accountId", "type": "string"},
                 {"name": "displayName", "type": "string"},
-                {"name": "email", "type": "string"}
+                {"name": "email", "type": "string", "nullable": true, "description": "Null when the account keeps its email private"}
             ]),
         ),
         (
@@ -1364,7 +1411,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "id", "type": "string"},
                 {"name": "name", "type": "string"},
                 {"name": "custom", "type": "boolean"},
-                {"name": "type", "type": "string"}
+                {"name": "type", "type": "string", "nullable": true, "description": "Null for fields Jira reports without a schema"}
             ]),
         ),
         (
@@ -1376,13 +1423,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "tokenMasked", "type": "string"}
             ]),
         ),
-        (
-            "config init",
-            serde_json::json!([
-                {"name": "configPath", "type": "string"},
-                {"name": "configExists", "type": "boolean"}
-            ]),
-        ),
+        ("config init", init_fields.clone()),
         (
             "config remove",
             serde_json::json!([
@@ -1390,13 +1431,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "removed", "type": "boolean"}
             ]),
         ),
-        (
-            "init",
-            serde_json::json!([
-                {"name": "configPath", "type": "string"},
-                {"name": "configExists", "type": "boolean"}
-            ]),
-        ),
+        ("init", init_fields),
         ("schema", serde_json::json!([])),
         ("completions", serde_json::json!([])),
     ]
@@ -1738,6 +1773,7 @@ mod tests {
     use jira_cli::test_support::{
         EnvVarGuard, ProcessEnvLock, set_config_dir_env, unset_config_dir_env,
     };
+    use std::collections::BTreeSet;
     use tempfile::TempDir;
 
     #[test]
@@ -1948,6 +1984,99 @@ mod tests {
                 cmd["output_fields"].is_array(),
                 "command '{}' must have output_fields array",
                 cmd["name"]
+            );
+        }
+    }
+
+    /// Every output field, at any nesting depth, describes itself with a type
+    /// drawn from one closed vocabulary. An agent branches on these strings, so
+    /// a one-off spelling is as bad as a missing type: it silently falls through
+    /// whatever match the agent wrote.
+    #[test]
+    fn schema_output_field_types_come_from_the_declared_vocabulary() {
+        const TYPES: [&str; 6] = [
+            "string", "integer", "boolean", "object", "string[]", "object[]",
+        ];
+
+        fn check(fields: &serde_json::Value, path: &str) {
+            for field in fields.as_array().unwrap_or_else(|| {
+                panic!("{path}: `fields` must be an array; got {fields}");
+            }) {
+                let name = field["name"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{path}: every field needs a name; got {field}"));
+                let here = format!("{path}.{name}");
+                let ty = field["type"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{here}: missing `type`"));
+                assert!(
+                    TYPES.contains(&ty),
+                    "{here}: type '{ty}' is not one of {TYPES:?}"
+                );
+                for flag in ["nullable", "optional"] {
+                    if !field[flag].is_null() {
+                        assert!(
+                            field[flag].is_boolean(),
+                            "{here}: `{flag}` must be a boolean when present, got {}",
+                            field[flag]
+                        );
+                    }
+                }
+                if !field["fields"].is_null() {
+                    assert!(
+                        ty == "object" || ty == "object[]",
+                        "{here}: only object types can carry nested `fields`, got '{ty}'"
+                    );
+                    check(&field["fields"], &here);
+                }
+            }
+        }
+
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        for cmd in schema["commands"].as_array().unwrap() {
+            check(
+                &cmd["output_fields"],
+                cmd["name"].as_str().expect("command must have a name"),
+            );
+        }
+    }
+
+    /// `config init` is described twice - once as `output_fields`, once as a
+    /// worked `json_shape` example. Two descriptions of one object drift apart
+    /// unless something ties them together, and a reader has no way to tell
+    /// which of the two is current.
+    #[test]
+    fn schema_init_json_shape_and_output_fields_describe_the_same_keys() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+
+        for name in ["config init", "init"] {
+            let cmd = schema["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("schema must declare '{name}'"));
+
+            let declared: BTreeSet<&str> = cmd["output_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["name"].as_str().unwrap())
+                .collect();
+            let in_example: BTreeSet<&str> = cmd["json_shape"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name} must carry a json_shape example"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+
+            assert_eq!(
+                declared, in_example,
+                "{name}: output_fields and json_shape must describe the same keys"
             );
         }
     }
