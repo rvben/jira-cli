@@ -1032,10 +1032,7 @@ fn schema_json() -> serde_json::Value {
         "dcPatInstructions": dc_pat_instructions,
         "configExists": false,
         "recommendedPermissions": permission_advice,
-        "example": {
-            "default": { "host": "mycompany.atlassian.net", "email": "me@example.com", "token": "..." },
-            "profiles": { "work": { "host": "...", "email": "...", "token": "..." } }
-        }
+        "example": jira_cli::config::schema_example_config()
     });
 
     let init_fields = serde_json::json!([
@@ -1045,7 +1042,16 @@ fn schema_json() -> serde_json::Value {
         {"name": "tokenInstructions", "type": "string", "description": "Where to create a Jira Cloud API token"},
         {"name": "dcPatInstructions", "type": "string", "description": "Where to create a Personal Access Token on Jira Data Center/Server"},
         {"name": "recommendedPermissions", "type": "string"},
-        {"name": "example", "type": "object", "description": "A complete example config file"}
+        {"name": "example", "type": "object", "description": "A complete example config file", "fields": [
+            {"name": "default", "type": "object", "description": "The profile used when none is named", "fields": [
+                {"name": "host", "type": "string"},
+                {"name": "email", "type": "string", "description": "Omit for `pat` auth, which Jira Data Center uses"},
+                {"name": "token", "type": "string"},
+                {"name": "auth_type", "type": "string", "description": "\"basic\" for Jira Cloud, \"pat\" for a Data Center personal access token"},
+                {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"}
+            ]},
+            {"name": "profiles", "type": "object", "description": "Keyed by profile name, so the keys are chosen by the user rather than fixed. Each value has the same shape as `default`"}
+        ]}
     ]);
 
     // Mutating flag per command path.
@@ -1118,6 +1124,17 @@ fn schema_json() -> serde_json::Value {
         {"name": "created", "type": "string"},
         {"name": "updated", "type": "string", "nullable": true}
     ]);
+    let link_type_fields = serde_json::json!([
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "inward", "type": "string", "description": "Phrasing from the inward side, e.g. \"is blocked by\""},
+        {"name": "outward", "type": "string", "description": "Phrasing from the outward side, e.g. \"blocks\""}
+    ]);
+    let linked_issue_fields = serde_json::json!([
+        {"name": "key", "type": "string"},
+        {"name": "summary", "type": "string"},
+        {"name": "status", "type": "string"}
+    ]);
     // Element shape shared by `issues list`, `issues mine` and `search`.
     let issue_summary_fields = serde_json::json!([
         {"name": "key", "type": "string", "description": "Issue key (e.g. PROJ-123)"},
@@ -1160,9 +1177,9 @@ fn schema_json() -> serde_json::Value {
                 {"name": "issueLinks", "type": "object[]", "description": "Already included here - no separate call is needed", "fields": [
                     {"name": "id", "type": "string"},
                     {"name": "sentence", "type": "string", "description": "Human-readable form, e.g. \"PROJ-1 blocks PROJ-2\""},
-                    {"name": "type", "type": "object"},
-                    {"name": "outwardIssue", "type": "object", "nullable": true},
-                    {"name": "inwardIssue", "type": "object", "nullable": true}
+                    {"name": "type", "type": "object", "fields": link_type_fields},
+                    {"name": "outwardIssue", "type": "object", "nullable": true, "fields": linked_issue_fields.clone()},
+                    {"name": "inwardIssue", "type": "object", "nullable": true, "fields": linked_issue_fields}
                 ]},
                 {"name": "created", "type": "string", "nullable": true},
                 {"name": "updated", "type": "string", "nullable": true}
@@ -1221,7 +1238,10 @@ fn schema_json() -> serde_json::Value {
                 {"name": "name", "type": "string"},
                 {"name": "to", "type": "object", "nullable": true, "description": "Target status", "fields": [
                     {"name": "name", "type": "string"},
-                    {"name": "statusCategory", "type": "object", "nullable": true}
+                    {"name": "statusCategory", "type": "object", "nullable": true, "fields": [
+                        {"name": "key", "type": "string", "description": "Workflow category, e.g. \"new\", \"indeterminate\", \"done\""},
+                        {"name": "name", "type": "string"}
+                    ]}
                 ]}
             ]),
         ),

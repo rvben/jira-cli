@@ -316,11 +316,14 @@ pub async fn init(out: &OutputConfig, host: Option<&str>) {
     }
 }
 
-fn init_json(out: &OutputConfig, host: Option<&str>) {
-    let path = config_path();
-    let path_resolution = schema_config_path_description();
-    let permission_advice = recommended_permissions(&path);
-    let example = serde_json::json!({
+/// The example config `jira init --json` prints, and the same value `jira schema`
+/// shows as the shape of that field.
+///
+/// One source, because these were two hand-maintained copies and the schema's had
+/// already fallen behind: it showed neither `auth_type` nor `api_version`, so the
+/// Data Center profile a reader needs in order to use a PAT was invisible there.
+pub fn schema_example_config() -> serde_json::Value {
+    serde_json::json!({
         "default": {
             "host": "mycompany.atlassian.net",
             "email": "me@example.com",
@@ -341,7 +344,14 @@ fn init_json(out: &OutputConfig, host: Option<&str>) {
                 "api_version": 2,
             }
         }
-    });
+    })
+}
+
+fn init_json(out: &OutputConfig, host: Option<&str>) {
+    let path = config_path();
+    let path_resolution = schema_config_path_description();
+    let permission_advice = recommended_permissions(&path);
+    let example = schema_example_config();
 
     const CLOUD_TOKEN_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
     let pat_url = dc_pat_url(host);
