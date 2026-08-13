@@ -1,6 +1,6 @@
 [package]
 name = "jira-cli"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 rust-version = "1.90"
 description = "Agent-friendly Jira CLI with JSON output, structured exit codes, and schema introspection"
