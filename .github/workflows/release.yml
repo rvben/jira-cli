@@ -55,6 +55,8 @@ jobs:
           - target: aarch64-apple-darwin
             os: [self-hosted, macOS, ARM64]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo-home-${{ github.run_id }}-${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
         with:
