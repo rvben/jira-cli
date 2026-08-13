@@ -55,8 +55,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: [self-hosted, macOS, ARM64]
     runs-on: ${{ matrix.os }}
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo-home-${{ github.run_id }}-${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,6 +62,9 @@ jobs:
           # incremental rebuild. GitHub-hosted runners start clean each job
           # regardless of this setting, so this only affects self-hosted.
           clean: false
+      - name: Isolate Cargo cache
+        shell: bash
+        run: echo "CARGO_HOME=${RUNNER_TEMP}/cargo-home-${GITHUB_RUN_ID}-${{ matrix.target }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
