@@ -501,11 +501,11 @@ async fn issues_update_dispatch_combined_flags_send_one_put() {
     );
 }
 
-/// Verify that `jira schema` output validates against the vendored clispec v0.2
+/// Verify that `jira schema` output validates against the vendored clispec v0.3
 /// JSON Schema. This catches regressions where required fields are dropped or
 /// the schema structure diverges from the spec.
 #[test]
-fn schema_output_validates_against_clispec_v0_2() {
+fn schema_output_validates_against_clispec_v0_3() {
     let dir = TempDir::new().unwrap();
     let output = jira_cmd(&dir).args(["schema"]).output().unwrap();
 
@@ -518,12 +518,12 @@ fn schema_output_validates_against_clispec_v0_2() {
     let schema_output: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("jira schema must emit valid JSON");
 
-    let meta_schema_str = include_str!("fixtures/clispec-v0.2.json");
+    let meta_schema_str = include_str!("fixtures/clispec-v0.3.json");
     let meta_schema: serde_json::Value = serde_json::from_str(meta_schema_str)
-        .expect("bundled clispec v0.2 schema must be valid JSON");
+        .expect("bundled clispec v0.3 schema must be valid JSON");
 
     let validator = jsonschema::validator_for(&meta_schema)
-        .expect("clispec v0.2 JSON Schema must be compilable");
+        .expect("clispec v0.3 JSON Schema must be compilable");
 
     let errors: Vec<String> = validator
         .iter_errors(&schema_output)
@@ -532,7 +532,7 @@ fn schema_output_validates_against_clispec_v0_2() {
 
     assert!(
         errors.is_empty(),
-        "jira schema output failed clispec v0.2 validation:\n{}",
+        "jira schema output failed clispec v0.3 validation:\n{}",
         errors.join("\n")
     );
 }
@@ -818,7 +818,10 @@ fn assert_fields_match(
     );
 
     for field in fields {
-        let Some(nested) = field["fields"].as_array() else {
+        let nested = field["fields"]
+            .as_array()
+            .or_else(|| field["items"]["fields"].as_array());
+        let Some(nested) = nested else {
             continue;
         };
         let name = field["name"].as_str().unwrap();
@@ -829,7 +832,7 @@ fn assert_fields_match(
         }
         let child = format!("{path}.{name}");
         match field["type"].as_str() {
-            Some("object[]") => {
+            Some("array") if field["items"]["type"] == "object" => {
                 let items = value
                     .as_array()
                     .unwrap_or_else(|| panic!("{child} is declared object[]; got: {value}"));
@@ -2111,6 +2114,7 @@ fn config_commands_emit_exactly_the_fields_they_declare() {
 /// a deliberate act rather than the passive drift this guards against.
 const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "boards list",
+    "capabilities",
     "config init",
     "config remove",
     "config show",
@@ -2146,6 +2150,28 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "sprints list",
     "users search",
 ];
+
+#[test]
+fn capabilities_json_matches_declared_output_fields() {
+    let dir = TempDir::new().unwrap();
+    let schema_output = jira_cmd(&dir).args(["schema"]).output().unwrap();
+    let schema: serde_json::Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let fields = schema["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["name"] == "capabilities")
+        .unwrap()["output_fields"]
+        .as_array()
+        .unwrap();
+    let output = jira_cmd(&dir)
+        .args(["--output", "json", "capabilities"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_fields_match("capabilities", fields, &actual, &[]);
+}
 
 /// A command that declares `output_fields` is making a promise to an agent, and
 /// an unasserted promise is how these declarations drifted from the binary in
@@ -2207,8 +2233,11 @@ fn every_declared_object_either_has_a_shape_or_a_stated_reason() {
         for f in fields {
             let name = f["name"].as_str().unwrap();
             let child = format!("{path}.{name}");
-            let is_object = matches!(f["type"].as_str(), Some("object") | Some("object[]"));
-            match f["fields"].as_array() {
+            let is_object = f["type"] == "object";
+            let nested = f["fields"]
+                .as_array()
+                .or_else(|| f["items"]["fields"].as_array());
+            match nested {
                 Some(nested) => collect(&child, nested, out),
                 None if is_object => out.push(child),
                 None => {}

@@ -150,6 +150,9 @@ enum Command {
     /// Dump all commands and arguments as JSON for agent introspection
     Schema,
 
+    /// Describe offline-safe CLI capabilities
+    Capabilities,
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -668,6 +671,25 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             return Ok(());
         }
 
+        Command::Capabilities => {
+            let capabilities = serde_json::json!({
+                "name": "jira",
+                "version": env!("CARGO_PKG_VERSION"),
+                "clispec": "0.3",
+                "output": ["text", "json"],
+                "features": ["schema", "pagination", "field selection", "read-only guard"]
+            });
+            if out.json {
+                println!("{}", serde_json::to_string_pretty(&capabilities)?);
+            } else {
+                println!(
+                    "jira {} - clispec 0.3; text/json output, pagination, field selection, read-only guard",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+            return Ok(());
+        }
+
         Command::Completions { shell, install } => {
             handle_completions(shell, install, &out)?;
             return Ok(());
@@ -1020,7 +1042,11 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         },
 
         // Already handled above
-        Command::Schema | Command::Completions { .. } | Command::Config(_) | Command::Init => {}
+        Command::Schema
+        | Command::Capabilities
+        | Command::Completions { .. }
+        | Command::Config(_)
+        | Command::Init => {}
     }
 
     Ok(())
@@ -1115,6 +1141,7 @@ fn schema_json() -> serde_json::Value {
         ("config remove", true),
         ("init", true),
         ("schema", false),
+        ("capabilities", false),
         ("completions", false),
     ]
     .into_iter()
@@ -1472,6 +1499,16 @@ fn schema_json() -> serde_json::Value {
         ),
         ("init", init_fields),
         ("schema", serde_json::json!([])),
+        (
+            "capabilities",
+            serde_json::json!([
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "clispec", "type": "string"},
+                {"name": "output", "type": "string[]"},
+                {"name": "features", "type": "string[]"}
+            ]),
+        ),
         ("completions", serde_json::json!([])),
     ]
     .into_iter()
@@ -1507,8 +1544,9 @@ fn schema_json() -> serde_json::Value {
         &output_fields,
     );
 
-    serde_json::json!({
-        "clispec": "0.2",
+    let mut schema = serde_json::json!({
+        "$schema": "https://clispec.dev/schema/v0.3.json",
+        "clispec": "0.3",
         "name": "jira",
         "version": env!("CARGO_PKG_VERSION"),
         "description": "CLI for Jira - optimized for humans and agents",
@@ -1581,8 +1619,120 @@ fn schema_json() -> serde_json::Value {
                 }
             ]
         },
-        "commands": commands
-    })
+        "commands": commands,
+        "output": {"tty": "text", "piped": "json"}
+    });
+    enrich_v0_3(&mut schema);
+    schema
+}
+
+fn enrich_v0_3(schema: &mut serde_json::Value) {
+    let Some(commands) = schema["commands"].as_array_mut() else {
+        return;
+    };
+    for command in commands {
+        let Some(object) = command.as_object_mut() else {
+            continue;
+        };
+        let name = object["name"].as_str().unwrap_or_default().to_string();
+        let mutating = object["mutating"].as_bool().unwrap_or(false);
+        let non_idempotent = matches!(
+            name.as_str(),
+            "issues create"
+                | "issues comment"
+                | "issues link"
+                | "issues log-work"
+                | "issues attach"
+        );
+        object.insert(
+            "effects".into(),
+            serde_json::json!(if !mutating {
+                "read_only"
+            } else if non_idempotent {
+                "non_idempotent"
+            } else {
+                "idempotent"
+            }),
+        );
+
+        if name == "completions" {
+            object.insert("output_kind".into(), serde_json::json!("opaque"));
+            object.insert("media_type".into(), serde_json::json!("text/plain"));
+            object.remove("output_fields");
+            continue;
+        }
+
+        object.insert("cardinality".into(), serde_json::json!("bounded"));
+        if matches!(name.as_str(), "issues list" | "search") {
+            object.insert("cardinality".into(), serde_json::json!("unbounded"));
+            object.insert(
+                "pagination".into(),
+                serde_json::json!({
+                    "style": "offset",
+                    "limit_arg": "--limit",
+                    "offset_arg": "--offset"
+                }),
+            );
+            object.insert("fields_arg".into(), serde_json::json!("--fields"));
+        }
+        if name == "capabilities" {
+            object.insert(
+                "example".into(),
+                serde_json::json!({"args": ["capabilities"]}),
+            );
+            object.insert("cardinality".into(), serde_json::json!("single"));
+        }
+        if name == "schema" {
+            object.insert("cardinality".into(), serde_json::json!("single"));
+            object.insert(
+                "stdout_schema".into(),
+                serde_json::json!({"$ref": "https://clispec.dev/schema/v0.3.json"}),
+            );
+        }
+        if let Some(fields) = object
+            .get_mut("output_fields")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            normalize_output_fields(fields);
+        }
+        if !object.contains_key("output_fields") && !object.contains_key("stdout_schema") {
+            object.insert("stdout_schema".into(), serde_json::json!({}));
+        }
+    }
+}
+
+fn normalize_output_fields(fields: &mut [serde_json::Value]) {
+    for field in fields {
+        let Some(object) = field.as_object_mut() else {
+            continue;
+        };
+        let old_type = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match old_type {
+            "string[]" => {
+                object.insert("type".into(), serde_json::json!("array"));
+                object.insert("items".into(), serde_json::json!({"type": "string"}));
+            }
+            "object[]" => {
+                object.insert("type".into(), serde_json::json!("array"));
+                let nested = object.remove("fields");
+                let mut items = serde_json::json!({"type": "object"});
+                if let Some(nested) = nested {
+                    items["fields"] = nested;
+                }
+                object.insert("items".into(), items);
+            }
+            _ => {}
+        }
+        if let Some(nested) = object
+            .get_mut("fields")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            normalize_output_fields(nested);
+        }
+    }
 }
 
 /// The commands `JIRA_READ_ONLY` refuses, named as `jira schema` names them.
@@ -1921,7 +2071,7 @@ mod tests {
         let _env = ProcessEnvLock::acquire().unwrap();
         let _config_dir = unset_config_dir_env();
         let schema = schema_json();
-        assert_eq!(schema["clispec"].as_str(), Some("0.2"));
+        assert_eq!(schema["clispec"].as_str(), Some("0.3"));
     }
 
     #[test]
@@ -2059,17 +2209,19 @@ mod tests {
     }
 
     #[test]
-    fn schema_all_commands_have_output_fields() {
+    fn schema_all_data_commands_declare_output() {
         let _env = ProcessEnvLock::acquire().unwrap();
         let _config_dir = unset_config_dir_env();
         let schema = schema_json();
         let commands = schema["commands"].as_array().unwrap();
         for cmd in commands {
-            assert!(
-                cmd["output_fields"].is_array(),
-                "command '{}' must have output_fields array",
-                cmd["name"]
-            );
+            if cmd["output_kind"] != "opaque" {
+                assert!(
+                    cmd["output_fields"].is_array() || cmd["stdout_schema"].is_object(),
+                    "data command '{}' must declare output_fields or stdout_schema",
+                    cmd["name"]
+                );
+            }
         }
     }
 
@@ -2079,9 +2231,7 @@ mod tests {
     /// whatever match the agent wrote.
     #[test]
     fn schema_output_field_types_come_from_the_declared_vocabulary() {
-        const TYPES: [&str; 6] = [
-            "string", "integer", "boolean", "object", "string[]", "object[]",
-        ];
+        const TYPES: [&str; 6] = ["string", "integer", "number", "boolean", "object", "array"];
 
         fn check(fields: &serde_json::Value, path: &str) {
             for field in fields.as_array().unwrap_or_else(|| {
@@ -2109,7 +2259,7 @@ mod tests {
                 }
                 if !field["fields"].is_null() {
                     assert!(
-                        ty == "object" || ty == "object[]",
+                        ty == "object",
                         "{here}: only object types can carry nested `fields`, got '{ty}'"
                     );
                     check(&field["fields"], &here);
@@ -2121,10 +2271,12 @@ mod tests {
         let _config_dir = unset_config_dir_env();
         let schema = schema_json();
         for cmd in schema["commands"].as_array().unwrap() {
-            check(
-                &cmd["output_fields"],
-                cmd["name"].as_str().expect("command must have a name"),
-            );
+            if cmd["output_kind"] != "opaque" {
+                check(
+                    &cmd["output_fields"],
+                    cmd["name"].as_str().expect("command must have a name"),
+                );
+            }
         }
     }
 
