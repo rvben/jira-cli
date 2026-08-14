@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2.85.11
+      - uses: taiki-e/install-action@v2.85.13
         with:
           tool: nextest
       - run: cargo check --locked
@@ -70,7 +70,7 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cargo-zigbuild
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: taiki-e/install-action@v2.85.11
+        uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-zigbuild
       - name: Prepare cargo cache dirs (arm64 linux)
@@ -102,7 +102,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Install uv
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
       - name: Install maturin and zig
         # maturin-action provides its own maturin inside the manylinux
         # container for the arm64 linux build, so skip the host install
@@ -180,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
       - name: Install maturin
         shell: bash
         run: |
@@ -269,7 +269,7 @@ jobs:
         run: echo "Skipping crates.io publishing as requested"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
 
       - name: Publish to PyPI
         # actions/upload-artifact preserves the `dist/` prefix from the build
