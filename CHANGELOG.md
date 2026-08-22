@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.7](https://github.com/rvben/jira-cli/compare/v0.4.6...v0.4.7) - 2026-08-22
+
+### Added
+
+- **cli**: add doctor and command-scoped schema ([072256b](https://github.com/rvben/jira-cli/commit/072256b0932799b895842b5a840c46289528c24f))
+
 ## [0.4.2](https://github.com/rvben/jira-cli/compare/v0.4.1...v0.4.2) - 2026-08-10
 
 **Piping into a command that stops reading no longer panics.** `jira issues list
