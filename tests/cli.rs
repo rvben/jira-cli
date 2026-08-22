@@ -339,6 +339,86 @@ async fn myself_renders_a_withheld_email_as_null_rather_than_dropping_it() {
 }
 
 #[tokio::test]
+async fn doctor_verifies_authentication_project_access_and_write_safety() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "user-abc-123",
+            "displayName": "Test User",
+            "emailAddress": "test@example.com"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{
+                "id": "10000",
+                "key": "TST",
+                "name": "Test",
+                "projectTypeKey": "software"
+            }],
+            "total": 1,
+            "startAt": 0,
+            "isLast": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["doctor", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["user"]["displayName"], "Test User");
+    assert_eq!(result["projectCount"], 1);
+    assert_eq!(result["checks"][1]["name"], "authentication");
+    assert_eq!(result["checks"][2]["name"], "projects");
+    assert_json_keys_match_schema("doctor", &result, &[]);
+}
+
+#[tokio::test]
+async fn doctor_turns_an_auth_endpoint_404_into_actionable_diagnostics() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("resource not found"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["doctor", "--json"]);
+    assert_eq!(output.status.code(), Some(exit_codes::NOT_FOUND));
+
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["checks"][1]["name"], "authentication");
+    assert!(
+        result["checks"][1]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Confirm the site is active")
+    );
+
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "not_found");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("REST API v3")
+    );
+}
+
+#[tokio::test]
 async fn issues_update_dispatch_assignee_me_calls_myself_then_puts_account_id() {
     let server = MockServer::start().await;
 
@@ -534,6 +614,53 @@ fn schema_output_validates_against_clispec_v0_3() {
         errors.is_empty(),
         "jira schema output failed clispec v0.3 validation:\n{}",
         errors.join("\n")
+    );
+}
+
+#[test]
+fn schema_can_describe_one_command_without_returning_the_full_tree() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir)
+        .args(["schema", "--command", "jira issues list"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(schema["cli"], "jira");
+    assert_eq!(schema["name"], "issues list");
+    assert_eq!(schema["clispec"], "0.3");
+    assert!(
+        schema["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg["name"] == "--project")
+    );
+    assert!(schema["global_args"].is_array());
+    assert!(schema["errors"].is_array());
+    assert!(
+        schema.get("commands").is_none(),
+        "compact schema must omit the full command tree"
+    );
+}
+
+#[test]
+fn schema_command_lookup_has_an_actionable_not_found_error() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir)
+        .args(["schema", "--command", "issues frobnicate"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::NOT_FOUND));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "not_found");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("jira schema")
     );
 }
 
@@ -2118,6 +2245,7 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "config init",
     "config remove",
     "config show",
+    "doctor",
     "fields list",
     "init",
     "issues assign",

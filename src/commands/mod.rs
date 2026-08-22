@@ -1,4 +1,5 @@
 pub mod boards;
+pub mod doctor;
 pub mod fields;
 pub mod issues;
 pub mod myself;

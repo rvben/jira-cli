@@ -57,7 +57,8 @@ fn vec_to_opt_refs(values: &[String]) -> Option<Vec<&str>> {
 #[command(
     name = "jira",
     version,
-    about = "CLI for Jira",
+    about = "Fast, friendly Jira from your terminal, built for humans and agents",
+    after_help = "Get started:\n  jira init              Configure and verify an account\n  jira doctor            Check the complete connection\n  jira issues mine       See what needs your attention\n  jira schema --command 'issues list'\n                         Inspect one command for automation",
     arg_required_else_help = true
 )]
 struct Cli {
@@ -136,6 +137,9 @@ enum Command {
     /// Show the currently authenticated user
     Myself,
 
+    /// Verify configuration, authentication, project access, and write safety
+    Doctor,
+
     /// Manage configuration
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -147,8 +151,12 @@ enum Command {
     #[command(subcommand, visible_alias = "field", arg_required_else_help = true)]
     Fields(FieldsCommand),
 
-    /// Dump all commands and arguments as JSON for agent introspection
-    Schema,
+    /// Dump commands and arguments as JSON for agent introspection
+    Schema {
+        /// Return only one command, such as "issues list"
+        #[arg(long)]
+        command: Option<String>,
+    },
 
     /// Describe offline-safe CLI capabilities
     Capabilities,
@@ -666,8 +674,8 @@ async fn main() {
 
 async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Schema => {
-            print_schema();
+        Command::Schema { command } => {
+            print_schema(command.as_deref())?;
             return Ok(());
         }
 
@@ -677,7 +685,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 "version": env!("CARGO_PKG_VERSION"),
                 "clispec": "0.3",
                 "output": ["text", "json"],
-                "features": ["schema", "pagination", "field selection", "read-only guard"]
+                "features": ["doctor", "command-scoped schema", "pagination", "field selection", "read-only guard"]
             });
             if out.json {
                 println!("{}", serde_json::to_string_pretty(&capabilities)?);
@@ -752,7 +760,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         &cfg.host,
         &cfg.email,
         &cfg.token,
-        cfg.auth_type,
+        cfg.auth_type.clone(),
         cfg.api_version,
     )?;
 
@@ -1037,12 +1045,14 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
 
         Command::Myself => commands::myself::show(&client, &out).await?,
 
+        Command::Doctor => commands::doctor::run(&client, &cfg, &out).await?,
+
         Command::Fields(cmd) => match cmd {
             FieldsCommand::List { custom } => commands::fields::list(&client, &out, custom).await?,
         },
 
         // Already handled above
-        Command::Schema
+        Command::Schema { .. }
         | Command::Capabilities
         | Command::Completions { .. }
         | Command::Config(_)
@@ -1052,11 +1062,52 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-fn print_schema() {
+fn print_schema(command: Option<&str>) -> Result<(), ApiError> {
+    let schema = match command {
+        Some(path) => command_schema_json(path)?,
+        None => schema_json(),
+    };
     println!(
         "{}",
-        serde_json::to_string_pretty(&schema_json()).expect("failed to serialize schema")
+        serde_json::to_string_pretty(&schema).expect("failed to serialize schema")
     );
+    Ok(())
+}
+
+fn command_schema_json(path: &str) -> Result<serde_json::Value, ApiError> {
+    let normalized = path.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.strip_prefix("jira ").unwrap_or(&normalized);
+    if normalized.is_empty() || normalized == "jira" {
+        return Err(ApiError::InvalidInput(
+            "--command cannot be empty; try `jira schema --command 'issues list'`".into(),
+        ));
+    }
+
+    let schema = schema_json();
+    let command = schema["commands"]
+        .as_array()
+        .and_then(|commands| commands.iter().find(|entry| entry["name"] == normalized))
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "command '{path}'; inspect available commands with `jira schema`"
+            ))
+        })?;
+
+    let mut compact = command
+        .as_object()
+        .cloned()
+        .expect("schema commands are objects");
+    compact.insert("cli".into(), serde_json::json!(schema["name"]));
+    compact.insert("version".into(), serde_json::json!(schema["version"]));
+    compact.insert("clispec".into(), serde_json::json!(schema["clispec"]));
+    compact.insert(
+        "global_args".into(),
+        serde_json::json!(schema["global_args"]),
+    );
+    compact.insert("errors".into(), serde_json::json!(schema["errors"]));
+    compact.insert("output".into(), serde_json::json!(schema["output"]));
+    Ok(serde_json::Value::Object(compact))
 }
 
 fn schema_json() -> serde_json::Value {
@@ -1135,6 +1186,7 @@ fn schema_json() -> serde_json::Value {
         ("boards list", false),
         ("sprints list", false),
         ("myself", false),
+        ("doctor", false),
         ("fields list", false),
         ("config show", false),
         ("config init", true),
@@ -1469,6 +1521,24 @@ fn schema_json() -> serde_json::Value {
                 {"name": "accountId", "type": "string"},
                 {"name": "displayName", "type": "string"},
                 {"name": "email", "type": "string", "nullable": true, "description": "Null when the account keeps its email private"}
+            ]),
+        ),
+        (
+            "doctor",
+            serde_json::json!([
+                {"name": "ok", "type": "boolean"},
+                {"name": "instance", "type": "string", "optional": true},
+                {"name": "user", "type": "object", "optional": true, "fields": [
+                    {"name": "accountId", "type": "string"},
+                    {"name": "displayName", "type": "string"},
+                    {"name": "email", "type": "string", "nullable": true}
+                ]},
+                {"name": "projectCount", "type": "integer", "optional": true},
+                {"name": "checks", "type": "object[]", "fields": [
+                    {"name": "name", "type": "string"},
+                    {"name": "ok", "type": "boolean"},
+                    {"name": "detail", "type": "string"}
+                ]}
             ]),
         ),
         (

@@ -3,21 +3,23 @@
 [![CI](https://github.com/rvben/jira-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/rvben/jira-cli/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/rvben/jira-cli/graph/badge.svg)](https://codecov.io/gh/rvben/jira-cli)
 
-An agent-friendly Jira CLI for Jira Cloud and Jira Data Center / Server.
+A fast, friendly Jira CLI for Jira Cloud and Jira Data Center / Server, built
+to feel natural for people and predictable for agents.
 
 - **Auto-JSON** when stdout is not a TTY, so you can pipe it anywhere and get structured data
-- **`jira schema`** dumps every command, flag, and JSON shape as machine-readable JSON for agent introspection
+- **`jira doctor`** verifies configuration, identity, project access, and write safety in one command
+- **Command-scoped schema** gives agents one complete command contract without loading the full tree
 - **Structured exit codes**, so agents can branch on auth failures, rate limits, not-found, and input errors without parsing text
 - **Clean stdout/stderr split**: data on stdout, messages on stderr, `--quiet` suppresses all non-data output
 
 ```
 $ jira issues list --project MYAPP --status "In Progress"
-KEY          SUMMARY                        STATUS       ASSIGNEE
-MYAPP-42     Fix login redirect loop        In Progress  Alice
-MYAPP-38     Update password reset flow     In Progress  Bob
+Key        Status       Assignee  Type  Summary
+MYAPP-42   In Progress  Alice     Bug   Fix login redirect loop
+MYAPP-38   In Progress  Bob       Task  Update password reset flow
 
 $ jira issues list --project MYAPP --json
-{"total": 2, "issues": [...]}
+{"items": [...], "total": 2, "startAt": 0, "maxResults": 50}
 ```
 
 ## Installation
@@ -63,7 +65,9 @@ Get a Jira Cloud API token at: https://id.atlassian.com/manage-profile/security/
 chmod 600 ~/.config/jira/config.toml
 ```
 
-Run `jira config show` to confirm the resolved path and active credentials (token is masked).
+Run `jira doctor` after setup to verify the complete connection. Use `jira
+config show` when you only need to inspect the resolved path and masked
+credentials.
 
 ### Environment variables
 
@@ -229,18 +233,23 @@ jira completions zsh > ~/.zsh/completions/_jira
 ### Config
 
 ```sh
-jira init                    # setup guide with example config and token URLs
+jira init                    # guided setup that verifies credentials before saving
+jira doctor                  # verify config, auth, projects, and write safety
 jira config show             # resolved credentials (token masked)
 jira config init             # same as jira init
 ```
 
 ## Agent use
 
-`jira schema` returns a complete, machine-readable description of all commands, flags, JSON output shapes, auth requirements, and exit codes. AI agents should call this once at the start of a session instead of relying on help text.
+Use `jira schema --command` when an agent knows which operation it needs. The
+compact response includes that command's arguments, effects, pagination,
+output fields, global flags, and error contract. Use the full `jira schema`
+document only for discovery across the complete command tree.
 
 ```sh
+jira schema --command 'issues list'
+jira schema --command 'issues transition'
 jira schema | jq '.commands[] | .name'
-jira schema | jq '.commands[] | select(.name == "issues list")'
 ```
 
 ### Read-only mode
