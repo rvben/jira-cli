@@ -9,7 +9,14 @@ classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
+description = "Agent-friendly Jira CLI with JSON output, structured exit codes, and schema introspection"
+readme = "README.md"
 dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/rvben/jira-cli"
+Repository = "https://github.com/rvben/jira-cli"
+Issues = "https://github.com/rvben/jira-cli/issues"
 
 [tool.maturin]
 bindings = "bin"
