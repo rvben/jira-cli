@@ -357,3 +357,8 @@ push and pull request. The workflow is at `.github/workflows/ci.yml`.
 ## License
 
 MIT
+
+## Releasing
+
+Vership owns versioning, changelog generation, release commits, and tags. See
+[the release runbook](docs/releases.md) for the verified workflow and recovery policy.
