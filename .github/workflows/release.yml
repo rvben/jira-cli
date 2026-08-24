@@ -64,7 +64,7 @@ jobs:
 
   build:
     needs: test
-    timeout-minutes: 30
+    timeout-minutes: 60
     # Guard: self-hosted runners only execute on trusted events (tag push,
     # workflow_dispatch). Fork PRs must never dispatch jobs to self-hosted.
     if: github.event_name != 'pull_request'
