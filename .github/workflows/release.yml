@@ -95,9 +95,9 @@ jobs:
           toolchain: 1.96.0
           components: rustfmt, clippy
           targets: ${{ matrix.target }}
-      - name: Verify cargo-zigbuild
+      - name: Install cargo-zigbuild
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo zigbuild --version
+        run: cargo install --locked cargo-zigbuild --version 0.23.2
       - name: Prepare cargo cache dirs (arm64 linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: mkdir -p "${RUNNER_TOOL_CACHE}/cargo-cache/registry" "${RUNNER_TOOL_CACHE}/cargo-cache/git"
@@ -126,14 +126,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Install uv
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
       - name: Install maturin and zig
-        # maturin-action provides its own maturin inside the manylinux
-        # container for the arm64 linux build, so skip the host install
-        # on the self-hosted runner. Install both into a shared venv so
-        # maturin's `python3 -m ziglang` fallback finds ziglang.
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        # Install into a shared venv so cargo-zigbuild and maturin both find
+        # ziglang without requiring privileged system package installation.
         shell: bash
         run: |
           uv venv "${RUNNER_TEMP}/build-venv"
