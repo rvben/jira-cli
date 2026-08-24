@@ -95,11 +95,9 @@ jobs:
           toolchain: 1.96.0
           components: rustfmt, clippy
           targets: ${{ matrix.target }}
-      - name: Install cargo-zigbuild
+      - name: Verify cargo-zigbuild
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1
-        with:
-          tool: cargo-zigbuild
+        run: cargo zigbuild --version
       - name: Prepare cargo cache dirs (arm64 linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: mkdir -p "${RUNNER_TOOL_CACHE}/cargo-cache/registry" "${RUNNER_TOOL_CACHE}/cargo-cache/git"
