@@ -132,7 +132,8 @@ api_version = 2
 
 Email is not required for PAT auth. `jira auth login` can create and save a
 dedicated PAT automatically, or open the manual token page:
-`https://<your-host>/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens`
+`https://<your-host>/secure/ViewProfile.jspa`. From there, choose
+**Personal access tokens**. Jira's direct selected-tab URL varies by release.
 
 ## Usage
 

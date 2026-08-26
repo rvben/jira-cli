@@ -784,7 +784,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
     } else {
         let pat_url = dc_pat_url(Some(&host));
         let (token, expires_at) = if let Some(existing_token) = prior_token.clone() {
-            eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
+            print_dc_pat_link(&pat_url);
             let raw = prompt_secret("Personal access token", "(Enter to keep)")?;
             if raw.trim().is_empty() {
                 (
@@ -832,7 +832,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
                     eprintln!(" {} {error}", sym_fail());
                     eprintln!("  Falling back to browser-assisted PAT creation.");
                     let _ = open::that(&pat_url);
-                    eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
+                    print_dc_pat_link(&pat_url);
                     (
                         prompt_secret("Personal access token", "")?,
                         Some(prompt_expiration_date(90)?),
@@ -841,7 +841,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
             }
         } else {
             let _ = open::that(&pat_url);
-            eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
+            print_dc_pat_link(&pat_url);
             (
                 prompt_secret("Personal access token", "")?,
                 Some(prompt_expiration_date(90)?),
@@ -1503,7 +1503,10 @@ fn removable_profiles(root: &toml::Table) -> Vec<&str> {
     names
 }
 
-const PAT_PATH: &str = "/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens";
+// The selectedTab plugin key differs between Jira releases. The profile page is
+// stable and always exposes Personal access tokens in the profile navigation.
+const PAT_PATH: &str = "/secure/ViewProfile.jspa";
+const PAT_NAVIGATION: &str = "Profile → Personal access tokens";
 
 /// Build the Personal Access Token creation URL for a Jira DC/Server instance.
 ///
@@ -1521,6 +1524,11 @@ fn dc_pat_url(host: Option<&str>) -> String {
         }
         None => format!("http://<your-host>{PAT_PATH}"),
     }
+}
+
+fn print_dc_pat_link(url: &str) {
+    eprintln!("  {}", sym_dim(&format!("→ {url}")));
+    eprintln!("  {}", sym_dim(PAT_NAVIGATION));
 }
 
 /// Mask a token for display, showing only the last 4 characters.
@@ -2449,14 +2457,14 @@ token = "supersecrettoken"
     fn dc_pat_url_without_host_returns_placeholder() {
         let url = dc_pat_url(None);
         assert!(url.starts_with("http://<your-host>"));
-        assert!(url.contains(PAT_PATH));
+        assert!(url.ends_with(PAT_PATH));
     }
 
     #[test]
     fn dc_pat_url_bare_host_adds_https_scheme() {
         let url = dc_pat_url(Some("jira.corp.com"));
         assert!(url.starts_with("https://jira.corp.com"));
-        assert!(url.contains(PAT_PATH));
+        assert!(url.ends_with(PAT_PATH));
     }
 
     #[test]
@@ -2464,13 +2472,13 @@ token = "supersecrettoken"
         let url = dc_pat_url(Some("https://jira.corp.com/"));
         assert!(url.starts_with("https://jira.corp.com"));
         assert!(!url.contains("https://https://"));
-        assert!(url.contains(PAT_PATH));
+        assert!(url.ends_with(PAT_PATH));
     }
 
     #[test]
     fn dc_pat_url_host_with_http_scheme_is_preserved() {
         let url = dc_pat_url(Some("http://localhost:8080"));
         assert!(url.starts_with("http://localhost:8080"));
-        assert!(url.contains(PAT_PATH));
+        assert!(url.ends_with(PAT_PATH));
     }
 }
