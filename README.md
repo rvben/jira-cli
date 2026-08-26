@@ -44,7 +44,11 @@ make install          # runs check + release build, copies to ~/.local/bin/jira
 
 ## Configuration
 
-Run `jira init` for a guided setup, or create the config file manually.
+Run `jira init` for guided setup. Existing profile values are reused as
+defaults, token entry is hidden, read-only safety is an explicit choice, and
+credentials are verified before the profile is written. When no terminal is
+available, `jira init --json` returns setup instructions instead of attempting
+to consume piped input. CI can use the environment variables below directly.
 
 **Default locations:**
 
@@ -57,6 +61,7 @@ Run `jira init` for a guided setup, or create the config file manually.
 host  = "mycompany.atlassian.net"
 email = "me@example.com"
 token = "your-api-token"
+read_only = true
 ```
 
 Get a Jira Cloud API token at: https://id.atlassian.com/manage-profile/security/api-tokens

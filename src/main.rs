@@ -709,7 +709,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         }
 
         Command::Init => {
-            jira_cli::config::init(&out, cli.host.as_deref()).await;
+            jira_cli::config::init(&out, cli.host.as_deref()).await?;
             return Ok(());
         }
 
@@ -719,7 +719,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     jira_cli::config::show(&out, cli.host, cli.email, cli.profile)?;
                 }
                 ConfigCommand::Init => {
-                    jira_cli::config::init(&out, cli.host.as_deref()).await;
+                    jira_cli::config::init(&out, cli.host.as_deref()).await?;
                 }
                 ConfigCommand::Remove { profile } => {
                     jira_cli::config::remove_profile(&out, &profile)?;
@@ -1149,7 +1149,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "email", "type": "string", "description": "Omit for `pat` auth, which Jira Data Center uses"},
                 {"name": "token", "type": "string"},
                 {"name": "auth_type", "type": "string", "description": "\"basic\" for Jira Cloud, \"pat\" for a Data Center personal access token"},
-                {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"}
+                {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"},
+                {"name": "read_only", "type": "boolean", "description": "Block commands that write to Jira"}
             ]},
             {"name": "profiles", "type": "object", "description": "Keyed by profile name, so the keys are chosen by the user rather than fixed. Each value has the same shape as `default`"}
         ]}

@@ -287,25 +287,23 @@ pub fn show(
 /// In an interactive terminal it prompts for Jira type, host, credentials, and profile
 /// name, verifies the credentials against the API, then writes (or updates)
 /// `~/.config/jira/config.toml`.
-pub async fn init(out: &OutputConfig, host: Option<&str>) {
+pub async fn init(out: &OutputConfig, host: Option<&str>) -> Result<(), ApiError> {
     if out.json {
         init_json(out, host);
-        return;
+        return Ok(());
     }
 
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        out.print_message(
-            "Run `jira init` in an interactive terminal to configure credentials, \
-             or use `jira init --json` for setup instructions.",
-        );
-        return;
+        return Err(ApiError::InvalidInput(
+            "interactive setup requires a terminal; run `jira init --json` for setup instructions, or configure JIRA_HOST, JIRA_EMAIL, and JIRA_TOKEN for automation"
+                .into(),
+        ));
     }
 
-    if let Err(e) = init_interactive(host).await {
-        eprintln!("{} {e}", sym_fail());
-        std::process::exit(crate::output::exit_codes::GENERAL_ERROR);
-    }
+    init_interactive(host)
+        .await
+        .map_err(|error| ApiError::Other(error.to_string()))
 }
 
 /// The example config `jira init --json` prints, and the same value `jira schema`
@@ -322,6 +320,7 @@ pub fn schema_example_config() -> serde_json::Value {
             "token": "your-api-token",
             "auth_type": "basic",
             "api_version": 3,
+            "read_only": true,
         },
         "profiles": {
             "work": {
@@ -464,7 +463,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         } else {
             ""
         };
-        let raw = prompt("Token", token_hint, None)?;
+        let raw = prompt_secret("Token", token_hint)?;
         let token = if raw.trim().is_empty() {
             existing
                 .as_ref()
@@ -482,7 +481,7 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         } else {
             ""
         };
-        let raw = prompt("Token", token_hint, None)?;
+        let raw = prompt_secret("Token", token_hint)?;
         let token = if raw.trim().is_empty() {
             existing
                 .as_ref()
@@ -499,6 +498,12 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         let api_version: u8 = ver_str.trim().parse().unwrap_or(2);
         (None, token, "pat", api_version)
     };
+
+    let default_read_only = existing
+        .as_ref()
+        .and_then(|profile| profile.read_only)
+        .unwrap_or(false);
+    let read_only = prompt_bool("Read-only mode?", default_read_only)?;
 
     // Verify credentials against the API before writing anything.
     use std::io::Write;
@@ -561,11 +566,14 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
     write_profile_to_config(
         &path,
         &profile_name,
-        &host,
-        email.as_deref(),
-        &token,
-        auth_type,
-        api_version,
+        ProfileWrite {
+            host: &host,
+            email: email.as_deref(),
+            token: &token,
+            auth_type,
+            api_version,
+            read_only,
+        },
     )?;
 
     #[cfg(unix)]
@@ -576,6 +584,10 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
 
     eprintln!();
     eprintln!("  {} Config written to {}", sym_ok(), path.display());
+    eprintln!(
+        "  {}",
+        sym_dim("Credential storage: protected config file; treat it as a secret")
+    );
     eprintln!("{sep}");
     if profile_name == "default" {
         eprintln!("  Run: jira projects list");
@@ -661,6 +673,29 @@ fn prompt_required(
     }
 }
 
+/// Prompt for a credential without echoing it to the terminal.
+fn prompt_secret(label: &str, hint: &str) -> Result<String, std::io::Error> {
+    use std::io::{self, Write};
+    let hint_part = if hint.is_empty() {
+        String::new()
+    } else {
+        format!("  {hint}")
+    };
+    eprint!("{} {label}{hint_part}: ", sym_q());
+    io::stderr().flush()?;
+    rpassword::read_password().map(|value| value.trim().to_owned())
+}
+
+fn prompt_bool(label: &str, default: bool) -> Result<bool, std::io::Error> {
+    let default_value = if default { "y" } else { "n" };
+    let value = prompt(label, "[y/n]", Some(default_value))?;
+    Ok(match value.to_ascii_lowercase().as_str() {
+        "y" | "yes" | "true" | "1" => true,
+        "n" | "no" | "false" | "0" => false,
+        _ => default,
+    })
+}
+
 // ── Color / symbol helpers ──────────────────────────────────────────────────
 
 fn sym_q() -> String {
@@ -703,14 +738,19 @@ fn sym_dim(s: &str) -> String {
 ///
 /// If the file already exists its other sections are preserved; only the target
 /// profile section is created or replaced. The parent directory is created if needed.
+struct ProfileWrite<'a> {
+    host: &'a str,
+    email: Option<&'a str>,
+    token: &'a str,
+    auth_type: &'a str,
+    api_version: u8,
+    read_only: bool,
+}
+
 fn write_profile_to_config(
     path: &std::path::Path,
     profile_name: &str,
-    host: &str,
-    email: Option<&str>,
-    token: &str,
-    auth_type: &str,
-    api_version: u8,
+    profile: ProfileWrite<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let existing = if path.exists() {
         std::fs::read_to_string(path)?
@@ -727,20 +767,29 @@ fn write_profile_to_config(
     let root = doc.as_table_mut().expect("config is a TOML table");
 
     let mut section = toml::map::Map::new();
-    section.insert("host".to_owned(), toml::Value::String(host.to_owned()));
-    if let Some(e) = email {
+    section.insert(
+        "host".to_owned(),
+        toml::Value::String(profile.host.to_owned()),
+    );
+    if let Some(e) = profile.email {
         section.insert("email".to_owned(), toml::Value::String(e.to_owned()));
     }
-    section.insert("token".to_owned(), toml::Value::String(token.to_owned()));
-    if auth_type != "basic" {
+    section.insert(
+        "token".to_owned(),
+        toml::Value::String(profile.token.to_owned()),
+    );
+    if profile.auth_type != "basic" {
         section.insert(
             "auth_type".to_owned(),
-            toml::Value::String(auth_type.to_owned()),
+            toml::Value::String(profile.auth_type.to_owned()),
         );
         section.insert(
             "api_version".to_owned(),
-            toml::Value::Integer(i64::from(api_version)),
+            toml::Value::Integer(i64::from(profile.api_version)),
         );
+    }
+    if profile.read_only {
+        section.insert("read_only".to_owned(), toml::Value::Boolean(true));
     }
 
     if profile_name == "default" {
@@ -764,7 +813,21 @@ fn write_profile_to_config(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, toml::to_string_pretty(&doc)?)?;
+    let body = toml::to_string_pretty(&doc)?;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(parent)?;
+    use std::io::Write;
+    temp.write_all(body.as_bytes())?;
+    temp.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o600))?;
+    }
+    temp.persist(path).map_err(|error| error.error)?;
 
     Ok(())
 }
@@ -1522,19 +1585,21 @@ token = "supersecrettoken"
     async fn init_json_output_includes_example_and_paths() {
         let out = crate::output::OutputConfig::new(true, false, true);
         // No env or config needed - init() never loads credentials in JSON mode
-        init(&out, Some("jira.corp.com")).await;
+        init(&out, Some("jira.corp.com")).await.unwrap();
     }
 
     // The text path of init() requires an interactive TTY; in test context stdin is
-    // not a TTY so it prints a short message and returns without hanging.
+    // not a TTY, so it returns an actionable input error without hanging.
     #[tokio::test]
-    async fn init_non_interactive_prints_message_without_error() {
+    async fn init_non_interactive_returns_actionable_error() {
         let out = crate::output::OutputConfig {
             json: false,
             quiet: false,
         };
         // stdin is not a TTY in tests - must return immediately, not hang
-        init(&out, None).await;
+        let error = init(&out, None).await.unwrap_err();
+        assert!(matches!(error, ApiError::InvalidInput(_)));
+        assert!(error.to_string().contains("JIRA_TOKEN"));
     }
 
     #[test]
@@ -1545,11 +1610,14 @@ token = "supersecrettoken"
         write_profile_to_config(
             &path,
             "default",
-            "acme.atlassian.net",
-            Some("me@acme.com"),
-            "secret",
-            "basic",
-            3,
+            ProfileWrite {
+                host: "acme.atlassian.net",
+                email: Some("me@acme.com"),
+                token: "secret",
+                auth_type: "basic",
+                api_version: 3,
+                read_only: false,
+            },
         )
         .unwrap();
 
@@ -1566,7 +1634,19 @@ token = "supersecrettoken"
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
 
-        write_profile_to_config(&path, "dc", "jira.corp.com", None, "pattoken", "pat", 2).unwrap();
+        write_profile_to_config(
+            &path,
+            "dc",
+            ProfileWrite {
+                host: "jira.corp.com",
+                email: None,
+                token: "pattoken",
+                auth_type: "pat",
+                api_version: 2,
+                read_only: true,
+            },
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("[profiles.dc]"));
@@ -1574,6 +1654,7 @@ token = "supersecrettoken"
         assert!(content.contains("pattoken"));
         assert!(content.contains("auth_type"));
         assert!(content.contains("api_version"));
+        assert!(content.contains("read_only = true"));
         assert!(!content.contains("email"));
     }
 
@@ -1583,10 +1664,20 @@ token = "supersecrettoken"
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "profiles = 5\n").unwrap();
 
-        let err =
-            write_profile_to_config(&path, "work", "h.atlassian.net", None, "tok", "basic", 3)
-                .expect_err("a `profiles` integer cannot hold a profile")
-                .to_string();
+        let err = write_profile_to_config(
+            &path,
+            "work",
+            ProfileWrite {
+                host: "h.atlassian.net",
+                email: None,
+                token: "tok",
+                auth_type: "basic",
+                api_version: 3,
+                read_only: false,
+            },
+        )
+        .expect_err("a `profiles` integer cannot hold a profile")
+        .to_string();
         assert!(
             err.contains("profiles") && err.contains("work"),
             "the message must name the key and the profile being added: {err}"
@@ -1600,7 +1691,19 @@ token = "supersecrettoken"
         // succeed, or the check above would pass by refusing everything.
         let good = dir.path().join("good.toml");
         std::fs::write(&good, "[profiles.other]\nhost = \"a.b\"\n").unwrap();
-        write_profile_to_config(&good, "work", "h.atlassian.net", None, "tok", "basic", 3).unwrap();
+        write_profile_to_config(
+            &good,
+            "work",
+            ProfileWrite {
+                host: "h.atlassian.net",
+                email: None,
+                token: "tok",
+                auth_type: "basic",
+                api_version: 3,
+                read_only: false,
+            },
+        )
+        .unwrap();
         let written = std::fs::read_to_string(&good).unwrap();
         assert!(written.contains("[profiles.work]") && written.contains("[profiles.other]"));
     }
@@ -1621,11 +1724,14 @@ token = "supersecrettoken"
         write_profile_to_config(
             &path,
             "work",
-            "work.atlassian.net",
-            Some("w@work.com"),
-            "tok2",
-            "basic",
-            3,
+            ProfileWrite {
+                host: "work.atlassian.net",
+                email: Some("w@work.com"),
+                token: "tok2",
+                auth_type: "basic",
+                api_version: 3,
+                read_only: false,
+            },
         )
         .unwrap();
 
