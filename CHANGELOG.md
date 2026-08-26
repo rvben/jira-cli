@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.8](https://github.com/rvben/jira-cli/compare/v0.4.7...v0.4.8) - 2026-08-26
+
+### Added
+
+- **auth**: unify secure onboarding ([c12748e](https://github.com/rvben/jira-cli/commit/c12748ef9976d57caa84aa60a57e1844d39e5d8f))
+- **onboarding**: harden guided setup ([120ab9f](https://github.com/rvben/jira-cli/commit/120ab9f66f8f50a51e09cdcf39c116c352a8dd31))
+- **cli**: standardize color controls ([885c99d](https://github.com/rvben/jira-cli/commit/885c99de88185b7022b6f887e6b11094fad85bc4))
+
+### Fixed
+
+- **auth**: use stable Data Center token page ([6a4a53d](https://github.com/rvben/jira-cli/commit/6a4a53d97c1d50cd3a0e3e5866dd3cb308707695))
+- **package**: complete distribution metadata ([2598ee0](https://github.com/rvben/jira-cli/commit/2598ee05cb1bb25545d08ca77784a5f39cc522a0))
+- **release**: allow cold ARM builds to finish ([cdd4085](https://github.com/rvben/jira-cli/commit/cdd40857edbd10ec9479e78e10f90d6d182bd210))
+- **release**: provision ARM build tools ([1fb6863](https://github.com/rvben/jira-cli/commit/1fb686391bfbe54a18f141e0955839af17dc70cb))
+- **release**: avoid privileged ARM tool install ([0de71d1](https://github.com/rvben/jira-cli/commit/0de71d1746ac7c27f13a7012afc11f51e1e2b16f))
+- **ci**: install pinned Rust components ([e1a3cc3](https://github.com/rvben/jira-cli/commit/e1a3cc38ba8dd5e230a999875274c6e4bf9cbf4a))
+
 ## [0.4.7](https://github.com/rvben/jira-cli/compare/v0.4.6...v0.4.7) - 2026-08-22
 
 ### Added
