@@ -1,8 +1,17 @@
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static NO_COLOR: AtomicBool = AtomicBool::new(false);
+
+pub fn set_no_color(disabled: bool) {
+    NO_COLOR.store(disabled, Ordering::Relaxed);
+}
 
 /// Whether to use colored output (only when stdout is a terminal).
 pub fn use_color() -> bool {
-    std::io::stdout().is_terminal()
+    !NO_COLOR.load(Ordering::Relaxed)
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::io::stdout().is_terminal()
 }
 
 /// Format a URL as a clickable OSC 8 hyperlink in terminals that support it.

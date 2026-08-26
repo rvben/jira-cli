@@ -86,6 +86,10 @@ struct Cli {
     #[arg(long, global = true)]
     quiet: bool,
 
+    /// Disable ANSI color even on a terminal
+    #[arg(long, global = true)]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -651,6 +655,7 @@ async fn main() {
             std::process::exit(e.exit_code());
         }
     };
+    jira_cli::output::set_no_color(cli.no_color);
     let text_mode = cli.output == "text";
     let json_mode = cli.json || cli.output == "json";
     let out = OutputConfig::new(json_mode, text_mode, cli.quiet);
@@ -1599,10 +1604,12 @@ fn schema_json() -> serde_json::Value {
     .collect();
 
     // Global arg IDs excluded from per-command arg lists.
-    let global_ids: HashSet<&str> = ["json", "output", "quiet", "host", "email", "profile"]
-        .iter()
-        .copied()
-        .collect();
+    let global_ids: HashSet<&str> = [
+        "json", "output", "quiet", "no_color", "host", "email", "profile",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     let root = Cli::command();
     let commands = walk_commands(
@@ -1623,6 +1630,7 @@ fn schema_json() -> serde_json::Value {
         "global_args": [
             {"name": "--output", "type": "string", "required": false, "default": "auto", "description": "Output format: auto (default), text, or json", "enum": ["auto", "text", "json"]},
             {"name": "--quiet", "type": "boolean", "required": false, "description": "Suppress non-data output"},
+            {"name": "--no-color", "type": "boolean", "required": false, "description": "Disable ANSI color"},
             {"name": "--host", "type": "string", "required": false, "description": "Atlassian domain (overrides config/env)"},
             {"name": "--email", "type": "string", "required": false, "description": "Account email (overrides config/env)"},
             {"name": "--profile", "type": "string", "required": false, "description": "Config profile to use"},

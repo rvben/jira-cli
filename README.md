@@ -315,8 +315,9 @@ member of a pipeline does, and shells report it as 141.
 |------|--------|
 | `--json` | Force JSON output (auto when stdout is not a TTY) |
 | `--quiet` | Suppress counts, confirmations, and status messages |
+| `--no-color` | Disable ANSI color (`NO_COLOR` is also honored) |
 
-Both flags are available on every command.
+These flags are available on every command. `--json` is a compatibility alias for `--output json`; use `--output text` to force human-readable output in a pipeline.
 
 ## Development
 
