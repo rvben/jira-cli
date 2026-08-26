@@ -12,6 +12,10 @@ pub struct ProfileConfig {
     pub host: Option<String>,
     pub email: Option<String>,
     pub token: Option<String>,
+    pub credential_store: Option<String>,
+    pub cloud_id: Option<String>,
+    pub token_kind: Option<String>,
+    pub expires_at: Option<String>,
     pub auth_type: Option<String>,
     pub api_version: Option<u8>,
     pub read_only: Option<bool>,
@@ -26,6 +30,10 @@ struct RawConfig {
     host: Option<String>,
     email: Option<String>,
     token: Option<String>,
+    credential_store: Option<String>,
+    cloud_id: Option<String>,
+    token_kind: Option<String>,
+    expires_at: Option<String>,
     auth_type: Option<String>,
     api_version: Option<u8>,
     read_only: Option<bool>,
@@ -37,6 +45,26 @@ impl RawConfig {
             host: self.default.host.clone().or_else(|| self.host.clone()),
             email: self.default.email.clone().or_else(|| self.email.clone()),
             token: self.default.token.clone().or_else(|| self.token.clone()),
+            credential_store: self
+                .default
+                .credential_store
+                .clone()
+                .or_else(|| self.credential_store.clone()),
+            cloud_id: self
+                .default
+                .cloud_id
+                .clone()
+                .or_else(|| self.cloud_id.clone()),
+            token_kind: self
+                .default
+                .token_kind
+                .clone()
+                .or_else(|| self.token_kind.clone()),
+            expires_at: self
+                .default
+                .expires_at
+                .clone()
+                .or_else(|| self.expires_at.clone()),
             auth_type: self
                 .default
                 .auth_type
@@ -51,12 +79,17 @@ impl RawConfig {
 /// Resolved credentials for a single profile.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub profile: String,
     pub host: String,
     pub email: String,
     pub token: String,
     pub auth_type: AuthType,
     pub api_version: u8,
     pub read_only: bool,
+    pub credential_store: String,
+    pub cloud_id: Option<String>,
+    pub token_kind: String,
+    pub expires_at: Option<String>,
 }
 
 impl Config {
@@ -70,7 +103,7 @@ impl Config {
         email_arg: Option<String>,
         profile_arg: Option<String>,
     ) -> Result<Self, ApiError> {
-        let file_profile = load_file_profile(profile_arg.as_deref())?;
+        let (profile, file_profile) = load_file_profile(profile_arg.as_deref())?;
 
         let host = normalize_value(host_arg)
             .or_else(|| env_var("JIRA_HOST"))
@@ -81,13 +114,35 @@ impl Config {
                 )
             })?;
 
-        let token = env_var("JIRA_TOKEN")
-            .or_else(|| normalize_value(file_profile.token.clone()))
-            .ok_or_else(|| {
-                ApiError::InvalidInput(
-                    "No API token configured. Set JIRA_TOKEN or run `jira config init`.".into(),
-                )
-            })?;
+        let env_token = env_var("JIRA_TOKEN");
+        let stored_token = match file_profile.credential_store.as_deref() {
+            Some("keyring") if env_token.is_none() => crate::credentials::load_optional(&profile)?,
+            Some("file") | None => normalize_value(file_profile.token.clone()),
+            Some(other) => {
+                return Err(ApiError::InvalidInput(format!(
+                    "unsupported credential_store `{other}` for profile `{profile}`"
+                )));
+            }
+        };
+        let credential_store = if env_token.is_some() {
+            "environment"
+        } else if file_profile.credential_store.as_deref() == Some("keyring") {
+            "os-keychain"
+        } else if stored_token.is_some() {
+            if file_profile.credential_store.as_deref() == Some("file") {
+                "config-file"
+            } else {
+                "legacy-config"
+            }
+        } else {
+            "none"
+        }
+        .to_string();
+        let token = env_token.or(stored_token).ok_or_else(|| {
+            ApiError::InvalidInput(
+                "No API token configured. Set JIRA_TOKEN or run `jira auth login`.".into(),
+            )
+        })?;
 
         // A blank value is absent, the same as for host, email and token: only a
         // value someone actually wrote is worth rejecting.
@@ -125,13 +180,39 @@ impl Config {
             None => file_profile.read_only.unwrap_or(false),
         };
 
+        let cloud_id = env_var("JIRA_CLOUD_ID").or(file_profile.cloud_id);
+        let token_kind = env_var("JIRA_TOKEN_KIND")
+            .or(file_profile.token_kind)
+            .unwrap_or_else(|| "classic".into());
+        if !matches!(token_kind.as_str(), "classic" | "scoped") {
+            return Err(ApiError::InvalidInput(format!(
+                "unsupported token_kind `{token_kind}`; expected classic or scoped"
+            )));
+        }
+        if token_kind == "scoped" && cloud_id.is_none() {
+            return Err(ApiError::InvalidInput(
+                "scoped Cloud token requires cloud_id; run `jira auth login` again".into(),
+            ));
+        }
+        let expires_at = file_profile.expires_at;
+        if let Some(value) = expires_at.as_deref() {
+            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+                ApiError::InvalidInput(format!("invalid expires_at `{value}`; expected YYYY-MM-DD"))
+            })?;
+        }
+
         Ok(Self {
+            profile,
             host,
             email,
             token,
             auth_type,
             api_version,
             read_only,
+            credential_store,
+            cloud_id,
+            token_kind,
+            expires_at,
         })
     }
 }
@@ -220,11 +301,19 @@ fn config_dir() -> Option<PathBuf> {
     }
 }
 
-fn load_file_profile(profile: Option<&str>) -> Result<ProfileConfig, ApiError> {
+fn load_file_profile(profile: Option<&str>) -> Result<(String, ProfileConfig), ApiError> {
     let path = config_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ProfileConfig::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((
+                normalize_str(profile)
+                    .map(str::to_owned)
+                    .or_else(|| env_var("JIRA_PROFILE"))
+                    .unwrap_or_else(|| "default".into()),
+                ProfileConfig::default(),
+            ));
+        }
         Err(e) => return Err(ApiError::Other(format!("Failed to read config: {e}"))),
     };
 
@@ -236,17 +325,22 @@ fn load_file_profile(profile: Option<&str>) -> Result<ProfileConfig, ApiError> {
         .or_else(|| env_var("JIRA_PROFILE"));
 
     match profile_name {
+        Some(name) if name == "default" => Ok((name, raw.default_profile())),
         Some(name) => {
             // BTreeMap gives sorted, deterministic output in error messages
             let available: Vec<&str> = raw.profiles.keys().map(String::as_str).collect();
-            raw.profiles.get(&name).cloned().ok_or_else(|| {
-                ApiError::NotFound(format!(
-                    "profile '{name}' in config. Available: {}",
-                    format_available(&available)
-                ))
-            })
+            raw.profiles
+                .get(&name)
+                .cloned()
+                .map(|value| (name.clone(), value))
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!(
+                        "profile '{name}' in config. Available: {}",
+                        format_available(&available)
+                    ))
+                })
         }
-        None => Ok(raw.default_profile()),
+        None => Ok(("default".into(), raw.default_profile())),
     }
 }
 
@@ -268,16 +362,157 @@ pub fn show(
                 "host": cfg.host,
                 "email": cfg.email,
                 "tokenMasked": masked,
+                "profile": cfg.profile,
+                "credentialStore": cfg.credential_store,
+                "tokenKind": cfg.token_kind,
+                "cloudId": cfg.cloud_id,
+                "expiresAt": cfg.expires_at,
+                "expirationStatus": expiration_status(cfg.expires_at.as_deref()),
             }))
             .expect("failed to serialize JSON"),
         );
     } else {
         out.print_message(&format!("Config file: {}", path.display()));
         out.print_data(&format!(
-            "host:  {}\nemail: {}\ntoken: {masked}",
-            cfg.host, cfg.email
+            "profile: {}\nhost:  {}\nemail: {}\ntoken: {masked}\ncredential store: {}\ntoken kind: {}{}",
+            cfg.profile,
+            cfg.host,
+            cfg.email,
+            cfg.credential_store,
+            cfg.token_kind,
+            cfg.expires_at
+                .as_deref()
+                .map(|date| format!("\nexpires: {date}"))
+                .unwrap_or_default()
         ));
     }
+    Ok(())
+}
+
+pub async fn auth_status(
+    out: &OutputConfig,
+    host_arg: Option<String>,
+    email_arg: Option<String>,
+    profile_arg: Option<String>,
+) -> Result<(), ApiError> {
+    let cfg = Config::load(host_arg, email_arg, profile_arg)?;
+    let client = crate::api::client::JiraClient::new_with_cloud(
+        &cfg.host,
+        &cfg.email,
+        &cfg.token,
+        cfg.auth_type.clone(),
+        cfg.api_version,
+        cfg.cloud_id.as_deref(),
+        &cfg.token_kind,
+    )?;
+    let myself = client.get_myself().await?;
+    out.print_result(
+        &serde_json::json!({
+            "profile": cfg.profile,
+            "status": "ok",
+            "identity": myself.display_name,
+            "credentialStore": cfg.credential_store,
+            "tokenKind": cfg.token_kind,
+            "cloudId": cfg.cloud_id,
+            "expiresAt": cfg.expires_at,
+            "expirationStatus": expiration_status(cfg.expires_at.as_deref()),
+        }),
+        &format!(
+            "{} Authenticated as {} ({}, {}; token {})",
+            sym_ok(),
+            myself.display_name,
+            cfg.credential_store,
+            cfg.token_kind,
+            expiration_status(cfg.expires_at.as_deref())
+        ),
+    );
+    Ok(())
+}
+
+fn expiration_status(expires_at: Option<&str>) -> &'static str {
+    let Some(expires_at) = expires_at else {
+        return "unknown";
+    };
+    let Ok(date) = chrono::NaiveDate::parse_from_str(expires_at, "%Y-%m-%d") else {
+        return "invalid";
+    };
+    let days = date
+        .signed_duration_since(chrono::Utc::now().date_naive())
+        .num_days();
+    if days < 0 {
+        "expired"
+    } else if days <= 30 {
+        "expiring-soon"
+    } else {
+        "valid"
+    }
+}
+
+pub async fn migrate_credential(
+    out: &OutputConfig,
+    profile_arg: Option<String>,
+) -> Result<(), ApiError> {
+    let cfg = Config::load(None, None, profile_arg)?;
+    if cfg.credential_store != "legacy-config" && cfg.credential_store != "config-file" {
+        return Err(ApiError::InvalidInput(format!(
+            "profile `{}` does not contain an inline token to migrate",
+            cfg.profile
+        )));
+    }
+    crate::api::client::JiraClient::new_with_cloud(
+        &cfg.host,
+        &cfg.email,
+        &cfg.token,
+        cfg.auth_type.clone(),
+        cfg.api_version,
+        cfg.cloud_id.as_deref(),
+        &cfg.token_kind,
+    )?
+    .get_myself()
+    .await?;
+
+    crate::credentials::available()?;
+    let previous = crate::credentials::load_optional(&cfg.profile)?;
+    crate::credentials::store(&cfg.profile, &cfg.token)?;
+    if let Err(error) = rewrite_profile_credential(&cfg.profile, Some("keyring")) {
+        match previous {
+            Some(token) => {
+                let _ = crate::credentials::store(&cfg.profile, &token);
+            }
+            None => {
+                let _ = crate::credentials::delete(&cfg.profile);
+            }
+        }
+        return Err(error);
+    }
+    out.print_result(
+        &serde_json::json!({
+            "profile": cfg.profile,
+            "migrated": true,
+            "credentialStore": "os-keychain",
+        }),
+        &format!(
+            "{} Migrated profile `{}` to the operating-system keychain",
+            sym_ok(),
+            cfg.profile
+        ),
+    );
+    Ok(())
+}
+
+pub fn logout(out: &OutputConfig, profile_arg: Option<String>) -> Result<(), ApiError> {
+    let profile = requested_profile_name(profile_arg.as_deref());
+    let (_, stored) = load_file_profile(Some(&profile))?;
+    let removed = if stored.credential_store.as_deref() == Some("keyring") {
+        crate::credentials::delete(&profile)?
+    } else {
+        false
+    };
+    rewrite_profile_credential(&profile, None)?;
+    out.print_result(
+        &serde_json::json!({ "profile": profile, "loggedOut": true, "credentialRemoved": removed }),
+        &format!("{} Logged out profile `{profile}`", sym_ok()),
+    );
     Ok(())
 }
 
@@ -317,7 +552,10 @@ pub fn schema_example_config() -> serde_json::Value {
         "default": {
             "host": "mycompany.atlassian.net",
             "email": "me@example.com",
-            "token": "your-api-token",
+            "credential_store": "keyring",
+            "cloud_id": "your-atlassian-cloud-id",
+            "token_kind": "scoped",
+            "expires_at": "2026-11-24",
             "auth_type": "basic",
             "api_version": 3,
             "read_only": true,
@@ -326,11 +564,14 @@ pub fn schema_example_config() -> serde_json::Value {
             "work": {
                 "host": "work.atlassian.net",
                 "email": "me@work.com",
-                "token": "work-token",
+                "credential_store": "keyring",
+                "cloud_id": "your-work-cloud-id",
+                "token_kind": "scoped",
             },
             "datacenter": {
                 "host": "jira.mycompany.com",
-                "token": "your-personal-access-token",
+                "credential_store": "keyring",
+                "expires_at": "2026-11-24",
                 "auth_type": "pat",
                 "api_version": 2,
             }
@@ -452,43 +693,159 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         prompt_required("Host", "", default.as_deref())?
     };
 
+    let prior_token = match (
+        existing
+            .as_ref()
+            .and_then(|profile| profile.credential_store.as_deref()),
+        target_name.as_deref(),
+    ) {
+        (Some("keyring"), Some(name)) => crate::credentials::load_optional(name)?,
+        _ => existing
+            .as_ref()
+            .and_then(|profile| profile.token.clone())
+            .filter(|token| !token.trim().is_empty()),
+    };
+
     // Credentials
-    let (email, token, auth_type, api_version): (Option<String>, String, &str, u8) = if is_cloud {
+    let (email, token, auth_type, api_version, cloud_id, token_kind, expires_at): (
+        Option<String>,
+        String,
+        &str,
+        u8,
+        Option<String>,
+        String,
+        Option<String>,
+    ) = if is_cloud {
         const CLOUD_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
         let default_email = existing.as_ref().and_then(|p| p.email.clone());
         let email = prompt_required("Email", "", default_email.as_deref())?;
+        let default_kind = existing
+            .as_ref()
+            .and_then(|profile| profile.token_kind.as_deref())
+            .unwrap_or("scoped");
+        let requested_kind = prompt("Token type", "[scoped/classic]", Some(default_kind))?;
+        let token_kind = if requested_kind.eq_ignore_ascii_case("classic") {
+            "classic".to_owned()
+        } else {
+            "scoped".to_owned()
+        };
+        let cloud_id = if token_kind == "scoped" {
+            eprint!("  Discovering Cloud ID...");
+            std::io::stderr().flush().ok();
+            let id = discover_cloud_id(&host).await?;
+            eprintln!(" {}", sym_ok());
+            Some(id)
+        } else {
+            None
+        };
+        if prior_token.is_none()
+            && prompt_bool("Open Atlassian's token page now?", true)?
+            && let Err(error) = open::that(CLOUD_URL)
+        {
+            eprintln!("  {} Could not open browser: {error}", sym_fail());
+        }
         eprintln!("  {}", sym_dim(&format!("→ {CLOUD_URL}")));
-        let token_hint = if existing.as_ref().and_then(|p| p.token.as_ref()).is_some() {
+        if token_kind == "scoped" {
+            eprintln!(
+                "  {}",
+                sym_dim("Choose Jira scopes and the least privilege needed for this profile.")
+            );
+        }
+        let token_hint = if prior_token.is_some() {
             "(Enter to keep)"
         } else {
             ""
         };
         let raw = prompt_secret("Token", token_hint)?;
-        let token = if raw.trim().is_empty() {
-            existing
-                .as_ref()
-                .and_then(|p| p.token.clone())
+        let kept_existing = raw.trim().is_empty();
+        let token = if kept_existing {
+            prior_token
+                .clone()
                 .ok_or("No existing token. Please enter a token.")?
         } else {
             raw
         };
-        (Some(email), token, "basic", 3)
+        let expires_at = if kept_existing {
+            existing
+                .as_ref()
+                .and_then(|profile| profile.expires_at.clone())
+        } else {
+            Some(prompt_expiration_date(90)?)
+        };
+        (
+            Some(email),
+            token,
+            "basic",
+            3,
+            cloud_id,
+            token_kind,
+            expires_at,
+        )
     } else {
         let pat_url = dc_pat_url(Some(&host));
-        eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
-        let token_hint = if existing.as_ref().and_then(|p| p.token.as_ref()).is_some() {
-            "(Enter to keep)"
+        let (token, expires_at) = if let Some(existing_token) = prior_token.clone() {
+            eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
+            let raw = prompt_secret("Personal access token", "(Enter to keep)")?;
+            if raw.trim().is_empty() {
+                (
+                    existing_token,
+                    existing
+                        .as_ref()
+                        .and_then(|profile| profile.expires_at.clone()),
+                )
+            } else {
+                (raw, Some(prompt_expiration_date(90)?))
+            }
+        } else if prompt_bool("Create a dedicated PAT automatically?", true)? {
+            let method = prompt("Bootstrap with", "[password/pat]", Some("password"))?;
+            let use_pat = method.eq_ignore_ascii_case("pat");
+            let username = if use_pat {
+                None
+            } else {
+                Some(prompt_required("Bootstrap username", "", None)?)
+            };
+            let secret = prompt_secret(
+                if use_pat {
+                    "Existing personal access token"
+                } else {
+                    "Bootstrap password"
+                },
+                "used once and never saved",
+            )?;
+            let expiration_days = prompt_expiration_days(90)?;
+            eprint!("  Creating personal access token...");
+            std::io::stderr().flush().ok();
+            match create_data_center_pat(
+                &host,
+                username.as_deref(),
+                &secret,
+                target_name.as_deref().unwrap_or("jira-cli"),
+                expiration_days,
+            )
+            .await
+            {
+                Ok(token) => {
+                    eprintln!(" {}", sym_ok());
+                    (token, Some(expiration_date(expiration_days)))
+                }
+                Err(error) => {
+                    eprintln!(" {} {error}", sym_fail());
+                    eprintln!("  Falling back to browser-assisted PAT creation.");
+                    let _ = open::that(&pat_url);
+                    eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
+                    (
+                        prompt_secret("Personal access token", "")?,
+                        Some(prompt_expiration_date(90)?),
+                    )
+                }
+            }
         } else {
-            ""
-        };
-        let raw = prompt_secret("Token", token_hint)?;
-        let token = if raw.trim().is_empty() {
-            existing
-                .as_ref()
-                .and_then(|p| p.token.clone())
-                .ok_or("No existing token. Please enter a token.")?
-        } else {
-            raw
+            let _ = open::that(&pat_url);
+            eprintln!("  {}", sym_dim(&format!("→ {pat_url}")));
+            (
+                prompt_secret("Personal access token", "")?,
+                Some(prompt_expiration_date(90)?),
+            )
         };
         let default_ver = existing
             .as_ref()
@@ -496,7 +853,15 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
             .unwrap_or_else(|| "2".to_owned());
         let ver_str = prompt("API version", "", Some(&default_ver))?;
         let api_version: u8 = ver_str.trim().parse().unwrap_or(2);
-        (None, token, "pat", api_version)
+        (
+            None,
+            token,
+            "pat",
+            api_version,
+            None,
+            "classic".to_owned(),
+            expires_at,
+        )
     };
 
     let default_read_only = existing
@@ -517,12 +882,14 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         AuthType::Basic
     };
 
-    let verified = match crate::api::client::JiraClient::new(
+    let verified = match crate::api::client::JiraClient::new_with_cloud(
         &host,
         email.as_deref().unwrap_or(""),
         &token,
         auth_type_enum,
         api_version,
+        cloud_id.as_deref(),
+        &token_kind,
     ) {
         Err(e) => {
             eprintln!(" {} {e}", sym_fail());
@@ -562,19 +929,50 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
         }
     };
 
-    // Write config
-    write_profile_to_config(
+    let file_storage = choose_credential_storage()?;
+    let previous_keyring = if file_storage {
+        None
+    } else {
+        crate::credentials::load_optional(&profile_name)?
+    };
+    if !file_storage {
+        crate::credentials::store(&profile_name, &token)?;
+    }
+
+    // Write config only after the credential is durable. Roll back a keychain
+    // change if the atomic config replacement fails.
+    let write_result = write_profile_to_config(
         &path,
         &profile_name,
         ProfileWrite {
             host: &host,
             email: email.as_deref(),
             token: &token,
+            credential_store: if file_storage { "file" } else { "keyring" },
+            cloud_id: cloud_id.as_deref(),
+            token_kind: &token_kind,
+            expires_at: expires_at.as_deref(),
             auth_type,
             api_version,
             read_only,
         },
-    )?;
+    );
+    if let Err(error) = write_result {
+        if !file_storage {
+            match previous_keyring {
+                Some(previous) => {
+                    let _ = crate::credentials::store(&profile_name, &previous);
+                }
+                None => {
+                    let _ = crate::credentials::delete(&profile_name);
+                }
+            }
+        }
+        return Err(error);
+    }
+    if file_storage {
+        let _ = crate::credentials::delete(&profile_name);
+    }
 
     #[cfg(unix)]
     {
@@ -586,7 +984,11 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
     eprintln!("  {} Config written to {}", sym_ok(), path.display());
     eprintln!(
         "  {}",
-        sym_dim("Credential storage: protected config file; treat it as a secret")
+        sym_dim(if file_storage {
+            "Credential storage: protected config file; treat it as a secret"
+        } else {
+            "Credential storage: operating-system keychain"
+        })
     );
     eprintln!("{sep}");
     if profile_name == "default" {
@@ -696,6 +1098,105 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool, std::io::Error> {
     })
 }
 
+fn prompt_expiration_days(default: u64) -> Result<u64, Box<dyn std::error::Error>> {
+    loop {
+        let value = prompt(
+            "Token expiry in days",
+            "[1-365]",
+            Some(&default.to_string()),
+        )?;
+        match value.parse::<u64>() {
+            Ok(days @ 1..=365) => return Ok(days),
+            _ => eprintln!("  {} Expiry must be between 1 and 365 days.", sym_fail()),
+        }
+    }
+}
+
+fn expiration_date(days: u64) -> String {
+    (chrono::Utc::now() + chrono::Duration::days(days as i64))
+        .date_naive()
+        .to_string()
+}
+
+fn prompt_expiration_date(default: u64) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(expiration_date(prompt_expiration_days(default)?))
+}
+
+fn choose_credential_storage() -> Result<bool, Box<dyn std::error::Error>> {
+    match crate::credentials::available() {
+        Ok(()) => Ok(false),
+        Err(error) => {
+            eprintln!("  {} {error}", sym_fail());
+            if prompt_bool("Use the protected config-file fallback instead?", false)? {
+                Ok(true)
+            } else {
+                Err("credential storage cancelled; start an OS credential service or use JIRA_TOKEN for this session".into())
+            }
+        }
+    }
+}
+
+async fn discover_cloud_id(host: &str) -> Result<String, Box<dyn std::error::Error>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TenantInfo {
+        cloud_id: String,
+    }
+
+    let site = if host.starts_with("http://") || host.starts_with("https://") {
+        host.trim_end_matches('/').to_owned()
+    } else {
+        format!("https://{}", host.trim_end_matches('/'))
+    };
+    let info = reqwest::Client::new()
+        .get(format!("{site}/_edge/tenant_info"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<TenantInfo>()
+        .await?;
+    if info.cloud_id.trim().is_empty() {
+        return Err("Atlassian returned an empty Cloud ID".into());
+    }
+    Ok(info.cloud_id)
+}
+
+async fn create_data_center_pat(
+    host: &str,
+    username: Option<&str>,
+    bootstrap_secret: &str,
+    profile_name: &str,
+    expiration_days: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let site = if host.starts_with("http://") || host.starts_with("https://") {
+        host.trim_end_matches('/').to_owned()
+    } else {
+        format!("https://{}", host.trim_end_matches('/'))
+    };
+    let request = reqwest::Client::new()
+        .post(format!("{site}/rest/pat/latest/tokens"))
+        .json(&serde_json::json!({
+            "name": format!("jira-cli / {profile_name}"),
+            "expirationDuration": expiration_days,
+        }));
+    let request = match username {
+        Some(username) => request.basic_auth(username, Some(bootstrap_secret)),
+        None => request.bearer_auth(bootstrap_secret),
+    };
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("PAT creation failed with HTTP {status}").into());
+    }
+    let body: serde_json::Value = response.json().await?;
+    ["rawToken", "token"]
+        .into_iter()
+        .find_map(|field| body.get(field).and_then(serde_json::Value::as_str))
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "PAT creation response did not contain the one-time token".into())
+}
+
 // ── Color / symbol helpers ──────────────────────────────────────────────────
 
 fn sym_q() -> String {
@@ -742,6 +1243,10 @@ struct ProfileWrite<'a> {
     host: &'a str,
     email: Option<&'a str>,
     token: &'a str,
+    credential_store: &'a str,
+    cloud_id: Option<&'a str>,
+    token_kind: &'a str,
+    expires_at: Option<&'a str>,
     auth_type: &'a str,
     api_version: u8,
     read_only: bool,
@@ -775,9 +1280,33 @@ fn write_profile_to_config(
         section.insert("email".to_owned(), toml::Value::String(e.to_owned()));
     }
     section.insert(
-        "token".to_owned(),
-        toml::Value::String(profile.token.to_owned()),
+        "credential_store".to_owned(),
+        toml::Value::String(profile.credential_store.to_owned()),
     );
+    if profile.credential_store == "file" {
+        section.insert(
+            "token".to_owned(),
+            toml::Value::String(profile.token.to_owned()),
+        );
+    }
+    if let Some(cloud_id) = profile.cloud_id {
+        section.insert(
+            "cloud_id".to_owned(),
+            toml::Value::String(cloud_id.to_owned()),
+        );
+    }
+    if profile.token_kind != "classic" {
+        section.insert(
+            "token_kind".to_owned(),
+            toml::Value::String(profile.token_kind.to_owned()),
+        );
+    }
+    if let Some(expires_at) = profile.expires_at {
+        section.insert(
+            "expires_at".to_owned(),
+            toml::Value::String(expires_at.to_owned()),
+        );
+    }
     if profile.auth_type != "basic" {
         section.insert(
             "auth_type".to_owned(),
@@ -837,6 +1366,86 @@ fn write_profile_to_config(
 /// The "default" profile is removed by deleting the `[default]` section. Named profiles
 /// are removed from the `[profiles]` table. Prints a success or error message; does not
 /// write to stdout so it is safe in JSON mode.
+fn requested_profile_name(profile: Option<&str>) -> String {
+    normalize_str(profile)
+        .map(str::to_owned)
+        .or_else(|| env_var("JIRA_PROFILE"))
+        .unwrap_or_else(|| "default".into())
+}
+
+fn profile_table_mut<'a>(
+    root: &'a mut toml::Table,
+    profile_name: &str,
+) -> Result<&'a mut toml::Table, ApiError> {
+    if profile_name == "default" {
+        if root.contains_key("default") {
+            return root
+                .get_mut("default")
+                .and_then(toml::Value::as_table_mut)
+                .ok_or_else(|| ApiError::Other("`default` is not a TOML table".into()));
+        }
+        return Ok(root);
+    }
+    root.get_mut("profiles")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|profiles| profiles.get_mut(profile_name))
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| ApiError::NotFound(format!("profile `{profile_name}` in config")))
+}
+
+fn write_toml_atomically(path: &std::path::Path, doc: &toml::Value) -> Result<(), ApiError> {
+    let body = toml::to_string_pretty(doc)
+        .map_err(|error| ApiError::Other(format!("Failed to serialize config: {error}")))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| ApiError::Other("config path has no parent".into()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| ApiError::Other(format!("Failed to create config directory: {error}")))?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(parent)
+        .map_err(|error| ApiError::Other(format!("Failed to create temporary config: {error}")))?;
+    use std::io::Write;
+    temp.write_all(body.as_bytes())
+        .and_then(|()| temp.flush())
+        .map_err(|error| ApiError::Other(format!("Failed to write temporary config: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| ApiError::Other(format!("Failed to protect config: {error}")))?;
+    }
+    temp.persist(path)
+        .map_err(|error| ApiError::Other(format!("Failed to replace config: {}", error.error)))?;
+    Ok(())
+}
+
+fn rewrite_profile_credential(
+    profile_name: &str,
+    credential_store: Option<&str>,
+) -> Result<(), ApiError> {
+    let path = config_path();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| ApiError::Other(format!("Failed to read config: {error}")))?;
+    let mut doc: toml::Value = toml::from_str(&content)
+        .map_err(|error| ApiError::Other(format!("Failed to parse config: {error}")))?;
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| ApiError::Other("config is not a TOML table".into()))?;
+    let profile = profile_table_mut(root, profile_name)?;
+    profile.remove("token");
+    match credential_store {
+        Some(store) => {
+            profile.insert("credential_store".into(), toml::Value::String(store.into()));
+        }
+        None => {
+            profile.remove("credential_store");
+        }
+    }
+    write_toml_atomically(&path, &doc)
+}
+
 pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiError> {
     let path = config_path();
 
@@ -871,10 +1480,8 @@ pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiE
         )));
     }
 
-    let serialized = toml::to_string_pretty(&doc)
-        .map_err(|e| ApiError::Other(format!("Failed to serialize config: {e}")))?;
-    std::fs::write(&path, serialized)
-        .map_err(|e| ApiError::Other(format!("Failed to write config: {e}")))?;
+    write_toml_atomically(&path, &doc)?;
+    let _ = crate::credentials::delete(profile_name);
 
     out.print_result(
         &serde_json::json!({ "profile": profile_name, "removed": true }),
@@ -1614,6 +2221,10 @@ token = "supersecrettoken"
                 host: "acme.atlassian.net",
                 email: Some("me@acme.com"),
                 token: "secret",
+                credential_store: "file",
+                cloud_id: None,
+                token_kind: "classic",
+                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
@@ -1641,6 +2252,10 @@ token = "supersecrettoken"
                 host: "jira.corp.com",
                 email: None,
                 token: "pattoken",
+                credential_store: "file",
+                cloud_id: None,
+                token_kind: "classic",
+                expires_at: None,
                 auth_type: "pat",
                 api_version: 2,
                 read_only: true,
@@ -1671,6 +2286,10 @@ token = "supersecrettoken"
                 host: "h.atlassian.net",
                 email: None,
                 token: "tok",
+                credential_store: "file",
+                cloud_id: None,
+                token_kind: "classic",
+                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
@@ -1698,6 +2317,10 @@ token = "supersecrettoken"
                 host: "h.atlassian.net",
                 email: None,
                 token: "tok",
+                credential_store: "file",
+                cloud_id: None,
+                token_kind: "classic",
+                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
@@ -1728,6 +2351,10 @@ token = "supersecrettoken"
                 host: "work.atlassian.net",
                 email: Some("w@work.com"),
                 token: "tok2",
+                credential_store: "file",
+                cloud_id: None,
+                token_kind: "classic",
+                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,

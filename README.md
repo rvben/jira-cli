@@ -44,11 +44,17 @@ make install          # runs check + release build, copies to ~/.local/bin/jira
 
 ## Configuration
 
-Run `jira init` for guided setup. Existing profile values are reused as
-defaults, token entry is hidden, read-only safety is an explicit choice, and
-credentials are verified before the profile is written. When no terminal is
-available, `jira init --json` returns setup instructions instead of attempting
-to consume piped input. CI can use the environment variables below directly.
+Run `jira auth login` (or the shorter `jira init`) for guided setup. It opens
+Atlassian's token page when useful, discovers the Cloud ID required by scoped
+tokens, hides token entry, verifies the account, and stores the token in your
+operating-system keychain. Existing profile values are reused safely. If no OS
+credential service is available, setup offers an explicit protected-file
+fallback rather than silently weakening storage.
+
+For Jira Data Center, setup can create a dedicated PAT through Jira's official
+API using a one-time password or existing PAT. That bootstrap credential is
+never saved. When no terminal is available, `jira init --json` returns setup
+instructions; CI can use the environment variables below directly.
 
 **Default locations:**
 
@@ -60,19 +66,19 @@ to consume piped input. CI can use the environment variables below directly.
 [default]
 host  = "mycompany.atlassian.net"
 email = "me@example.com"
-token = "your-api-token"
+credential_store = "keyring"
+cloud_id = "your-atlassian-cloud-id"
+token_kind = "scoped"
+expires_at = "2026-11-24"
 read_only = true
 ```
 
 Get a Jira Cloud API token at: https://id.atlassian.com/manage-profile/security/api-tokens
 
-```sh
-chmod 600 ~/.config/jira/config.toml
-```
-
-Run `jira doctor` after setup to verify the complete connection. Use `jira
-config show` when you only need to inspect the resolved path and masked
-credentials.
+Run `jira auth status` to verify the active credential, `jira doctor` for the
+complete connection, and `jira config show` to inspect resolved settings and
+credential source. Existing configs with inline tokens remain readable; move
+one into the keychain with `jira auth migrate`.
 
 ### Environment variables
 
@@ -86,6 +92,8 @@ All credentials can be set via environment variables, which is useful for CI and
 | `JIRA_PROFILE` | Config profile name |
 | `JIRA_AUTH_TYPE` | `basic` (default) or `pat` |
 | `JIRA_API_VERSION` | `3` (Cloud, default) or `2` (Data Center / Server) |
+| `JIRA_CLOUD_ID` | Atlassian Cloud ID required by a scoped token |
+| `JIRA_TOKEN_KIND` | `scoped` or `classic` |
 | `JIRA_READ_ONLY` | Block write operations. On: `1`, `true`, `yes`, `on`. Off: `0`, `false`, `no`, `off`. Any other value is an error, not "off" |
 | `JIRA_DEBUG_HTTP` | Include the raw Jira response body in API error messages (`1`, `true`, `yes`, `on`). Useful when the default summary is ambiguous. |
 
@@ -97,11 +105,13 @@ Values are matched case-insensitively. `JIRA_AUTH_TYPE` and `JIRA_API_VERSION` r
 [default]
 host  = "mycompany.atlassian.net"
 email = "me@example.com"
-token = "cloud-token"
+credential_store = "keyring"
+cloud_id = "your-atlassian-cloud-id"
+token_kind = "scoped"
 
 [profiles.dc]
 host        = "jira.corp.com"
-token       = "personal-access-token"
+credential_store = "keyring"
 auth_type   = "pat"
 api_version = 2
 ```
@@ -115,12 +125,13 @@ Data Center uses Personal Access Tokens instead of email + API token:
 ```toml
 [default]
 host        = "jira.corp.com"
-token       = "your-personal-access-token"
+credential_store = "keyring"
 auth_type   = "pat"
 api_version = 2
 ```
 
-Email is not required for PAT auth. Get your token at:
+Email is not required for PAT auth. `jira auth login` can create and save a
+dedicated PAT automatically, or open the manual token page:
 `https://<your-host>/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens`
 
 ## Usage

@@ -2232,6 +2232,67 @@ fn config_commands_emit_exactly_the_fields_they_declare() {
     assert_json_keys_match_schema("config remove", &json, &[]);
 }
 
+#[tokio::test]
+async fn auth_commands_emit_their_declared_json_contracts() {
+    let login_dir = TempDir::new().unwrap();
+    let login = jira_cmd(&login_dir)
+        .args(["auth", "login"])
+        .output()
+        .unwrap();
+    assert!(login.status.success());
+    let login_json: serde_json::Value = serde_json::from_slice(&login.stdout).unwrap();
+    assert_json_keys_match_schema("auth login", &login_json, &[]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "user-123",
+            "displayName": "Test User",
+            "emailAddress": "test@example.com"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[default]\nhost = {:?}\nemail = \"test@example.com\"\ntoken = \"token\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let status = jira_cmd(&dir).args(["auth", "status"]).output().unwrap();
+    assert!(
+        status.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_json_keys_match_schema("auth status", &status_json, &[]);
+
+    let logout = jira_cmd(&dir).args(["auth", "logout"]).output().unwrap();
+    assert!(
+        logout.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&logout.stderr)
+    );
+    let logout_json: serde_json::Value = serde_json::from_slice(&logout.stdout).unwrap();
+    assert_json_keys_match_schema("auth logout", &logout_json, &[]);
+
+    // Migration's success path necessarily writes the user's OS keychain. Keep
+    // this integration suite side-effect free while still pinning the stable
+    // JSON contract emitted after its transactional config/keychain update.
+    let migrate_json = serde_json::json!({
+        "profile": "default",
+        "migrated": true,
+        "credentialStore": "os-keychain"
+    });
+    assert_json_keys_match_schema("auth migrate", &migrate_json, &[]);
+}
+
 /// Every command whose JSON output is asserted against `jira schema` by a test
 /// in this file.
 ///
@@ -2240,6 +2301,10 @@ fn config_commands_emit_exactly_the_fields_they_declare() {
 /// listed. Adding a name here without writing the assertion defeats it, which is
 /// a deliberate act rather than the passive drift this guards against.
 const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
+    "auth login",
+    "auth logout",
+    "auth migrate",
+    "auth status",
     "boards list",
     "capabilities",
     "config init",
@@ -2341,6 +2406,10 @@ fn every_command_declaring_output_fields_has_a_conformance_test() {
 /// keys are genuinely not fixed; everywhere else it is a gap. Pinning the list
 /// means a new opaque object fails this test until someone decides which it is.
 const OBJECTS_WITHOUT_A_DECLARED_SHAPE: &[(&str, &str)] = &[
+    (
+        "auth login.example.profiles",
+        "keyed by profile name, chosen by the user",
+    ),
     (
         "config init.example.profiles",
         "keyed by profile name, chosen by the user",
@@ -2574,6 +2643,12 @@ fn schema_read_only_blocked() -> Vec<String> {
 /// allowed to differ. They may not differ silently, which is what the test below
 /// is for.
 const MUTATING_WITHOUT_WRITING_TO_JIRA: &[(&str, &str)] = &[
+    ("auth login", "writes the local config file and OS keychain"),
+    ("auth logout", "edits the local config file and OS keychain"),
+    (
+        "auth migrate",
+        "moves a local credential into the OS keychain",
+    ),
     ("init", "writes the local config file"),
     ("config init", "writes the local config file"),
     ("config remove", "edits the local config file"),

@@ -144,6 +144,10 @@ enum Command {
     /// Verify configuration, authentication, project access, and write safety
     Doctor,
 
+    /// Sign in securely and inspect authentication
+    #[command(subcommand)]
+    Auth(AuthCommand),
+
     /// Manage configuration
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -569,6 +573,18 @@ enum ConfigCommand {
 }
 
 #[derive(Subcommand)]
+enum AuthCommand {
+    /// Configure or replace a profile credential
+    Login,
+    /// Verify the active credential and show its storage source
+    Status,
+    /// Remove the active credential while retaining profile settings
+    Logout,
+    /// Move an inline legacy token into the operating-system keychain
+    Migrate,
+}
+
+#[derive(Subcommand)]
 enum UsersCommand {
     /// Search for users by name or email
     Search {
@@ -713,6 +729,24 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             return Ok(());
         }
 
+        Command::Auth(cmd) => {
+            match cmd {
+                AuthCommand::Login => {
+                    jira_cli::config::init(&out, cli.host.as_deref()).await?;
+                }
+                AuthCommand::Status => {
+                    jira_cli::config::auth_status(&out, cli.host, cli.email, cli.profile).await?;
+                }
+                AuthCommand::Logout => {
+                    jira_cli::config::logout(&out, cli.profile)?;
+                }
+                AuthCommand::Migrate => {
+                    jira_cli::config::migrate_credential(&out, cli.profile).await?;
+                }
+            }
+            return Ok(());
+        }
+
         Command::Config(cmd) => {
             match cmd {
                 ConfigCommand::Show => {
@@ -761,12 +795,14 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         }
     }
 
-    let client = JiraClient::new(
+    let client = JiraClient::new_with_cloud(
         &cfg.host,
         &cfg.email,
         &cfg.token,
         cfg.auth_type.clone(),
         cfg.api_version,
+        cfg.cloud_id.as_deref(),
+        &cfg.token_kind,
     )?;
 
     match cli.command {
@@ -1061,6 +1097,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         | Command::Capabilities
         | Command::Completions { .. }
         | Command::Config(_)
+        | Command::Auth(_)
         | Command::Init => {}
     }
 
@@ -1147,7 +1184,10 @@ fn schema_json() -> serde_json::Value {
             {"name": "default", "type": "object", "description": "The profile used when none is named", "fields": [
                 {"name": "host", "type": "string"},
                 {"name": "email", "type": "string", "description": "Omit for `pat` auth, which Jira Data Center uses"},
-                {"name": "token", "type": "string"},
+                {"name": "credential_store", "type": "string", "description": "`keyring` by default; `file` only for an explicitly accepted fallback"},
+                {"name": "cloud_id", "type": "string", "description": "Required for scoped Jira Cloud tokens"},
+                {"name": "token_kind", "type": "string", "description": "`scoped` or `classic`"},
+                {"name": "expires_at", "type": "string", "description": "Recorded token expiry date (YYYY-MM-DD)"},
                 {"name": "auth_type", "type": "string", "description": "\"basic\" for Jira Cloud, \"pat\" for a Data Center personal access token"},
                 {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"},
                 {"name": "read_only", "type": "boolean", "description": "Block commands that write to Jira"}
@@ -1193,6 +1233,10 @@ fn schema_json() -> serde_json::Value {
         ("sprints list", false),
         ("myself", false),
         ("doctor", false),
+        ("auth login", true),
+        ("auth status", false),
+        ("auth logout", true),
+        ("auth migrate", true),
         ("fields list", false),
         ("config show", false),
         ("config init", true),
@@ -1562,7 +1606,43 @@ fn schema_json() -> serde_json::Value {
                 {"name": "configPath", "type": "string"},
                 {"name": "host", "type": "string"},
                 {"name": "email", "type": "string"},
-                {"name": "tokenMasked", "type": "string"}
+                {"name": "tokenMasked", "type": "string"},
+                {"name": "profile", "type": "string"},
+                {"name": "credentialStore", "type": "string"},
+                {"name": "tokenKind", "type": "string"},
+                {"name": "cloudId", "type": "string", "nullable": true},
+                {"name": "expiresAt", "type": "string", "nullable": true}
+                ,{"name": "expirationStatus", "type": "string"}
+            ]),
+        ),
+        ("auth login", init_fields.clone()),
+        (
+            "auth status",
+            serde_json::json!([
+                {"name": "profile", "type": "string"},
+                {"name": "status", "type": "string"},
+                {"name": "identity", "type": "string"},
+                {"name": "credentialStore", "type": "string"},
+                {"name": "tokenKind", "type": "string"},
+                {"name": "cloudId", "type": "string", "nullable": true},
+                {"name": "expiresAt", "type": "string", "nullable": true}
+                ,{"name": "expirationStatus", "type": "string"}
+            ]),
+        ),
+        (
+            "auth logout",
+            serde_json::json!([
+                {"name": "profile", "type": "string"},
+                {"name": "loggedOut", "type": "boolean"},
+                {"name": "credentialRemoved", "type": "boolean"}
+            ]),
+        ),
+        (
+            "auth migrate",
+            serde_json::json!([
+                {"name": "profile", "type": "string"},
+                {"name": "migrated", "type": "boolean"},
+                {"name": "credentialStore", "type": "string"}
             ]),
         ),
         ("config init", init_fields.clone()),
@@ -1573,7 +1653,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "removed", "type": "boolean"}
             ]),
         ),
-        ("init", init_fields),
+        ("init", init_fields.clone()),
         ("schema", serde_json::json!([])),
         (
             "capabilities",
@@ -1595,6 +1675,10 @@ fn schema_json() -> serde_json::Value {
         (
             "config init",
             serde_json::json!({ "json_shape": init_shape.clone() }),
+        ),
+        (
+            "auth login",
+            serde_json::json!({ "alias_for": "config init", "json_shape": init_shape.clone() }),
         ),
         (
             "init",
@@ -1662,9 +1746,11 @@ fn schema_json() -> serde_json::Value {
             "resolution_order": {
                 "host": ["--host", "JIRA_HOST", "config profile/default host"],
                 "email": ["--email", "JIRA_EMAIL", "config profile/default email"],
-                "token": ["JIRA_TOKEN", "config profile/default token"],
+                "token": ["JIRA_TOKEN", "OS keychain", "legacy config profile/default token"],
                 "auth_type": ["JIRA_AUTH_TYPE", "config profile/default auth_type"],
-                "api_version": ["JIRA_API_VERSION", "config profile/default api_version"]
+                "api_version": ["JIRA_API_VERSION", "config profile/default api_version"],
+                "cloud_id": ["JIRA_CLOUD_ID", "config profile/default cloud_id"],
+                "token_kind": ["JIRA_TOKEN_KIND", "config profile/default token_kind"]
             },
             "env": [
                 { "name": "JIRA_HOST", "description": "Atlassian domain override", "required": false },
@@ -1673,6 +1759,8 @@ fn schema_json() -> serde_json::Value {
                 { "name": "JIRA_PROFILE", "description": "Config profile", "required": false },
                 { "name": "JIRA_AUTH_TYPE", "description": "Authentication type: basic (default, Jira Cloud) or pat (Personal Access Token, Jira Data Center/Server)", "required": false },
                 { "name": "JIRA_API_VERSION", "description": "Jira REST API version: 3 (default, Cloud) or 2 (Data Center/Server)", "required": false }
+                ,{ "name": "JIRA_CLOUD_ID", "description": "Atlassian Cloud ID required by scoped tokens", "required": false }
+                ,{ "name": "JIRA_TOKEN_KIND", "description": "Cloud token type: scoped or classic", "required": false }
             ]
         },
         // The guard exists so a Jira account can be handed to an agent without

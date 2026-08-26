@@ -27,9 +27,12 @@ owo-colors = "4"
 rpassword = "7"
 dirs = "6"
 base64 = "0.23"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 mime_guess = { version = "2", default-features = false }
 terminal_size = "0.4"
 tempfile = "3"
+keyring = "4.1"
+open = "5.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

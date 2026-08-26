@@ -56,6 +56,18 @@ impl JiraClient {
         auth_type: AuthType,
         api_version: u8,
     ) -> Result<Self, ApiError> {
+        Self::new_with_cloud(host, email, token, auth_type, api_version, None, "classic")
+    }
+
+    pub fn new_with_cloud(
+        host: &str,
+        email: &str,
+        token: &str,
+        auth_type: AuthType,
+        api_version: u8,
+        cloud_id: Option<&str>,
+        token_kind: &str,
+    ) -> Result<Self, ApiError> {
         // Determine the scheme. An explicit `http://` prefix is preserved as-is
         // (useful for local testing); everything else defaults to HTTPS.
         let (scheme, domain) = if host.starts_with("http://") {
@@ -95,8 +107,18 @@ impl JiraClient {
             .map_err(ApiError::Http)?;
 
         let site_url = format!("{scheme}://{domain}");
-        let base_url = format!("{site_url}/rest/api/{api_version}");
-        let agile_base_url = format!("{site_url}/rest/agile/1.0");
+        let api_origin = if token_kind == "scoped" {
+            let cloud_id = cloud_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::InvalidInput("scoped token requires a Jira Cloud ID".into())
+                })?;
+            format!("https://api.atlassian.com/ex/jira/{cloud_id}")
+        } else {
+            site_url.clone()
+        };
+        let base_url = format!("{api_origin}/rest/api/{api_version}");
+        let agile_base_url = format!("{api_origin}/rest/agile/1.0");
 
         Ok(Self {
             http,
@@ -1326,5 +1348,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.api_version(), 2);
+    }
+
+    #[test]
+    fn scoped_cloud_token_uses_gateway_but_keeps_site_links() {
+        let client = JiraClient::new_with_cloud(
+            "acme.atlassian.net",
+            "me@example.com",
+            "token",
+            AuthType::Basic,
+            3,
+            Some("cloud-123"),
+            "scoped",
+        )
+        .unwrap();
+
+        assert_eq!(
+            client.base_url,
+            "https://api.atlassian.com/ex/jira/cloud-123/rest/api/3"
+        );
+        assert_eq!(
+            client.agile_base_url,
+            "https://api.atlassian.com/ex/jira/cloud-123/rest/agile/1.0"
+        );
+        assert_eq!(
+            client.browse_url("PROJ-1"),
+            "https://acme.atlassian.net/browse/PROJ-1"
+        );
+    }
+
+    #[test]
+    fn scoped_cloud_token_requires_cloud_id() {
+        let error = JiraClient::new_with_cloud(
+            "acme.atlassian.net",
+            "me@example.com",
+            "token",
+            AuthType::Basic,
+            3,
+            None,
+            "scoped",
+        )
+        .err()
+        .expect("scoped credentials without a Cloud ID must fail");
+        assert!(error.to_string().contains("Cloud ID"));
     }
 }
