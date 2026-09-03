@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.9](https://github.com/rvben/jira-cli/compare/v0.4.8...v0.4.9) - 2026-09-03
+
+### Added
+
+- **auth**: standardize authentication workflow ([ec87400](https://github.com/rvben/jira-cli/commit/ec874008243f996ed83d44dd0ae23825d8064b5b))
+
 ## [0.4.8](https://github.com/rvben/jira-cli/compare/v0.4.7...v0.4.8) - 2026-08-26
 
 ### Added
