@@ -142,7 +142,11 @@ enum Command {
     Myself,
 
     /// Verify configuration, authentication, project access, and write safety
-    Doctor,
+    Doctor {
+        /// Check local configuration without contacting Jira
+        #[arg(long)]
+        offline: bool,
+    },
 
     /// Sign in securely and inspect authentication
     #[command(subcommand)]
@@ -151,6 +155,10 @@ enum Command {
     /// Manage configuration
     #[command(subcommand)]
     Config(ConfigCommand),
+
+    /// List, select, or remove configuration profiles
+    #[command(subcommand, visible_alias = "profiles")]
+    Profile(ProfileCommand),
 
     /// Bootstrap config and API token setup (alias for `config init`)
     Init,
@@ -563,6 +571,8 @@ enum ProjectsCommand {
 enum ConfigCommand {
     /// Show current config (token masked)
     Show,
+    /// Print the absolute configuration file path
+    Path,
     /// Print example config file and token instructions
     Init,
     /// Remove a profile from the config file
@@ -577,11 +587,30 @@ enum AuthCommand {
     /// Configure or replace a profile credential
     Login,
     /// Verify the active credential and show its storage source
-    Status,
+    Status {
+        /// Inspect local credential state without contacting Jira
+        #[arg(long)]
+        offline: bool,
+    },
     /// Remove the active credential while retaining profile settings
     Logout,
     /// Move an inline legacy token into the operating-system keychain
     Migrate,
+}
+
+#[derive(Subcommand)]
+enum ProfileCommand {
+    /// List configured profiles and identify the active one
+    List,
+    /// Select the default profile for future commands
+    Use { name: String },
+    /// Remove a profile and its stored credential
+    Remove {
+        name: String,
+        /// Confirm removal without prompting
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -725,17 +754,19 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         }
 
         Command::Init => {
-            jira_cli::config::init(&out, cli.host.as_deref()).await?;
+            jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref()).await?;
             return Ok(());
         }
 
         Command::Auth(cmd) => {
             match cmd {
                 AuthCommand::Login => {
-                    jira_cli::config::init(&out, cli.host.as_deref()).await?;
+                    jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref())
+                        .await?;
                 }
-                AuthCommand::Status => {
-                    jira_cli::config::auth_status(&out, cli.host, cli.email, cli.profile).await?;
+                AuthCommand::Status { offline } => {
+                    jira_cli::config::auth_status(&out, cli.host, cli.email, cli.profile, offline)
+                        .await?;
                 }
                 AuthCommand::Logout => {
                     jira_cli::config::logout(&out, cli.profile)?;
@@ -752,11 +783,32 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 ConfigCommand::Show => {
                     jira_cli::config::show(&out, cli.host, cli.email, cli.profile)?;
                 }
+                ConfigCommand::Path => {
+                    jira_cli::config::print_config_path(&out)?;
+                }
                 ConfigCommand::Init => {
-                    jira_cli::config::init(&out, cli.host.as_deref()).await?;
+                    jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref())
+                        .await?;
                 }
                 ConfigCommand::Remove { profile } => {
                     jira_cli::config::remove_profile(&out, &profile)?;
+                }
+            }
+            return Ok(());
+        }
+
+        Command::Profile(cmd) => {
+            match cmd {
+                ProfileCommand::List => jira_cli::config::list_profiles(&out)?,
+                ProfileCommand::Use { name } => jira_cli::config::use_profile(&out, &name)?,
+                ProfileCommand::Remove { name, yes } => {
+                    if !yes {
+                        return Err(ApiError::InvalidInput(
+                            "profile removal requires --yes".into(),
+                        )
+                        .into());
+                    }
+                    jira_cli::config::remove_profile(&out, &name)?
                 }
             }
             return Ok(());
@@ -1086,7 +1138,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
 
         Command::Myself => commands::myself::show(&client, &out).await?,
 
-        Command::Doctor => commands::doctor::run(&client, &cfg, &out).await?,
+        Command::Doctor { offline } => commands::doctor::run(&client, &cfg, &out, offline).await?,
 
         Command::Fields(cmd) => match cmd {
             FieldsCommand::List { custom } => commands::fields::list(&client, &out, custom).await?,
@@ -1097,6 +1149,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         | Command::Capabilities
         | Command::Completions { .. }
         | Command::Config(_)
+        | Command::Profile(_)
         | Command::Auth(_)
         | Command::Init => {}
     }
@@ -1239,8 +1292,12 @@ fn schema_json() -> serde_json::Value {
         ("auth migrate", true),
         ("fields list", false),
         ("config show", false),
+        ("config path", false),
         ("config init", true),
         ("config remove", true),
+        ("profile list", false),
+        ("profile use", true),
+        ("profile remove", true),
         ("init", true),
         ("schema", false),
         ("capabilities", false),
@@ -1621,7 +1678,8 @@ fn schema_json() -> serde_json::Value {
             serde_json::json!([
                 {"name": "profile", "type": "string"},
                 {"name": "status", "type": "string"},
-                {"name": "identity", "type": "string"},
+                {"name": "verified", "type": "boolean"},
+                {"name": "identity", "type": "string", "optional": true},
                 {"name": "credentialStore", "type": "string"},
                 {"name": "tokenKind", "type": "string"},
                 {"name": "cloudId", "type": "string", "nullable": true},
@@ -1645,9 +1703,40 @@ fn schema_json() -> serde_json::Value {
                 {"name": "credentialStore", "type": "string"}
             ]),
         ),
+        (
+            "config path",
+            serde_json::json!([
+                {"name": "configPath", "type": "string"}
+            ]),
+        ),
         ("config init", init_fields.clone()),
         (
             "config remove",
+            serde_json::json!([
+                {"name": "profile", "type": "string"},
+                {"name": "removed", "type": "boolean"}
+            ]),
+        ),
+        (
+            "profile list",
+            serde_json::json!([
+                {"name": "items", "type": "object[]", "fields": [
+                    {"name": "name", "type": "string"},
+                    {"name": "host", "type": "string", "nullable": true},
+                    {"name": "active", "type": "boolean"}
+                ]},
+                {"name": "total", "type": "integer"}
+            ]),
+        ),
+        (
+            "profile use",
+            serde_json::json!([
+                {"name": "profile", "type": "string"},
+                {"name": "active", "type": "boolean"}
+            ]),
+        ),
+        (
+            "profile remove",
             serde_json::json!([
                 {"name": "profile", "type": "string"},
                 {"name": "removed", "type": "boolean"}

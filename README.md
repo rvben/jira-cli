@@ -75,10 +75,12 @@ read_only = true
 
 Get a Jira Cloud API token at: https://id.atlassian.com/manage-profile/security/api-tokens
 
-Run `jira auth status` to verify the active credential, `jira doctor` for the
-complete connection, and `jira config show` to inspect resolved settings and
-credential source. Existing configs with inline tokens remain readable; move
-one into the keychain with `jira auth migrate`.
+Run `jira auth status` to verify the active credential, `jira auth status
+--offline` to inspect local credential state without a request, and `jira
+doctor` for the complete connection. `jira config show` displays resolved
+settings and the credential source; `jira config path` prints the backing file.
+Existing configs with inline tokens remain readable; move one into the keychain
+with `jira auth migrate`.
 
 ### Environment variables
 
@@ -252,7 +254,14 @@ jira completions zsh > ~/.zsh/completions/_jira
 ```sh
 jira init                    # guided setup that verifies credentials before saving
 jira doctor                  # verify config, auth, projects, and write safety
+jira doctor --offline        # inspect configuration without contacting Jira
+jira auth status             # verify the selected credential
+jira auth status --offline   # inspect local credential state only
+jira profile list            # list profiles and show the active one
+jira profile use work        # make work the active profile
+jira profile remove old --yes
 jira config show             # resolved credentials (token masked)
+jira config path             # resolved config file location
 jira config init             # same as jira init
 ```
 

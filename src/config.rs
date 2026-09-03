@@ -24,6 +24,8 @@ pub struct ProfileConfig {
 #[derive(Debug, Deserialize, Default)]
 struct RawConfig {
     #[serde(default)]
+    active_profile: Option<String>,
+    #[serde(default)]
     default: ProfileConfig,
     #[serde(default)]
     profiles: BTreeMap<String, ProfileConfig>,
@@ -228,7 +230,7 @@ fn format_available(names: &[&str]) -> String {
     }
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     config_dir()
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("jira")
@@ -322,7 +324,8 @@ fn load_file_profile(profile: Option<&str>) -> Result<(String, ProfileConfig), A
 
     let profile_name = normalize_str(profile)
         .map(str::to_owned)
-        .or_else(|| env_var("JIRA_PROFILE"));
+        .or_else(|| env_var("JIRA_PROFILE"))
+        .or_else(|| raw.active_profile.clone());
 
     match profile_name {
         Some(name) if name == "default" => Ok((name, raw.default_profile())),
@@ -394,8 +397,31 @@ pub async fn auth_status(
     host_arg: Option<String>,
     email_arg: Option<String>,
     profile_arg: Option<String>,
+    offline: bool,
 ) -> Result<(), ApiError> {
     let cfg = Config::load(host_arg, email_arg, profile_arg)?;
+    if offline {
+        out.print_result(
+            &serde_json::json!({
+                "profile": cfg.profile,
+                "status": "configured",
+                "verified": false,
+                "credentialStore": cfg.credential_store,
+                "tokenKind": cfg.token_kind,
+                "cloudId": cfg.cloud_id,
+                "expiresAt": cfg.expires_at,
+                "expirationStatus": expiration_status(cfg.expires_at.as_deref()),
+            }),
+            &format!(
+                "{} Profile '{}' is configured ({}, {}; network not checked)",
+                sym_ok(),
+                cfg.profile,
+                cfg.credential_store,
+                cfg.token_kind
+            ),
+        );
+        return Ok(());
+    }
     let client = crate::api::client::JiraClient::new_with_cloud(
         &cfg.host,
         &cfg.email,
@@ -410,6 +436,7 @@ pub async fn auth_status(
         &serde_json::json!({
             "profile": cfg.profile,
             "status": "ok",
+            "verified": true,
             "identity": myself.display_name,
             "credentialStore": cfg.credential_store,
             "tokenKind": cfg.token_kind,
@@ -522,7 +549,11 @@ pub fn logout(out: &OutputConfig, profile_arg: Option<String>) -> Result<(), Api
 /// In an interactive terminal it prompts for Jira type, host, credentials, and profile
 /// name, verifies the credentials against the API, then writes (or updates)
 /// `~/.config/jira/config.toml`.
-pub async fn init(out: &OutputConfig, host: Option<&str>) -> Result<(), ApiError> {
+pub async fn init(
+    out: &OutputConfig,
+    host: Option<&str>,
+    profile: Option<&str>,
+) -> Result<(), ApiError> {
     if out.json {
         init_json(out, host);
         return Ok(());
@@ -536,7 +567,7 @@ pub async fn init(out: &OutputConfig, host: Option<&str>) -> Result<(), ApiError
         ));
     }
 
-    init_interactive(host)
+    init_interactive(host, profile)
         .await
         .map_err(|error| ApiError::Other(error.to_string()))
 }
@@ -602,7 +633,10 @@ fn init_json(out: &OutputConfig, host: Option<&str>) {
     );
 }
 
-async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+async fn init_interactive(
+    prefill_host: Option<&str>,
+    requested_profile: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let sep = sym_dim("──────────────");
     eprintln!("Jira CLI Setup");
     eprintln!("{sep}");
@@ -614,56 +648,69 @@ async fn init_interactive(prefill_host: Option<&str>) -> Result<(), Box<dyn std:
     // `target_name` holds the profile name to write:
     //   Some(name) - already known (first run → "default"; update → chosen name)
     //   None       - "add new" path, ask for name after credentials
-    let (target_name, existing): (Option<String>, Option<ProfileConfig>) = if path.exists() {
-        let profiles = list_profile_names(&path)?;
-
-        // Show the config path and each profile with its host so the user knows
-        // what exists before deciding whether to update or add.
-        eprintln!();
-        eprintln!(
-            "  {} {}",
-            sym_dim("Config:"),
-            sym_dim(&path.display().to_string())
-        );
-        eprintln!();
-        eprintln!("  {}:", sym_dim("Profiles"));
-        for name in &profiles {
-            let host = read_raw_profile(&path, name)
-                .ok()
-                .and_then(|p| p.host)
-                .unwrap_or_default();
-            eprintln!("    {} {}  {}", sym_dim("•"), name, sym_dim(&host));
-        }
-        eprintln!();
-
-        let action = prompt("Action", "[update/add]", Some("update"))?;
-        eprintln!();
-
-        if !action.trim().eq_ignore_ascii_case("add") {
-            let default = profiles.first().map(String::as_str).unwrap_or("default");
-            let raw = if profiles.len() > 1 {
-                prompt("Profile", "", Some(default))?
+    let (target_name, existing): (Option<String>, Option<ProfileConfig>) =
+        if let Some(name) = requested_profile {
+            let existing = if path.exists() {
+                let profiles = list_profile_names(&path)?;
+                profiles
+                    .iter()
+                    .any(|candidate| candidate == name)
+                    .then(|| read_raw_profile(&path, name))
+                    .transpose()?
             } else {
-                default.to_owned()
+                None
             };
-            let name = if raw.trim().is_empty() {
-                default.to_owned()
-            } else {
-                raw.trim().to_owned()
-            };
-            let cfg = read_raw_profile(&path, &name)?;
-            if profiles.len() > 1 {
-                eprintln!();
+            (Some(name.to_owned()), existing)
+        } else if path.exists() {
+            let profiles = list_profile_names(&path)?;
+
+            // Show the config path and each profile with its host so the user knows
+            // what exists before deciding whether to update or add.
+            eprintln!();
+            eprintln!(
+                "  {} {}",
+                sym_dim("Config:"),
+                sym_dim(&path.display().to_string())
+            );
+            eprintln!();
+            eprintln!("  {}:", sym_dim("Profiles"));
+            for name in &profiles {
+                let host = read_raw_profile(&path, name)
+                    .ok()
+                    .and_then(|p| p.host)
+                    .unwrap_or_default();
+                eprintln!("    {} {}  {}", sym_dim("•"), name, sym_dim(&host));
             }
-            (Some(name), Some(cfg))
+            eprintln!();
+
+            let action = prompt("Action", "[update/add]", Some("update"))?;
+            eprintln!();
+
+            if !action.trim().eq_ignore_ascii_case("add") {
+                let default = profiles.first().map(String::as_str).unwrap_or("default");
+                let raw = if profiles.len() > 1 {
+                    prompt("Profile", "", Some(default))?
+                } else {
+                    default.to_owned()
+                };
+                let name = if raw.trim().is_empty() {
+                    default.to_owned()
+                } else {
+                    raw.trim().to_owned()
+                };
+                let cfg = read_raw_profile(&path, &name)?;
+                if profiles.len() > 1 {
+                    eprintln!();
+                }
+                (Some(name), Some(cfg))
+            } else {
+                (None, None)
+            }
         } else {
-            (None, None)
-        }
-    } else {
-        // First run: silently use "default", no need to ask.
-        eprintln!();
-        (Some("default".to_owned()), None)
-    };
+            // First run: silently use "default", no need to ask.
+            eprintln!();
+            (Some("default".to_owned()), None)
+        };
 
     // Instance type - derive from existing config, or ask.
     let is_cloud = if let Some(ref p) = existing {
@@ -1270,6 +1317,10 @@ fn write_profile_to_config(
     };
 
     let root = doc.as_table_mut().expect("config is a TOML table");
+    root.insert(
+        "active_profile".to_owned(),
+        toml::Value::String(profile_name.to_owned()),
+    );
 
     let mut section = toml::map::Map::new();
     section.insert(
@@ -1480,12 +1531,104 @@ pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiE
         )));
     }
 
+    if root.get("active_profile").and_then(toml::Value::as_str) == Some(profile_name) {
+        let next = removable_profiles(root).first().copied().map(str::to_owned);
+        match next {
+            Some(name) => {
+                root.insert("active_profile".into(), toml::Value::String(name));
+            }
+            None => {
+                root.remove("active_profile");
+            }
+        }
+    }
+
     write_toml_atomically(&path, &doc)?;
     let _ = crate::credentials::delete(profile_name);
 
     out.print_result(
         &serde_json::json!({ "profile": profile_name, "removed": true }),
         &format!("{} Removed profile '{profile_name}'", sym_ok()),
+    );
+    Ok(())
+}
+
+pub fn print_config_path(out: &OutputConfig) -> Result<(), ApiError> {
+    let path = config_path();
+    out.print_result(
+        &serde_json::json!({ "configPath": path }),
+        &path.display().to_string(),
+    );
+    Ok(())
+}
+
+pub fn list_profiles(out: &OutputConfig) -> Result<(), ApiError> {
+    let path = config_path();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| ApiError::Other(format!("Failed to read config: {error}")))?;
+    let raw: RawConfig = toml::from_str(&content)
+        .map_err(|error| ApiError::Other(format!("Failed to parse config: {error}")))?;
+    let active = raw.active_profile.as_deref().unwrap_or("default");
+    let mut items = Vec::new();
+    if raw.default.host.is_some() || raw.host.is_some() {
+        let profile = raw.default_profile();
+        items.push(serde_json::json!({
+            "name": "default", "host": profile.host, "active": active == "default"
+        }));
+    }
+    items.extend(raw.profiles.iter().map(|(name, profile)| {
+        serde_json::json!({
+            "name": name, "host": profile.host, "active": active == name
+        })
+    }));
+    if out.json {
+        out.print_data(
+            &serde_json::to_string_pretty(
+                &serde_json::json!({"items": items, "total": items.len()}),
+            )
+            .expect("failed to serialize profiles"),
+        );
+    } else if items.is_empty() {
+        out.print_data("No profiles configured. Run `jira init`.");
+    } else {
+        for item in items {
+            let marker = if item["active"].as_bool().unwrap_or(false) {
+                "*"
+            } else {
+                " "
+            };
+            out.print_data(&format!(
+                "{marker} {:<20} {}",
+                item["name"].as_str().unwrap_or_default(),
+                item["host"].as_str().unwrap_or("-")
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn use_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiError> {
+    let path = config_path();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| ApiError::Other(format!("Failed to read config: {error}")))?;
+    let mut doc: toml::Value = toml::from_str(&content)
+        .map_err(|error| ApiError::Other(format!("Failed to parse config: {error}")))?;
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| ApiError::Other("config is not a TOML table".into()))?;
+    if !removable_profiles(root).contains(&profile_name) {
+        return Err(ApiError::NotFound(format!(
+            "profile '{profile_name}' in config"
+        )));
+    }
+    root.insert(
+        "active_profile".into(),
+        toml::Value::String(profile_name.into()),
+    );
+    write_toml_atomically(&path, &doc)?;
+    out.print_result(
+        &serde_json::json!({"profile": profile_name, "active": true}),
+        &format!("{} Active profile set to '{profile_name}'", sym_ok()),
     );
     Ok(())
 }
@@ -2105,6 +2248,39 @@ token = "staging-tok"
     }
 
     #[test]
+    fn load_uses_active_profile_when_no_override_is_set() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_config(
+            dir.path(),
+            r#"
+active_profile = "work"
+
+[default]
+host = "default.atlassian.net"
+email = "default@example.com"
+token = "default-tok"
+
+[profiles.work]
+host = "work.atlassian.net"
+email = "me@work.com"
+token = "work-tok"
+"#,
+        )
+        .unwrap();
+
+        let _config_dir = set_config_dir_env(dir.path());
+        let _host = EnvVarGuard::unset("JIRA_HOST");
+        let _email = EnvVarGuard::unset("JIRA_EMAIL");
+        let _token = EnvVarGuard::unset("JIRA_TOKEN");
+        let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+        let cfg = Config::load(None, None, None).unwrap();
+        assert_eq!(cfg.profile, "work");
+        assert_eq!(cfg.host, "work.atlassian.net");
+    }
+
+    #[test]
     fn load_unknown_profile_returns_descriptive_error() {
         let _env = ProcessEnvLock::acquire().unwrap();
         let dir = TempDir::new().unwrap();
@@ -2200,7 +2376,7 @@ token = "supersecrettoken"
     async fn init_json_output_includes_example_and_paths() {
         let out = crate::output::OutputConfig::new(true, false, true);
         // No env or config needed - init() never loads credentials in JSON mode
-        init(&out, Some("jira.corp.com")).await.unwrap();
+        init(&out, Some("jira.corp.com"), None).await.unwrap();
     }
 
     // The text path of init() requires an interactive TTY; in test context stdin is
@@ -2212,7 +2388,7 @@ token = "supersecrettoken"
             quiet: false,
         };
         // stdin is not a TTY in tests - must return immediately, not hang
-        let error = init(&out, None).await.unwrap_err();
+        let error = init(&out, None, None).await.unwrap_err();
         assert!(matches!(error, ApiError::InvalidInput(_)));
         assert!(error.to_string().contains("JIRA_TOKEN"));
     }

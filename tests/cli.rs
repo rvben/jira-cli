@@ -2206,7 +2206,7 @@ async fn read_only_listings_emit_exactly_the_fields_they_declare() {
     }
 }
 
-/// The two config commands that emit data, asserted against the same contract
+/// Configuration and profile commands, asserted against the same contract
 /// as everything else. Neither reaches the network.
 #[test]
 fn config_commands_emit_exactly_the_fields_they_declare() {
@@ -2214,7 +2214,8 @@ fn config_commands_emit_exactly_the_fields_they_declare() {
     write_config(
         dir.path(),
         "[default]\nhost = \"work.atlassian.net\"\nemail = \"me@example.com\"\ntoken = \"tok\"\n\n\
-         [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n",
+         [profiles.work]\nhost = \"work.atlassian.net\"\ntoken = \"tok2\"\n\n\
+         [profiles.legacy]\nhost = \"legacy.atlassian.net\"\ntoken = \"tok3\"\n",
     )
     .unwrap();
 
@@ -2223,8 +2224,34 @@ fn config_commands_emit_exactly_the_fields_they_declare() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_json_keys_match_schema("config show", &json, &[]);
 
+    let output = jira_cmd(&dir).args(["config", "path"]).output().unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("config path", &json, &[]);
+
+    let output = jira_cmd(&dir).args(["profile", "list"]).output().unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("profile list", &json, &[]);
+
     let output = jira_cmd(&dir)
-        .args(["config", "remove", "work"])
+        .args(["profile", "use", "work"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("profile use", &json, &[]);
+
+    let output = jira_cmd(&dir)
+        .args(["profile", "remove", "work", "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("profile remove", &json, &[]);
+
+    let output = jira_cmd(&dir)
+        .args(["config", "remove", "legacy"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2308,6 +2335,7 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "boards list",
     "capabilities",
     "config init",
+    "config path",
     "config remove",
     "config show",
     "doctor",
@@ -2339,6 +2367,9 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "projects list",
     "projects show",
     "projects versions",
+    "profile list",
+    "profile remove",
+    "profile use",
     "search",
     "sprints list",
     "users search",
@@ -2652,6 +2683,11 @@ const MUTATING_WITHOUT_WRITING_TO_JIRA: &[(&str, &str)] = &[
     ("init", "writes the local config file"),
     ("config init", "writes the local config file"),
     ("config remove", "edits the local config file"),
+    ("profile use", "edits the local config file"),
+    (
+        "profile remove",
+        "edits the local config file and OS keychain",
+    ),
     (
         "issues download-attachment",
         "reads from Jira, writes the bytes to a local path",

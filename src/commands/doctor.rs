@@ -7,13 +7,45 @@ use crate::output::OutputConfig;
 /// Checks are intentionally sequential: a failed authentication request makes
 /// a project-access request both noisy and uninformative. Successful output is
 /// stable JSON for automation and a compact checklist for a person at a TTY.
-pub async fn run(client: &JiraClient, config: &Config, out: &OutputConfig) -> Result<(), ApiError> {
+pub async fn run(
+    client: &JiraClient,
+    config: &Config,
+    out: &OutputConfig,
+    offline: bool,
+) -> Result<(), ApiError> {
     let safety = if config.read_only {
         "read-only mode enabled"
     } else {
         "write operations enabled"
     };
     let configuration = format!("{} · REST API v{}", config.host, config.api_version);
+
+    if offline {
+        let checks = serde_json::json!([
+            {"name": "configuration", "ok": true, "detail": configuration},
+            {"name": "authentication", "ok": true, "detail": format!("credential available from {}; network not checked", config.credential_store)},
+            {"name": "projects", "ok": true, "detail": "network check skipped"},
+            {"name": "write_safety", "ok": true, "detail": safety}
+        ]);
+        if out.json {
+            out.print_data(
+                &serde_json::to_string_pretty(
+                    &serde_json::json!({"ok": true, "offline": true, "checks": checks}),
+                )
+                .expect("failed to serialize doctor result"),
+            );
+        } else {
+            println!("Jira connection (offline)\n");
+            for check in checks.as_array().expect("checks are an array") {
+                println!(
+                    "  ✓ {:<16} {}",
+                    check["name"].as_str().unwrap_or("check"),
+                    check["detail"].as_str().unwrap_or_default()
+                );
+            }
+        }
+        return Ok(());
+    }
 
     let me = match client.get_myself().await {
         Ok(me) => me,
