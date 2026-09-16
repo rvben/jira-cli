@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `issues create` and `issues move` scope sprint names and `active` to project Scrum boards, with `--board ID` to choose a board. Ambiguous matches list candidate sprint and board IDs.
+- Component and fix version names, IDs, and unique prefixes resolve against create/edit metadata. Required fields and parent/type compatibility are checked before writing.
+- `issues update --clear-epic` removes epic membership using the instance's native or custom field.
+
+### Fixed
+
+- Sprint lookup and state validation happen before issue creation. If the later sprint move fails, exit code `8` (`partial_success`) reports the created issue key, URL, and recovery command so callers can finish without creating a duplicate.
+- `--assignee none` and `--assignee unassign` consistently clear assignees on create, update, and assign. Omitting the flag preserves defaults or existing values.
+
 ## [0.4.10](https://github.com/rvben/jira-cli/compare/v0.4.9...v0.4.10) - 2026-09-16
 
 ### Added

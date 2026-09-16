@@ -10,6 +10,7 @@ use super::AuthType;
 use super::types::*;
 
 mod metadata;
+mod sprints;
 
 pub struct JiraClient {
     http: reqwest::Client,
@@ -40,12 +41,12 @@ const SEARCH_JQL_MAX_PAGE: usize = 100;
 /// Jira Cloud. Requests only `id` to stay cheap (allows up to 5000/page).
 const SEARCH_JQL_SKIP_PAGE: usize = 1000;
 
-/// Build a `[{"name": x}, ...]` JSON array used by Jira for components, versions, etc.
-fn name_object_array(items: &[&str]) -> serde_json::Value {
+/// Build a JSON array of name/ID options for components and versions.
+fn named_option_array(items: &[&str]) -> serde_json::Value {
     serde_json::Value::Array(
         items
             .iter()
-            .map(|name| serde_json::json!({ "name": name }))
+            .map(|name| metadata::unresolved_option(name))
             .collect(),
     )
 }
@@ -499,15 +500,17 @@ impl JiraClient {
         if let Some(comps) = draft.components
             && !comps.is_empty()
         {
-            fields["components"] = name_object_array(comps);
+            fields["components"] = named_option_array(comps);
         }
         if let Some(fvs) = draft.fix_versions
             && !fvs.is_empty()
         {
-            fields["fixVersions"] = name_object_array(fvs);
+            fields["fixVersions"] = named_option_array(fvs);
         }
-        if let Some(id) = draft.assignee {
-            fields["assignee"] = self.assignee_payload(id);
+        if let Some(assignee) = draft.assignee {
+            fields["assignee"] = assignee
+                .map(|id| self.assignee_payload(id))
+                .unwrap_or(serde_json::Value::Null);
         }
         for (key, value) in custom_fields {
             fields[key] = value.clone();
@@ -624,10 +627,10 @@ impl JiraClient {
             fields.insert("priority".into(), metadata::unresolved_option(p));
         }
         if let Some(comps) = update.components {
-            fields.insert("components".into(), name_object_array(comps));
+            fields.insert("components".into(), named_option_array(comps));
         }
         if let Some(fvs) = update.fix_versions {
-            fields.insert("fixVersions".into(), name_object_array(fvs));
+            fields.insert("fixVersions".into(), named_option_array(fvs));
         }
         if let Some(lbls) = update.labels {
             fields.insert("labels".into(), serde_json::json!(lbls));
@@ -642,9 +645,9 @@ impl JiraClient {
         for (k, value) in custom_fields {
             fields.insert(k.clone(), value.clone());
         }
-        if fields.is_empty() && update.epic.is_none() {
+        if fields.is_empty() && update.epic.is_none() && !update.clear_epic {
             return Err(ApiError::InvalidInput(
-                "At least one field (--summary, --description, --priority, --epic, --components, --fix-versions, --labels, --assignee, or --field) is required"
+                "At least one field (--summary, --description, --priority, --epic, --clear-epic, --components, --fix-versions, --labels, --assignee, or --field) is required"
                     .into(),
             ));
         }
@@ -833,11 +836,24 @@ impl JiraClient {
 
     /// List all boards, fetching all pages.
     pub async fn list_boards(&self) -> Result<Vec<Board>, ApiError> {
+        self.list_boards_filtered(None, false).await
+    }
+
+    async fn list_boards_filtered(
+        &self,
+        project: Option<&str>,
+        scrum_only: bool,
+    ) -> Result<Vec<Board>, ApiError> {
         let mut all = Vec::new();
         let mut start_at = 0usize;
         const PAGE: usize = 50;
         loop {
-            let path = format!("board?startAt={start_at}&maxResults={PAGE}");
+            let project_param = project
+                .map(|p| format!("&projectKeyOrId={}", percent_encode(p)))
+                .unwrap_or_default();
+            let type_param = if scrum_only { "&type=scrum" } else { "" };
+            let path =
+                format!("board?startAt={start_at}&maxResults={PAGE}{project_param}{type_param}");
             let page: BoardSearchResponse = self.agile_get(&path).await?;
             let received = page.values.len();
             all.extend(page.values);
@@ -970,50 +986,6 @@ impl JiraClient {
     pub async fn get_sprint(&self, sprint_id: u64) -> Result<Sprint, ApiError> {
         self.agile_get::<Sprint>(&format!("sprint/{sprint_id}"))
             .await
-    }
-
-    /// Resolve a sprint specifier to a `Sprint`.
-    ///
-    /// Accepts:
-    /// - A numeric string: fetches the sprint by ID to confirm it exists and get the name
-    /// - `"active"`: returns the first active sprint found across all boards
-    /// - Any other string: matched case-insensitively as a substring of sprint names
-    pub async fn resolve_sprint(&self, specifier: &str) -> Result<Sprint, ApiError> {
-        if let Ok(id) = specifier.parse::<u64>() {
-            return self.get_sprint(id).await;
-        }
-
-        let boards = self.list_boards().await?;
-        if boards.is_empty() {
-            return Err(ApiError::NotFound("No boards found".into()));
-        }
-
-        let target_state = if specifier.eq_ignore_ascii_case("active") {
-            Some("active")
-        } else {
-            None
-        };
-
-        for board in &boards {
-            let sprints = self.list_sprints(board.id, target_state).await?;
-            for sprint in sprints {
-                if specifier.eq_ignore_ascii_case("active") {
-                    if sprint.state == "active" {
-                        return Ok(sprint);
-                    }
-                } else if sprint
-                    .name
-                    .to_lowercase()
-                    .contains(&specifier.to_lowercase())
-                {
-                    return Ok(sprint);
-                }
-            }
-        }
-
-        Err(ApiError::NotFound(format!(
-            "No sprint found matching '{specifier}'"
-        )))
     }
 
     /// Resolve a sprint specifier to its numeric ID.

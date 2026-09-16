@@ -94,6 +94,27 @@ pub fn print_error_envelope(kind: &str, message: &str) {
     );
 }
 
+/// Include the result of a completed write when a later step fails.
+pub fn error_envelope_for(err: &(dyn std::error::Error + 'static)) -> serde_json::Value {
+    let mut envelope = serde_json::json!({"error": {
+        "kind": contract_for_dyn(err).kind, "message": err.to_string()
+    }});
+    if let Some(crate::api::ApiError::PartialSuccess {
+        key,
+        url,
+        sprint_id,
+        ..
+    }) = err.downcast_ref::<crate::api::ApiError>()
+    {
+        envelope["error"]["details"] = serde_json::json!({
+            "key": key, "url": url, "created": true, "sprintId": sprint_id,
+            "sprintMoved": false,
+            "recoveryCommand": format!("jira issues move {key} --sprint {sprint_id}")
+        });
+    }
+    envelope
+}
+
 /// Exit codes for agent-friendly error handling.
 /// Agents can branch on specific failure modes without parsing error text.
 pub mod exit_codes {
@@ -113,6 +134,8 @@ pub mod exit_codes {
     pub const RATE_LIMIT: i32 = 6;
     /// Request conflicts with the current state of the resource.
     pub const CONFLICT: i32 = 7;
+    /// A write completed, but a subsequent operation failed. Do not retry the whole command.
+    pub const PARTIAL_SUCCESS: i32 = 8;
 }
 
 /// One failure mode of the CLI, in the form an agent consumes it.
@@ -180,6 +203,13 @@ pub static CONFLICT: ErrorContract = ErrorContract {
     description: "Request conflicts with the current state of the resource - resolve the conflict before retrying",
 };
 
+pub static PARTIAL_SUCCESS: ErrorContract = ErrorContract {
+    kind: "partial_success",
+    exit_code: exit_codes::PARTIAL_SUCCESS,
+    retryable: false,
+    description: "Issue created but sprint move failed. error.details contains key, url, created, sprintId, sprintMoved, and recoveryCommand. Retry only the move, not the create.",
+};
+
 /// Every failure mode the CLI can report, in schema declaration order.
 ///
 /// New entries append, so an agent that indexed into this array keeps seeing
@@ -193,6 +223,7 @@ pub static ALL_ERRORS: &[&ErrorContract] = &[
     &API_ERROR,
     &UNEXPECTED_ERROR,
     &CONFLICT,
+    &PARTIAL_SUCCESS,
 ];
 
 /// The contract row describing how this error is reported.
@@ -205,6 +236,7 @@ pub fn contract_for(err: &crate::api::ApiError) -> &'static ErrorContract {
         ApiError::ConfirmationRequired(_) => &CONFIRMATION_REQUIRED,
         ApiError::RateLimit => &RATE_LIMIT,
         ApiError::Conflict(_) => &CONFLICT,
+        ApiError::PartialSuccess { .. } => &PARTIAL_SUCCESS,
         ApiError::Api { .. } => &API_ERROR,
         ApiError::Http(_) | ApiError::Other(_) => &UNEXPECTED_ERROR,
     }
@@ -396,6 +428,12 @@ mod tests {
                 message: "x".into(),
             },
             ApiError::Other("x".into()),
+            ApiError::PartialSuccess {
+                key: "PROJ-1".into(),
+                url: "https://example.invalid/browse/PROJ-1".into(),
+                sprint_id: 5,
+                source: Box::new(ApiError::RateLimit),
+            },
         ]
     }
 

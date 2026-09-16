@@ -755,3 +755,544 @@ async fn cloud_native_parent_rejects_a_competing_legacy_epic_override() {
     assert!(err.to_string().contains("conflicts"));
     no_writes(&server).await;
 }
+
+async fn edit_metadata(server: &MockServer, version: u8, fields: Value) {
+    get(
+        server,
+        &format!("/rest/api/{version}/issue/PROJ-1/editmeta"),
+        json!({"fields": fields}),
+    )
+    .await;
+}
+
+fn named_arrays() -> Value {
+    json!({
+        "components": {"name": "Components", "allowedValues": [
+            {"id": "11", "name": "Backend"}, {"id": "12", "name": "Backend API"}, {"id": "13", "name": "Frontend"}
+        ]},
+        "fixVersions": {"name": "Fix versions", "allowedValues": [
+            {"id": "21", "name": "1.2"}, {"id": "22", "name": "2.0 Preview"}
+        ]}
+    })
+}
+
+#[tokio::test]
+async fn component_and_version_names_ids_and_unique_prefixes_resolve_on_create_and_update() {
+    for update in [false, true] {
+        for (component, version, expected_component, expected_version) in [
+            ("backend", "1.2", "11", "21"),
+            ("13", "22", "13", "22"),
+            ("front", "2.0", "13", "22"),
+        ] {
+            let server = MockServer::start().await;
+            if update {
+                edit_metadata(&server, 3, named_arrays()).await;
+            } else {
+                modern(&server, 3, named_arrays()).await;
+            }
+            allow_write(&server, 3, update).await;
+            let components = [component];
+            let versions = [version];
+            if update {
+                client(&server, 3)
+                    .update_issue(
+                        "PROJ-1",
+                        &IssueUpdate {
+                            components: Some(&components),
+                            fix_versions: Some(&versions),
+                            ..Default::default()
+                        },
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                let mut draft = draft();
+                draft.components = Some(&components);
+                draft.fix_versions = Some(&versions);
+                client(&server, 3).create_issue(&draft, &[]).await.unwrap();
+            }
+            let fields = write_fields(&server).await;
+            assert_eq!(fields["components"], json!([{"id": expected_component}]));
+            assert_eq!(fields["fixVersions"], json!([{"id": expected_version}]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_or_ambiguous_components_and_versions_list_choices_without_writing() {
+    for update in [false, true] {
+        for (field, input, choice) in [
+            ("components", "Back", "Backend API"),
+            ("components", "Missing", "Frontend"),
+            ("fixVersions", "Preview", "2.0 Preview"),
+        ] {
+            let server = MockServer::start().await;
+            if update {
+                edit_metadata(&server, 3, named_arrays()).await;
+            } else {
+                modern(&server, 3, named_arrays()).await;
+            }
+            let inputs = [input];
+            let components = (field == "components").then_some(inputs.as_slice());
+            let fix_versions = (field == "fixVersions").then_some(inputs.as_slice());
+            let err = if update {
+                client(&server, 3)
+                    .update_issue(
+                        "PROJ-1",
+                        &IssueUpdate {
+                            components,
+                            fix_versions,
+                            ..Default::default()
+                        },
+                        &[],
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                let mut draft = draft();
+                draft.components = components;
+                draft.fix_versions = fix_versions;
+                client(&server, 3)
+                    .create_issue(&draft, &[])
+                    .await
+                    .unwrap_err()
+            };
+            let message = err.to_string();
+            assert!(matches!(err, ApiError::InvalidInput(_)));
+            assert!(
+                message.contains(field) && message.contains(choice) && message.contains("valid:"),
+                "{message}"
+            );
+            no_writes(&server).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn arrays_allow_raw_overrides_optional_clears_and_unavailable_metadata_fallback() {
+    for metadata in [true, false] {
+        let server = MockServer::start().await;
+        if metadata {
+            edit_metadata(&server, 3, named_arrays()).await;
+        }
+        allow_write(&server, 3, true).await;
+        client(&server, 3)
+            .update_issue(
+                "PROJ-1",
+                &IssueUpdate {
+                    components: Some(&["Invalid"]),
+                    fix_versions: Some(&[]),
+                    ..Default::default()
+                },
+                &[("components".into(), json!([{"id": "99"}]))],
+            )
+            .await
+            .unwrap();
+        let fields = write_fields(&server).await;
+        assert_eq!(fields["components"], json!([{"id": "99"}]));
+        assert_eq!(fields["fixVersions"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn array_fields_missing_from_screen_fail_before_writing() {
+    let server = MockServer::start().await;
+    modern(&server, 3, json!({})).await;
+    let mut draft = draft();
+    draft.components = Some(&["Backend"]);
+    let err = client(&server, 3)
+        .create_issue(&draft, &[])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("omit --components"));
+    no_writes(&server).await;
+}
+
+#[tokio::test]
+async fn required_create_fields_show_names_ids_and_choices() {
+    for value in [
+        None,
+        Some(Value::Null),
+        Some(json!("  ")),
+        Some(json!([])),
+        Some(json!({})),
+    ] {
+        let server = MockServer::start().await;
+        modern(
+            &server,
+            3,
+            json!({"customfield_34567": {
+                "name": "Release track", "required": true,
+                "allowedValues": [{"id": "1", "name": "Stable"}]
+            }}),
+        )
+        .await;
+        let custom = value
+            .map(|v| vec![("customfield_34567".into(), v)])
+            .unwrap_or_default();
+        let err = client(&server, 3)
+            .create_issue(&draft(), &custom)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Release track")
+                && message.contains("customfield_34567")
+                && message.contains("Stable")
+                && message.contains("--field"),
+            "{message}"
+        );
+        no_writes(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn required_fields_accept_server_defaults_explicit_values_false_and_zero() {
+    let server = MockServer::start().await;
+    modern(
+        &server,
+        3,
+        json!({
+            "priority": {"required": true, "hasDefaultValue": true},
+            "customfield_34567": {"required": true, "defaultValue": "Stable"},
+            "customfield_34568": {"required": true},
+            "customfield_34569": {"required": true},
+            "customfield_34570": {"required": true}
+        }),
+    )
+    .await;
+    allow_write(&server, 3, false).await;
+    client(&server, 3)
+        .create_issue(
+            &draft(),
+            &[
+                ("customfield_34568".into(), json!(false)),
+                ("customfield_34569".into(), json!(0)),
+                ("customfield_34570".into(), json!({"id": "1"})),
+            ],
+        )
+        .await
+        .unwrap();
+    let fields = write_fields(&server).await;
+    assert!(fields.get("priority").is_none());
+    assert_eq!(fields["customfield_34568"], false);
+    assert_eq!(fields["customfield_34569"], 0);
+}
+
+#[tokio::test]
+async fn required_update_fields_are_untouched_unless_explicitly_cleared() {
+    for clear in [false, true] {
+        let server = MockServer::start().await;
+        edit_metadata(
+            &server,
+            3,
+            json!({"assignee": {"name": "Assignee", "required": true}}),
+        )
+        .await;
+        let update = IssueUpdate {
+            summary: Some("New title"),
+            assignee: clear.then_some(None),
+            ..Default::default()
+        };
+        if clear {
+            let err = client(&server, 3)
+                .update_issue("PROJ-1", &update, &[])
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("Assignee"));
+            no_writes(&server).await;
+        } else {
+            allow_write(&server, 3, true).await;
+            client(&server, 3)
+                .update_issue("PROJ-1", &update, &[])
+                .await
+                .unwrap();
+            assert_eq!(write_fields(&server).await, json!({"summary": "New title"}));
+        }
+    }
+}
+
+async fn hierarchy_metadata(server: &MockServer) {
+    get(server, "/rest/api/3/issue/createmeta", json!({"projects": [{"key": "PROJ", "issuetypes": [
+        {"id": "7", "name": "Story", "subtask": false, "hierarchyLevel": 0, "fields": {"parent": {}}},
+        {"id": "8", "name": "Work item", "subtask": true, "hierarchyLevel": -1, "fields": {"parent": {"required": true}}},
+        {"id": "9", "name": "Initiative", "hierarchyLevel": 2, "fields": {"parent": {}}}
+    ]}]})).await;
+}
+
+#[tokio::test]
+async fn standard_parent_requires_actual_project_subtask_type_and_subtasks_require_parent() {
+    for parent in [Some("PROJ-9"), None] {
+        let server = MockServer::start().await;
+        hierarchy_metadata(&server).await;
+        target(
+            &server,
+            3,
+            "PROJ-9",
+            json!({"name": "Story", "hierarchyLevel": 0}),
+        )
+        .await;
+        let mut draft = draft();
+        draft.parent = parent;
+        draft.issue_type = if parent.is_some() {
+            "Story"
+        } else {
+            "Work item"
+        };
+        let err = client(&server, 3)
+            .create_issue(&draft, &[])
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Work item") && message.contains("--parent"),
+            "{message}"
+        );
+        if parent.is_some() {
+            assert!(message.contains("--type") && message.contains("ID 8"));
+        }
+        no_writes(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn renamed_subtask_and_custom_hierarchy_children_accept_compatible_parents() {
+    for (child, parent) in [
+        ("Work item", json!({"name": "Task", "hierarchyLevel": 0})),
+        ("Work item", json!({"name": "Task"})),
+        (
+            "Initiative",
+            json!({"name": "Portfolio", "hierarchyLevel": 3}),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        hierarchy_metadata(&server).await;
+        target(&server, 3, "PROJ-9", parent).await;
+        allow_write(&server, 3, false).await;
+        let mut draft = draft();
+        draft.issue_type = child;
+        draft.parent = Some("PROJ-9");
+        client(&server, 3).create_issue(&draft, &[]).await.unwrap();
+        assert_eq!(
+            write_fields(&server).await["parent"],
+            json!({"key": "PROJ-9"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn subtask_parents_and_skipped_hierarchy_levels_are_rejected() {
+    for parent in [
+        json!({"name": "Work item", "subtask": true}),
+        json!({"name": "Portfolio", "hierarchyLevel": 3}),
+    ] {
+        let server = MockServer::start().await;
+        hierarchy_metadata(&server).await;
+        target(&server, 3, "PROJ-9", parent).await;
+        let mut draft = draft();
+        draft.parent = Some("PROJ-9");
+        assert!(matches!(
+            client(&server, 3)
+                .create_issue(&draft, &[])
+                .await
+                .unwrap_err(),
+            ApiError::InvalidInput(_)
+        ));
+        no_writes(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn clear_epic_resolves_custom_and_native_fields_on_both_api_versions() {
+    for version in [2, 3] {
+        let server = MockServer::start().await;
+        edit_metadata(
+            &server,
+            version,
+            json!({"parent": {}, "customfield_23456": epic_field()}),
+        )
+        .await;
+        target(
+            &server,
+            version,
+            "PROJ-1",
+            json!({"name": "Story", "hierarchyLevel": 0}),
+        )
+        .await;
+        allow_write(&server, version, true).await;
+        client(&server, version)
+            .update_issue(
+                "PROJ-1",
+                &IssueUpdate {
+                    clear_epic: true,
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+        let expected = if version == 2 {
+            json!({"customfield_23456": null})
+        } else {
+            json!({"parent": null})
+        };
+        assert_eq!(write_fields(&server).await, expected);
+    }
+}
+
+#[tokio::test]
+async fn clear_epic_rejects_required_relationships_incompatible_types_and_conflicting_overrides() {
+    for scenario in ["required", "subtask", "epic", "raw", "both"] {
+        let server = MockServer::start().await;
+        edit_metadata(&server, 3, json!({"parent": {"required": scenario == "required"}, "customfield_23456": epic_field()})).await;
+        let issue_type = match scenario {
+            "subtask" => json!({"name": "Work item", "subtask": true}),
+            "epic" => json!({"name": "Epic"}),
+            _ => json!({"name": "Story"}),
+        };
+        target(&server, 3, "PROJ-1", issue_type).await;
+        let custom = if scenario == "raw" {
+            vec![("customfield_23456".into(), json!("PROJ-9"))]
+        } else {
+            vec![]
+        };
+        let err = client(&server, 3)
+            .update_issue(
+                "PROJ-1",
+                &IssueUpdate {
+                    clear_epic: true,
+                    epic: (scenario == "both").then_some("PROJ-9"),
+                    ..Default::default()
+                },
+                &custom,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::InvalidInput(_)), "{err}");
+        no_writes(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn create_assignee_can_be_omitted_cleared_or_set_on_cloud_and_server() {
+    for version in [2, 3] {
+        for assignee in [None, Some(None), Some(Some("test-user-id"))] {
+            let server = MockServer::start().await;
+            allow_write(&server, version, false).await;
+            let mut draft = draft();
+            draft.assignee = assignee;
+            client(&server, version)
+                .create_issue(&draft, &[])
+                .await
+                .unwrap();
+            let fields = write_fields(&server).await;
+            match assignee {
+                None => assert!(fields.get("assignee").is_none()),
+                Some(None) => assert!(fields.get("assignee").unwrap().is_null()),
+                Some(Some(id)) => assert_eq!(
+                    fields["assignee"],
+                    if version == 2 {
+                        json!({"name": id})
+                    } else {
+                        json!({"accountId": id})
+                    }
+                ),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_array_validation_errors_keep_field_specific_choices() {
+    for field in ["components", "fixVersions", "customfield_34567"] {
+        let server = MockServer::start().await;
+        let mut meta = named_arrays();
+        meta["parent"] = json!({});
+        modern(&server, 3, meta).await;
+        target(&server, 3, "PROJ-9", json!({"name": "Epic"})).await;
+        let mut draft = draft();
+        draft.epic = Some("PROJ-9");
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/issue"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(json!({"errors": {field: "Rejected"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = client(&server, 3)
+            .create_issue(&draft, &[(field.into(), json!("raw"))])
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(matches!(err, ApiError::Api { status: 400, .. }));
+        if field == "customfield_34567" {
+            assert!(!message.contains("Epic"));
+        } else {
+            let option = if field == "components" {
+                "Backend"
+            } else {
+                "2.0 Preview"
+            };
+            assert!(
+                message.contains(option) && message.contains(&format!("valid {field}")),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_descriptions_reject_blank_text_on_cloud_and_server() {
+    for version in [2, 3] {
+        for update in [false, true] {
+            let server = MockServer::start().await;
+            let meta = json!({"description": {"name": "Description", "required": true}});
+            if update {
+                edit_metadata(&server, version, meta).await;
+            } else {
+                modern(&server, version, meta).await;
+            }
+            let err = if update {
+                client(&server, version)
+                    .update_issue(
+                        "PROJ-1",
+                        &IssueUpdate {
+                            description: Some(" \n "),
+                            ..Default::default()
+                        },
+                        &[],
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                let mut draft = draft();
+                draft.description = Some(" \n ");
+                client(&server, version)
+                    .create_issue(&draft, &[])
+                    .await
+                    .unwrap_err()
+            };
+            assert!(err.to_string().contains("Description"), "{err}");
+            no_writes(&server).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_descriptions_accept_nontext_rich_content_and_raw_overrides() {
+    let server = MockServer::start().await;
+    modern(&server, 3, json!({"description": {"required": true}})).await;
+    allow_write(&server, 3, false).await;
+    let mut draft = draft();
+    draft.description = Some("");
+    let description = json!({"version": 1, "type": "doc", "content": [
+        {"type": "mediaGroup", "content": [{"type": "media", "attrs": {"id": "example-media", "type": "file", "collection": ""}}]}
+    ]});
+    client(&server, 3)
+        .create_issue(&draft, &[("description".into(), description.clone())])
+        .await
+        .unwrap();
+    assert_eq!(write_fields(&server).await["description"], description);
+}

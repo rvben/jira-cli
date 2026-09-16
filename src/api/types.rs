@@ -438,7 +438,8 @@ pub struct IssueDraft<'a> {
     pub labels: Option<&'a [&'a str]>,
     pub components: Option<&'a [&'a str]>,
     pub fix_versions: Option<&'a [&'a str]>,
-    pub assignee: Option<&'a str>,
+    /// None keeps Jira's default; Some(None) creates an unassigned issue.
+    pub assignee: Option<Option<&'a str>>,
     pub parent: Option<&'a str>,
     /// Epic membership, resolved using project metadata (not a subtask parent).
     pub epic: Option<&'a str>,
@@ -455,6 +456,8 @@ pub struct IssueUpdate<'a> {
     pub description: Option<&'a str>,
     pub priority: Option<&'a str>,
     pub epic: Option<&'a str>,
+    /// Remove epic membership; conflicts with `epic`.
+    pub clear_epic: bool,
     pub components: Option<&'a [&'a str]>,
     pub fix_versions: Option<&'a [&'a str]>,
     pub labels: Option<&'a [&'a str]>,

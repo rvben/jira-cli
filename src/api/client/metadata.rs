@@ -5,6 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+mod validation;
+use validation::{normalize_named_arrays, validate_required};
+
 type Fields = BTreeMap<String, Value>;
 const EPIC_LINK_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-link";
 
@@ -21,24 +24,27 @@ pub(super) struct IssueType {
 }
 
 impl IssueType {
+    fn is_subtask(&self) -> bool {
+        self.subtask
+            || self.hierarchy_level == Some(-1)
+            || matches!(
+                self.name.to_ascii_lowercase().as_str(),
+                "subtask" | "sub-task"
+            )
+    }
     fn is_epic(&self) -> bool {
         self.hierarchy_level == Some(1) || self.name.eq_ignore_ascii_case("Epic")
     }
 
     fn can_belong_to_epic(&self) -> bool {
-        !self.subtask
-            && self.hierarchy_level.is_none_or(|level| level == 0)
-            && !self.is_epic()
-            && !matches!(
-                self.name.to_ascii_lowercase().as_str(),
-                "subtask" | "sub-task"
-            )
+        !self.is_subtask() && self.hierarchy_level.is_none_or(|level| level == 0) && !self.is_epic()
     }
 }
 
 pub(super) struct CreateMetadata {
     issue_type: IssueType,
     fields: Option<Fields>,
+    subtask_types: Vec<Value>,
 }
 
 impl JiraClient {
@@ -167,7 +173,12 @@ impl JiraClient {
             .iter()
             .map(|t| json!({"id": t.id, "name": t.name}))
             .collect::<Vec<_>>();
-        let selected = match_option("issue type", input, &options, false)?;
+        let selected = match_option("issue type", input, &options, OptionMatch::NameOrId)?;
+        let subtask_types = types
+            .iter()
+            .filter(|t| t.is_subtask())
+            .map(|t| json!({"id": t.id, "name": t.name}))
+            .collect();
         let issue_type = types[selected].clone();
         let fields = if let Some(fields) = &issue_type.fields {
             Some(fields.clone())
@@ -202,7 +213,11 @@ impl JiraClient {
                     .and_then(|t| t.fields),
             }
         };
-        Ok(Some(CreateMetadata { issue_type, fields }))
+        Ok(Some(CreateMetadata {
+            issue_type,
+            fields,
+            subtask_types,
+        }))
     }
 
     pub(super) async fn issue_type_for_link(&self, key: &str) -> Result<IssueType, ApiError> {
@@ -261,21 +276,7 @@ impl JiraClient {
             )));
         }
         let field = self.epic_field(meta).await?;
-        let conflict = meta
-            .and_then(|meta| {
-                meta.iter()
-                    .find(|(id, definition)| {
-                        is_epic_field(id, definition) && fields.get(*id).is_some()
-                    })
-                    .map(|(id, _)| id.as_str())
-            })
-            .or_else(|| fields.get("parent").map(|_| "parent"))
-            .or_else(|| fields.get(&field).map(|_| field.as_str()));
-        if let Some(conflict) = conflict {
-            return Err(ApiError::InvalidInput(format!(
-                "Epic linkage conflicts with --field {conflict}; specify the relationship only once"
-            )));
-        }
+        validate_epic_override(fields, meta, &field)?;
         fields[&field] = if field == "parent" {
             json!({"key": epic})
         } else {
@@ -323,6 +324,7 @@ impl JiraClient {
         {
             normalize_priority(fields, field_meta, priority)?;
         }
+        normalize_named_arrays(fields, field_meta, custom)?;
         if let Some(key) = draft.epic.or(draft.parent) {
             let target = self.issue_type_for_link(key).await?;
             if draft.epic.is_some() && !target.is_epic() {
@@ -336,9 +338,22 @@ impl JiraClient {
                 // know the target type, so an explicit --field stays detectable.
                 self.set_epic(fields, field_meta, issue_type, key).await?;
             } else if fields.get("parent").is_none() {
+                if let Some(meta) = &meta {
+                    validate_parent_type(issue_type, &target, key, &meta.subtask_types)?;
+                }
                 fields["parent"] = json!({"key": key});
             }
         }
+        if meta.is_some()
+            && issue_type.is_subtask()
+            && fields.get("parent").is_none_or(Value::is_null)
+        {
+            return Err(ApiError::InvalidInput(format!(
+                "Issue type {:?} requires --parent <STORY-OR-TASK>",
+                issue_type.name
+            )));
+        }
+        validate_required(fields, field_meta, true)?;
         Ok(meta)
     }
 
@@ -352,8 +367,10 @@ impl JiraClient {
         let priority = update
             .priority
             .filter(|_| !custom.iter().any(|(key, _)| key == "priority"));
-        if priority.is_none() && update.epic.is_none() {
-            return Ok(None);
+        if update.epic.is_some() && update.clear_epic {
+            return Err(ApiError::InvalidInput(
+                "--epic and --clear-epic cannot be used together".into(),
+            ));
         }
         let meta = self
             .optional_metadata(&format!("issue/{key}/editmeta"))
@@ -363,6 +380,7 @@ impl JiraClient {
         if let Some(priority) = priority {
             normalize_priority(fields, meta.as_ref(), priority)?;
         }
+        normalize_named_arrays(fields, meta.as_ref(), custom)?;
         if let Some(epic) = update.epic {
             if key.eq_ignore_ascii_case(epic) {
                 return Err(ApiError::InvalidInput(
@@ -380,8 +398,74 @@ impl JiraClient {
             self.set_epic(fields, meta.as_ref(), &issue_type, epic)
                 .await?;
         }
+        if update.clear_epic {
+            let issue_type = self.issue_type_for_link(key).await?;
+            if !issue_type.can_belong_to_epic() {
+                return Err(ApiError::InvalidInput(format!(
+                    "Cannot use --clear-epic on issue type {:?}; only standard issues can have epic membership cleared",
+                    issue_type.name
+                )));
+            }
+            let field = self.epic_field(meta.as_ref()).await?;
+            validate_epic_override(fields, meta.as_ref(), &field)?;
+            fields[&field] = Value::Null;
+        }
+        validate_required(fields, meta.as_ref(), false)?;
         Ok(meta)
     }
+}
+
+fn validate_epic_override(
+    fields: &Value,
+    meta: Option<&Fields>,
+    field: &str,
+) -> Result<(), ApiError> {
+    let conflict = meta
+        .and_then(|meta| {
+            meta.iter()
+                .find(|(id, definition)| is_epic_field(id, definition) && fields.get(*id).is_some())
+                .map(|(id, _)| id.as_str())
+        })
+        .or_else(|| fields.get("parent").map(|_| "parent"))
+        .or_else(|| fields.get(field).map(|_| field));
+    if let Some(conflict) = conflict {
+        return Err(ApiError::InvalidInput(format!(
+            "Epic linkage conflicts with --field {conflict}; specify the relationship only once"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_parent_type(
+    child: &IssueType,
+    parent: &IssueType,
+    key: &str,
+    subtask_types: &[Value],
+) -> Result<(), ApiError> {
+    if parent.is_subtask() {
+        return Err(ApiError::InvalidInput(format!(
+            "--parent {key} is a subtask and cannot have child issues; choose a Story or Task"
+        )));
+    }
+    if let (Some(child_level), Some(parent_level)) = (child.hierarchy_level, parent.hierarchy_level)
+    {
+        if child_level + 1 == parent_level {
+            return Ok(());
+        }
+        if parent_level != 0 {
+            return Err(ApiError::InvalidInput(format!(
+                "Issue type {:?} is not directly below parent type {:?} in the hierarchy",
+                child.name, parent.name
+            )));
+        }
+    } else if child.is_subtask() {
+        return Ok(());
+    }
+    Err(ApiError::InvalidInput(format!(
+        "--parent {key} requires a subtask issue type; selected {:?}. Choose --type from: {}",
+        child.name,
+        option_names(subtask_types)
+    )))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiError> {
@@ -459,7 +543,7 @@ fn normalize_priority(
         "Priority is not available on this issue's create/edit screen; omit --priority to keep the project default or ask an administrator to enable it".into()
     ))?;
     if let Some(options) = priority["allowedValues"].as_array() {
-        let selected = &options[match_option("priority", input, options, true)?];
+        let selected = &options[match_option("priority", input, options, OptionMatch::Priority)?];
         fields["priority"] = named_id(
             selected["id"].as_str().unwrap_or(""),
             selected["name"].as_str().unwrap_or(input),
@@ -470,11 +554,18 @@ fn normalize_priority(
 
 /// Prefer an exact name/ID, then case-insensitive names, then a unique label
 /// with a numeric rank removed, then prefixes. Never guess between ties.
+#[derive(Clone, Copy, PartialEq)]
+enum OptionMatch {
+    NameOrId,
+    Prefix,
+    Priority,
+}
+
 fn match_option(
     field: &str,
     input: &str,
     options: &[Value],
-    prefixes: bool,
+    style: OptionMatch,
 ) -> Result<usize, ApiError> {
     let input = input.trim();
     let lower = input.to_lowercase();
@@ -488,11 +579,15 @@ fn match_option(
                     && match tier {
                         0 => name == input || option["id"].as_str() == Some(input),
                         1 => name.to_lowercase() == lower,
-                        2 => prefixes && priority_label(name).to_lowercase() == lower,
+                        2 => {
+                            style == OptionMatch::Priority
+                                && priority_label(name).to_lowercase() == lower
+                        }
                         _ => {
-                            prefixes
+                            style != OptionMatch::NameOrId
                                 && (name.to_lowercase().starts_with(&lower)
-                                    || priority_label(name).to_lowercase().starts_with(&lower))
+                                    || (style == OptionMatch::Priority
+                                        && priority_label(name).to_lowercase().starts_with(&lower)))
                         }
                     }
             })
@@ -582,10 +677,27 @@ pub(super) fn write_error(
                 message.push_str("; use the exact project priority name or ID, or omit --priority to keep the default");
             }
         }
+        for field in ["components", "fixVersions"] {
+            if message.contains(field) {
+                if let Some(options) = meta
+                    .and_then(|m| m.get(field))
+                    .and_then(|f| f["allowedValues"].as_array())
+                {
+                    message.push_str(&format!("; valid {field}: {}", option_names(options)));
+                } else {
+                    message.push_str(&format!(
+                        "; use an exact project {field} name or ID, or omit the field"
+                    ));
+                }
+            }
+        }
         if let Some(key) = link
             && (message.contains("issuetype")
                 || message.contains("parent")
-                || message.contains("customfield_"))
+                || meta.is_some_and(|m| {
+                    m.iter()
+                        .any(|(id, f)| is_epic_field(id, f) && message.contains(id))
+                }))
         {
             message.push_str(&format!("; to add a Story or Task to an Epic use --epic {key}; subtasks require --parent <STORY-OR-TASK>. Check that Epic Link/parent is enabled on the create/edit screen"));
         }

@@ -317,21 +317,25 @@ enum IssuesCommand {
         #[arg(long)]
         labels: Vec<String>,
 
-        /// Components to attach (can be specified multiple times)
+        /// Component names or IDs (unique prefixes accepted; repeat to attach multiple)
         #[arg(long)]
         components: Vec<String>,
 
-        /// Fix versions to set (can be specified multiple times)
+        /// Fix version names or IDs (unique prefixes accepted; repeat to set multiple)
         #[arg(long)]
         fix_versions: Vec<String>,
 
-        /// Assign to this account ID (use "me" for yourself)
+        /// Assign to this account ID (use "me" for yourself, "none" or "unassign" for no assignee)
         #[arg(long)]
         assignee: Option<String>,
 
         /// Add to a sprint (sprint ID, name substring, or "active")
         #[arg(long)]
         sprint: Option<String>,
+
+        /// Sprint board ID (overrides automatic project scoping)
+        #[arg(long, requires = "sprint")]
+        board: Option<u64>,
 
         /// Parent issue key (Epic targets use epic linkage; otherwise a subtask/child)
         #[arg(long, conflicts_with = "epic")]
@@ -367,11 +371,15 @@ enum IssuesCommand {
         #[arg(long, value_name = "KEY")]
         epic: Option<String>,
 
-        /// Components to set (replaces existing; use "none" alone to clear)
+        /// Remove the issue from its epic
+        #[arg(long, conflicts_with = "epic")]
+        clear_epic: bool,
+
+        /// Component names or IDs (unique prefixes accepted; replaces existing; "none" clears)
         #[arg(long)]
         components: Vec<String>,
 
-        /// Fix versions to set (replaces existing; use "none" alone to clear)
+        /// Fix version names or IDs (unique prefixes accepted; replaces existing; "none" clears)
         #[arg(long)]
         fix_versions: Vec<String>,
 
@@ -379,7 +387,7 @@ enum IssuesCommand {
         #[arg(long)]
         labels: Vec<String>,
 
-        /// Assign to this account ID (use "me" for yourself, "none" to unassign)
+        /// Assign to this account ID (use "me" for yourself, "none" or "unassign" to clear)
         #[arg(long)]
         assignee: Option<String>,
 
@@ -396,6 +404,10 @@ enum IssuesCommand {
         /// Sprint ID, sprint name substring, or "active"
         #[arg(long)]
         sprint: String,
+
+        /// Sprint board ID (overrides automatic project scoping)
+        #[arg(long)]
+        board: Option<u64>,
     },
 
     /// Add a comment to an issue
@@ -722,7 +734,7 @@ async fn main() {
         let contract = jira_cli::output::contract_for_dyn(e.as_ref());
         let message = e.to_string();
         if out.json {
-            jira_cli::output::print_error_envelope(contract.kind, &message);
+            eprintln!("{}", jira_cli::output::error_envelope_for(e.as_ref()));
         } else {
             eprintln!("Error: {message}");
         }
@@ -945,6 +957,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 fix_versions,
                 assignee,
                 sprint,
+                board,
                 parent,
                 epic,
                 field,
@@ -952,14 +965,9 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 let parsed_labels = vec_to_opt_refs(&labels);
                 let parsed_components = vec_to_opt_refs(&components);
                 let parsed_fix_versions = vec_to_opt_refs(&fix_versions);
-                let assignee_str = match assignee.as_deref() {
-                    Some("me") => {
-                        let me = client.get_myself().await?;
-                        Some(me.account_id)
-                    }
-                    Some(id) => Some(id.to_string()),
-                    None => None,
-                };
+                let resolved_assignee =
+                    commands::issues::resolve_assignee_arg(&client, assignee.as_deref()).await?;
+                let assignee_ref = resolved_assignee.as_ref().map(|inner| inner.as_deref());
                 let draft = IssueDraft {
                     project_key: &project,
                     issue_type: &issue_type,
@@ -969,11 +977,12 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     labels: parsed_labels.as_deref(),
                     components: parsed_components.as_deref(),
                     fix_versions: parsed_fix_versions.as_deref(),
-                    assignee: assignee_str.as_deref(),
+                    assignee: assignee_ref,
                     parent: parent.as_deref(),
                     epic: epic.as_deref(),
                 };
-                commands::issues::create(&client, &out, &draft, sprint.as_deref(), &field).await?
+                commands::issues::create(&client, &out, &draft, sprint.as_deref(), board, &field)
+                    .await?
             }
             IssuesCommand::Update {
                 key,
@@ -981,6 +990,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 description,
                 priority,
                 epic,
+                clear_epic,
                 components,
                 fix_versions,
                 labels,
@@ -1001,6 +1011,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     description: description.as_deref(),
                     priority: priority.as_deref(),
                     epic: epic.as_deref(),
+                    clear_epic,
                     components: parsed_components.as_deref(),
                     fix_versions: parsed_fix_versions.as_deref(),
                     labels: parsed_labels.as_deref(),
@@ -1008,8 +1019,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 };
                 commands::issues::update(&client, &out, &key, &update, &field).await?
             }
-            IssuesCommand::Move { key, sprint } => {
-                commands::issues::move_to_sprint(&client, &out, &key, &sprint).await?
+            IssuesCommand::Move { key, sprint, board } => {
+                commands::issues::move_to_sprint(&client, &out, &key, &sprint, board).await?
             }
             IssuesCommand::Comment { key, body } => {
                 commands::issues::comment(&client, &out, &key, &body).await?

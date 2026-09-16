@@ -170,6 +170,8 @@ jira issues update MYAPP-123 --summary "Updated title"
 jira issues update MYAPP-123 --priority Low --assignee me
 jira issues update MYAPP-123 --field customfield_10016=5
 jira issues update MYAPP-123 --epic MYAPP-10
+jira issues update MYAPP-123 --clear-epic
+jira issues update MYAPP-123 --assignee none
 
 # Transition
 jira issues list-transitions MYAPP-123
@@ -202,6 +204,7 @@ jira issues unlink <link-id>
 # Move to sprint
 jira issues move MYAPP-123 --sprint active
 jira issues move MYAPP-123 --sprint "Sprint 14"
+jira issues move MYAPP-123 --sprint active --board 42
 
 # Bulk operations (use --dry-run to preview)
 jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "In Progress"
@@ -212,8 +215,11 @@ jira issues bulk-assign --jql 'project = MYAPP AND sprint in openSprints()' --as
 `--epic KEY` resolves the instance's Epic Link custom field or native `parent`
 field using create metadata (edit metadata for updates). `--parent KEY` also
 uses epic linkage when its target is an Epic; other targets retain normal
-parent semantics and require an appropriate issue type. `--epic` and `--parent`
-cannot be combined. Subtasks belong under a Story or Task, not directly under
+parent semantics. Metadata validates the parent/type hierarchy before creation
+and lists the project's subtask types when needed. `--epic` and `--parent`
+cannot be combined. `issues update --clear-epic` removes epic membership,
+resolving the same native or custom field. It conflicts with `--epic` and
+explicit relationship overrides. Subtasks belong under a Story or Task, not directly under
 an epic. Jira's Cloud and Server/DC metadata formats are supported, including
 [older Server metadata](https://developer.atlassian.com/server/jira/platform/jira-rest-api-examples/).
 
@@ -227,6 +233,31 @@ default. If metadata endpoints are unavailable, names are passed through to
 Jira and validation errors include guidance; explicit `--field` values retain
 their override behavior. Epic linkage requires a discoverable field or native
 Cloud parent support.
+
+Components and fix versions accept exact names, IDs, case-insensitive names,
+and unique prefixes from create/edit metadata. Invalid or ambiguous values list
+valid options before writing. Required fields without a server default must be
+provided when creating an issue. Updates leave omitted fields untouched and
+reject explicit clears of required fields. `--field ID=VALUE` can supply required
+custom values. Unavailable metadata endpoints retain the existing pass-through
+behavior; authentication and server failures are still reported.
+
+`--assignee none` and `--assignee unassign` explicitly leave a new issue unassigned
+or clear an existing assignee. Omitting the flag preserves Jira's create default
+or the existing assignee. These aliases also work with `issues assign`.
+
+On `issues create` and `issues move`, sprint names and `active` are scoped to the
+issue project's Scrum boards. `--board ID` overrides this scope. Exact names
+win over substring matches; multiple matches list sprint and board IDs instead
+of picking one. Numeric sprint IDs identify a sprint directly; if `--board` is
+also supplied, membership on that board is checked.
+
+Creation resolves the sprint and checks that it is active or future before
+creating the issue. If the subsequent move fails, the CLI exits with code `8`
+and error kind `partial_success`. JSON stderr includes `error.details.key`,
+`url`, `created`, `sprintId`, `sprintMoved`, and `recoveryCommand`. The error is
+not retryable as a whole: use the returned `jira issues move KEY --sprint ID`
+command to finish the operation. Rerunning `issues create` would create a duplicate.
 
 ### Projects
 

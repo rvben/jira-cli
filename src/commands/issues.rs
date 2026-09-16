@@ -254,8 +254,28 @@ pub async fn create(
     out: &OutputConfig,
     draft: &IssueDraft<'_>,
     sprint: Option<&str>,
+    board: Option<u64>,
     custom_fields: &[(String, serde_json::Value)],
 ) -> Result<(), ApiError> {
+    let project = custom_fields
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "project")
+        .and_then(|(_, value)| value["key"].as_str().or_else(|| value["id"].as_str()))
+        .unwrap_or(draft.project_key);
+    let resolved_sprint = match sprint {
+        Some(s) => {
+            let resolved = client
+                .resolve_sprint_scoped(s, Some(project), board)
+                .await?;
+            validate_writable_sprint(&resolved)?;
+            Some(resolved)
+        }
+        None if board.is_some() => {
+            return Err(ApiError::InvalidInput("--board requires --sprint".into()));
+        }
+        None => None,
+    };
     let resp = client.create_issue(draft, custom_fields).await?;
     let url = client.browse_url(&resp.key);
 
@@ -266,9 +286,16 @@ pub async fn create(
     if let Some(epic) = draft.epic {
         result["epic"] = serde_json::json!(epic);
     }
-    if let Some(s) = sprint {
-        let resolved = client.resolve_sprint(s).await?;
-        client.move_issue_to_sprint(&resp.key, resolved.id).await?;
+    if let Some(resolved) = resolved_sprint {
+        client
+            .move_issue_to_sprint(&resp.key, resolved.id)
+            .await
+            .map_err(|source| ApiError::PartialSuccess {
+                key: resp.key.clone(),
+                url: url.clone(),
+                sprint_id: resolved.id,
+                source: Box::new(source),
+            })?;
         result["sprintId"] = serde_json::json!(resolved.id);
         result["sprintName"] = serde_json::json!(resolved.name);
     }
@@ -297,8 +324,17 @@ pub async fn move_to_sprint(
     out: &OutputConfig,
     key: &str,
     sprint: &str,
+    board: Option<u64>,
 ) -> Result<(), ApiError> {
-    let resolved = client.resolve_sprint(sprint).await?;
+    let project = if board.is_none() && sprint.trim().parse::<u64>().is_err() {
+        Some(client.issue_project(key).await?)
+    } else {
+        None
+    };
+    let resolved = client
+        .resolve_sprint_scoped(sprint, project.as_deref(), board)
+        .await?;
+    validate_writable_sprint(&resolved)?;
     client.move_issue_to_sprint(key, resolved.id).await?;
     out.print_result(
         &serde_json::json!({
@@ -308,6 +344,16 @@ pub async fn move_to_sprint(
         }),
         &format!("Moved {key} to {} ({})", resolved.name, resolved.id),
     );
+    Ok(())
+}
+
+fn validate_writable_sprint(sprint: &crate::api::Sprint) -> Result<(), ApiError> {
+    if sprint.state != "active" && sprint.state != "future" {
+        return Err(ApiError::InvalidInput(format!(
+            "Sprint {} ({:?}) is {}; choose an active or future sprint",
+            sprint.id, sprint.name, sprint.state
+        )));
+    }
     Ok(())
 }
 
@@ -1363,19 +1409,19 @@ fn resolve_terminal_width(tty_width: Option<usize>, columns: Option<usize>) -> u
     columns.unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
-/// Resolve a CLI `--assignee` argument into the three-state `IssueUpdate.assignee` value.
+/// Resolve `--assignee` for create/update into omitted, cleared, or assigned.
 ///
 /// `--assignee me` triggers a `GET /myself` round-trip to fetch the current user's account ID.
-/// `--assignee none` returns `Some(None)` (the unassign sentinel).
+/// `--assignee none` or `unassign` returns `Some(None)` (the unassign sentinel).
 /// `--assignee <id>` returns `Some(Some(id))` (set to the literal account ID).
-/// `None` (flag absent) returns `None` (leave the field untouched).
+/// `None` (flag absent) returns `None` (keep the create default or existing assignee).
 pub async fn resolve_assignee_arg(
     client: &JiraClient,
     arg: Option<&str>,
 ) -> Result<Option<Option<String>>, ApiError> {
     match arg {
         None => Ok(None),
-        Some("none") => Ok(Some(None)),
+        Some("none" | "unassign") => Ok(Some(None)),
         Some("me") => {
             let me = client.get_myself().await?;
             Ok(Some(Some(me.account_id)))

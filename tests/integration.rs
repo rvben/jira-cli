@@ -1274,7 +1274,8 @@ async fn update_issue_sends_put_request() {
 
     // Verify only specified fields appear - unset fields must be omitted, not sent as null
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests.iter().find(|r| r.method == "PUT").unwrap().body).unwrap();
     assert_eq!(body["fields"]["summary"], "New summary");
     assert!(
         body["fields"].get("description").is_none(),
@@ -2182,7 +2183,8 @@ async fn update_issue_sends_custom_fields() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests.iter().find(|r| r.method == "PUT").unwrap().body).unwrap();
     assert_eq!(body["fields"]["customfield_10106"], 13);
 }
 
@@ -2317,7 +2319,7 @@ async fn create_issue_v2_assignee_uses_name_field() {
                 labels: None,
                 components: None,
                 fix_versions: None,
-                assignee: Some("ruben"),
+                assignee: Some(Some("ruben")),
                 parent: None,
                 epic: None,
             },
@@ -2367,7 +2369,7 @@ async fn create_issue_v3_assignee_uses_account_id_field() {
                 labels: None,
                 components: None,
                 fix_versions: None,
-                assignee: Some("abc123"),
+                assignee: Some(Some("abc123")),
                 parent: None,
                 epic: None,
             },
@@ -3016,6 +3018,7 @@ async fn create_issue_with_parent_includes_parent_field() {
             epic: None,
         },
         None,
+        None,
         &[],
     )
     .await
@@ -3270,6 +3273,13 @@ async fn issues_link_types_command_returns_list() {
 #[tokio::test]
 async fn move_to_sprint_command_resolves_name_and_posts_to_agile() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": {"project": {"key": "PROJ"}}
+        })))
+        .mount(&server)
+        .await;
 
     // Board list
     Mock::given(method("GET"))
@@ -3304,7 +3314,7 @@ async fn move_to_sprint_command_resolves_name_and_posts_to_agile() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::issues::move_to_sprint(&client, &out, "PROJ-1", "Sprint Alpha")
+    jira_cli::commands::issues::move_to_sprint(&client, &out, "PROJ-1", "Sprint Alpha", None)
         .await
         .unwrap();
 }

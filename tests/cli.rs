@@ -3125,3 +3125,41 @@ async fn a_downstream_that_stops_reading_does_not_panic_the_writer() {
         );
     }
 }
+
+#[test]
+fn schema_exposes_sprint_scope_epic_clearing_and_partial_success_recovery() {
+    let dir = TempDir::new().unwrap();
+    for (command, flag) in [
+        ("issues create", "--board"),
+        ("issues move", "--board"),
+        ("issues update", "--clear-epic"),
+    ] {
+        let output = jira_cmd(&dir)
+            .args(["schema", "--command", command])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            schema["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg["name"] == flag)
+        );
+        let partial = schema["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|err| err["kind"] == "partial_success")
+            .unwrap();
+        assert_eq!(partial["exit_code"], 8);
+        assert_eq!(partial["retryable"], false);
+        assert!(
+            partial["description"]
+                .as_str()
+                .unwrap()
+                .contains("recoveryCommand")
+        );
+    }
+}

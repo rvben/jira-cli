@@ -36,6 +36,13 @@ pub enum ApiError {
     /// overwrite. Retrying unchanged reproduces the conflict, so the caller has
     /// to resolve it first.
     Conflict(String),
+    /// An issue was created, but a subsequent sprint move failed.
+    PartialSuccess {
+        key: String,
+        url: String,
+        sprint_id: u64,
+        source: Box<ApiError>,
+    },
     /// Non-2xx response from the Jira API.
     Api { status: u16, message: String },
     /// Network / TLS error.
@@ -56,6 +63,15 @@ impl fmt::Display for ApiError {
             ApiError::ConfirmationRequired(msg) => write!(f, "Confirmation required: {msg}"),
             ApiError::RateLimit => write!(f, "Rate limited by Jira. Please wait and try again."),
             ApiError::Conflict(msg) => write!(f, "Conflict: {msg}"),
+            ApiError::PartialSuccess {
+                key,
+                url,
+                sprint_id,
+                source,
+            } => write!(
+                f,
+                "Created {key} ({url}), but adding it to sprint {sprint_id} failed: {source}. Retry only `jira issues move {key} --sprint {sprint_id}`; do not rerun issues create."
+            ),
             ApiError::Api { status, message } => write!(f, "API error {status}: {message}"),
             ApiError::Http(e) => write!(f, "HTTP error: {e}"),
             ApiError::Other(msg) => write!(f, "{msg}"),
@@ -67,6 +83,7 @@ impl std::error::Error for ApiError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ApiError::Http(e) => Some(e),
+            ApiError::PartialSuccess { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
