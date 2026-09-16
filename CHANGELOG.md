@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.12](https://github.com/rvben/jira-cli/compare/v0.4.11...v0.4.12) - 2026-09-16
+
+### Added
+
+- **cli**: improve discovery, write previews, and bulk outcomes ([cc8cfcf](https://github.com/rvben/jira-cli/commit/cc8cfcf1f298a7657fb53463547a837389aa289d))
+
 ## [0.4.11](https://github.com/rvben/jira-cli/compare/v0.4.10...v0.4.11) - 2026-09-16
 
 ### Added
