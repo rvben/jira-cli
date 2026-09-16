@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/rvben/jira-cli/compare/v0.4.9...v0.4.10) - 2026-09-16
+
 ### Added
 
 - `issues create` and `issues update` accept `--epic KEY`, discovering the instance's Epic Link field or native parent. Creating with `--parent` pointing to an Epic also uses epic linkage.
