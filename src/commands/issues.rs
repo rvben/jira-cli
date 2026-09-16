@@ -263,6 +263,9 @@ pub async fn create(
     if let Some(p) = draft.parent {
         result["parent"] = serde_json::json!(p);
     }
+    if let Some(epic) = draft.epic {
+        result["epic"] = serde_json::json!(epic);
+    }
     if let Some(s) = sprint {
         let resolved = client.resolve_sprint(s).await?;
         client.move_issue_to_sprint(&resp.key, resolved.id).await?;

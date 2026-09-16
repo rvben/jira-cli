@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- `issues create` and `issues update` accept `--epic KEY`, discovering the instance's Epic Link field or native parent. Creating with `--parent` pointing to an Epic also uses epic linkage.
+- Priority names, IDs, numeric-ranked labels, and unique prefixes are resolved against create/edit metadata. Invalid or ambiguous input lists valid options before writing; create also validates issue type names and IDs.
+
+### Fixed
+
+- Issue creation and updates provide actionable priority and epic-link guidance for Jira field validation errors.
+
 ## [0.4.9](https://github.com/rvben/jira-cli/compare/v0.4.8...v0.4.9) - 2026-09-03
 
 ### Added

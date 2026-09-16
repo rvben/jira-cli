@@ -27,6 +27,7 @@ fn minimal_draft<'a>(
         fix_versions: None,
         assignee: None,
         parent: None,
+        epic: None,
     }
 }
 
@@ -719,6 +720,7 @@ async fn create_issue_posts_correct_payload() {
                 fix_versions: None,
                 assignee: None,
                 parent: None,
+                epic: None,
             },
             &[],
         )
@@ -2150,7 +2152,14 @@ async fn create_issue_sends_custom_fields() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &requests
+            .iter()
+            .find(|request| request.method == "POST" && request.url.path().ends_with("/issue"))
+            .unwrap()
+            .body,
+    )
+    .unwrap();
     assert_eq!(body["fields"]["customfield_10106"], 8);
     assert_eq!(body["fields"]["customfield_10014"], "PROJ-1");
 }
@@ -2310,6 +2319,7 @@ async fn create_issue_v2_assignee_uses_name_field() {
                 fix_versions: None,
                 assignee: Some("ruben"),
                 parent: None,
+                epic: None,
             },
             &[],
         )
@@ -2317,7 +2327,14 @@ async fn create_issue_v2_assignee_uses_name_field() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &requests
+            .iter()
+            .find(|request| request.method == "POST" && request.url.path().ends_with("/issue"))
+            .unwrap()
+            .body,
+    )
+    .unwrap();
     assert_eq!(body["fields"]["assignee"]["name"], "ruben");
     assert!(
         body["fields"]["assignee"].get("accountId").is_none(),
@@ -2352,6 +2369,7 @@ async fn create_issue_v3_assignee_uses_account_id_field() {
                 fix_versions: None,
                 assignee: Some("abc123"),
                 parent: None,
+                epic: None,
             },
             &[],
         )
@@ -2359,7 +2377,14 @@ async fn create_issue_v3_assignee_uses_account_id_field() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &requests
+            .iter()
+            .find(|request| request.method == "POST" && request.url.path().ends_with("/issue"))
+            .unwrap()
+            .body,
+    )
+    .unwrap();
     assert_eq!(body["fields"]["assignee"]["accountId"], "abc123");
     assert!(
         body["fields"]["assignee"].get("name").is_none(),
@@ -2965,6 +2990,14 @@ async fn create_issue_with_parent_includes_parent_field() {
         .mount(&server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": { "issuetype": { "name": "Task" } }
+        })))
+        .mount(&server)
+        .await;
+
     let out = json_out();
     jira_cli::commands::issues::create(
         &client,
@@ -2980,6 +3013,7 @@ async fn create_issue_with_parent_includes_parent_field() {
             fix_versions: None,
             assignee: None,
             parent: Some("PROJ-5"),
+            epic: None,
         },
         None,
         &[],
@@ -2988,7 +3022,14 @@ async fn create_issue_with_parent_includes_parent_field() {
     .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &requests
+            .iter()
+            .find(|request| request.method == "POST" && request.url.path().ends_with("/issue"))
+            .unwrap()
+            .body,
+    )
+    .unwrap();
     assert_eq!(body["fields"]["parent"]["key"], "PROJ-5");
     assert_eq!(body["fields"]["issuetype"]["name"], "Subtask");
 }
@@ -4075,6 +4116,7 @@ async fn create_issue_sends_components() {
                 fix_versions: None,
                 assignee: None,
                 parent: None,
+                epic: None,
             },
             &[],
         )
@@ -4208,6 +4250,7 @@ async fn create_issue_sends_fix_versions() {
                 fix_versions: Some(&["1.2.0", "1.3.0"]),
                 assignee: None,
                 parent: None,
+                epic: None,
             },
             &[],
         )

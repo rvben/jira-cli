@@ -136,6 +136,135 @@ fn error_envelope(stderr: &str) -> serde_json::Value {
     envelope
 }
 
+#[tokio::test]
+async fn epic_create_and_update_work_through_cli_with_json_output() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": {"issuetype": {"name": "Epic"}}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": {"issuetype": {"name": "Story"}}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue"))
+        .and(body_partial_json(
+            serde_json::json!({"fields": {"parent": {"key": "PROJ-9"}}}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "1", "key": "PROJ-1", "self": "http://example.invalid/issue/1"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .and(body_partial_json(
+            serde_json::json!({"fields": {"parent": {"key": "PROJ-9"}}}),
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &[
+            "-o", "json", "issues", "create", "-p", "PROJ", "-t", "Story", "-s", "Story", "--epic",
+            "PROJ-9",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["epic"], "PROJ-9");
+    assert!(result.get("parent").is_none());
+    assert_json_keys_match_schema("issues create", &result, &[]);
+    let output = run_jira_against(
+        &server,
+        &[
+            "-o", "json", "issues", "update", "PROJ-1", "--epic", "PROJ-9",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["updated"], true);
+    assert_json_keys_match_schema("issues update", &result, &[]);
+}
+
+#[tokio::test]
+async fn invalid_priority_returns_json_input_error_with_choices_before_writing() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1/editmeta"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"fields": {
+                "priority": {"allowedValues": [{"id": "3", "name": "3 - Medium"}]}
+            }})),
+        )
+        .mount(&server)
+        .await;
+    let output = run_jira_against(
+        &server,
+        &[
+            "-o",
+            "json",
+            "issues",
+            "update",
+            "PROJ-1",
+            "--priority",
+            "Urgent",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    assert!(output.stdout.is_empty());
+    let envelope = error_envelope(&String::from_utf8(output.stderr).unwrap());
+    assert_eq!(envelope["error"]["kind"], "invalid_input");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("3 - Medium")
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+#[tokio::test]
+async fn epic_and_parent_flags_conflict_without_contacting_jira() {
+    let server = MockServer::start().await;
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues", "create", "-p", "PROJ", "-s", "Story", "--epic", "PROJ-9", "--parent",
+            "PROJ-8",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 #[test]
 fn config_remove_emits_declared_json_contract() {
     let dir = TempDir::new().unwrap();
@@ -1867,6 +1996,14 @@ async fn issues_create_emits_exactly_the_fields_it_declares() {
     Mock::given(method("POST"))
         .and(path("/rest/agile/1.0/sprint/5/issue"))
         .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": { "issuetype": { "name": "Task" } }
+        })))
         .mount(&server)
         .await;
 

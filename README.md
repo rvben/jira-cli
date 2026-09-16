@@ -160,13 +160,16 @@ jira issues show MYAPP-123
 jira issues create --project MYAPP --summary "Fix login bug" --type Bug
 jira issues create --project MYAPP --summary "Add dark mode" --type Story \
   --description "Users want a dark mode option." --priority High --assignee me
-jira issues create --project MYAPP --summary "Write unit tests" \
+jira issues create --project MYAPP --summary "Write unit tests" --type Subtask \
   --parent MYAPP-42                           # creates a subtask
+jira issues create --project MYAPP --summary "Add dark mode" --type Story \
+  --epic MYAPP-10 --priority Medium           # resolves this project's fields
 
 # Update
 jira issues update MYAPP-123 --summary "Updated title"
 jira issues update MYAPP-123 --priority Low --assignee me
 jira issues update MYAPP-123 --field customfield_10016=5
+jira issues update MYAPP-123 --epic MYAPP-10
 
 # Transition
 jira issues list-transitions MYAPP-123
@@ -205,6 +208,25 @@ jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "I
 jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "In Progress" --dry-run
 jira issues bulk-assign --jql 'project = MYAPP AND sprint in openSprints()' --assignee me
 ```
+
+`--epic KEY` resolves the instance's Epic Link custom field or native `parent`
+field using create metadata (edit metadata for updates). `--parent KEY` also
+uses epic linkage when its target is an Epic; other targets retain normal
+parent semantics and require an appropriate issue type. `--epic` and `--parent`
+cannot be combined. Subtasks belong under a Story or Task, not directly under
+an epic. Jira's Cloud and Server/DC metadata formats are supported, including
+[older Server metadata](https://developer.atlassian.com/server/jira/platform/jira-rest-api-examples/).
+
+Priority matching uses the allowed values for the project and issue type, or
+the existing issue's edit metadata. Exact names and IDs take precedence, then
+case-insensitive names, labels with a numeric rank removed (`Medium` matches
+`3 - Medium`), and unique prefixes (`Med`). Invalid or ambiguous input lists
+the valid choices without creating or updating an issue. Creation also resolves
+issue type names case-insensitively or by ID. Omitting `--priority` keeps Jira's
+default. If metadata endpoints are unavailable, names are passed through to
+Jira and validation errors include guidance; explicit `--field` values retain
+their override behavior. Epic linkage requires a discoverable field or native
+Cloud parent support.
 
 ### Projects
 

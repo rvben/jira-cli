@@ -9,6 +9,8 @@ use super::ApiError;
 use super::AuthType;
 use super::types::*;
 
+mod metadata;
+
 pub struct JiraClient {
     http: reqwest::Client,
     base_url: String,
@@ -479,7 +481,7 @@ impl JiraClient {
     ) -> Result<CreateIssueResponse, ApiError> {
         let mut fields = serde_json::json!({
             "project": { "key": draft.project_key },
-            "issuetype": { "name": draft.issue_type },
+            "issuetype": metadata::unresolved_option(draft.issue_type),
             "summary": draft.summary,
         });
 
@@ -487,7 +489,7 @@ impl JiraClient {
             fields["description"] = self.make_body(desc);
         }
         if let Some(p) = draft.priority {
-            fields["priority"] = serde_json::json!({ "name": p });
+            fields["priority"] = metadata::unresolved_option(p);
         }
         if let Some(lbls) = draft.labels
             && !lbls.is_empty()
@@ -507,15 +509,15 @@ impl JiraClient {
         if let Some(id) = draft.assignee {
             fields["assignee"] = self.assignee_payload(id);
         }
-        if let Some(parent_key) = draft.parent {
-            fields["parent"] = serde_json::json!({ "key": parent_key });
-        }
         for (key, value) in custom_fields {
             fields[key] = value.clone();
         }
-
+        let meta = self
+            .prepare_create(&mut fields, draft, custom_fields)
+            .await?;
         self.post("issue", &serde_json::json!({ "fields": fields }))
             .await
+            .map_err(|err| metadata::create_error(err, meta.as_ref(), draft))
     }
 
     /// Log work on an issue.
@@ -619,7 +621,7 @@ impl JiraClient {
             fields.insert("description".into(), self.make_body(d));
         }
         if let Some(p) = update.priority {
-            fields.insert("priority".into(), serde_json::json!({ "name": p }));
+            fields.insert("priority".into(), metadata::unresolved_option(p));
         }
         if let Some(comps) = update.components {
             fields.insert("components".into(), name_object_array(comps));
@@ -640,17 +642,22 @@ impl JiraClient {
         for (k, value) in custom_fields {
             fields.insert(k.clone(), value.clone());
         }
-        if fields.is_empty() {
+        if fields.is_empty() && update.epic.is_none() {
             return Err(ApiError::InvalidInput(
-                "At least one field (--summary, --description, --priority, --components, --fix-versions, --labels, --assignee, or --field) is required"
+                "At least one field (--summary, --description, --priority, --epic, --components, --fix-versions, --labels, --assignee, or --field) is required"
                     .into(),
             ));
         }
+        let mut fields = serde_json::Value::Object(fields);
+        let meta = self
+            .prepare_update(key, &mut fields, update, custom_fields)
+            .await?;
         self.put_empty_response(
             &format!("issue/{key}"),
             &serde_json::json!({ "fields": fields }),
         )
         .await
+        .map_err(|err| metadata::write_error(err, meta.as_ref(), update.priority, update.epic))
     }
 
     /// Build the appropriate body value for a description or comment field.

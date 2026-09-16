@@ -297,7 +297,7 @@ enum IssuesCommand {
         #[arg(short, long)]
         project: String,
 
-        /// Issue type (e.g. Bug, Story, Task)
+        /// Issue type name (case-insensitive) or ID (e.g. Bug, Story, Task)
         #[arg(short = 't', long = "type", default_value = "Task")]
         issue_type: String,
 
@@ -309,7 +309,7 @@ enum IssuesCommand {
         #[arg(short, long)]
         description: Option<String>,
 
-        /// Priority (e.g. High, Medium, Low)
+        /// Priority name or ID (also accepts unique labels/prefixes, e.g. Medium)
         #[arg(long)]
         priority: Option<String>,
 
@@ -333,9 +333,13 @@ enum IssuesCommand {
         #[arg(long)]
         sprint: Option<String>,
 
-        /// Parent issue key (creates a subtask or child issue)
-        #[arg(long)]
+        /// Parent issue key (Epic targets use epic linkage; otherwise a subtask/child)
+        #[arg(long, conflicts_with = "epic")]
         parent: Option<String>,
+
+        /// Add to this epic (automatically resolves Epic Link or native parent)
+        #[arg(long, value_name = "KEY")]
+        epic: Option<String>,
 
         /// Custom field values as key=value pairs (e.g. --field customfield_10016=5)
         #[arg(long, value_parser = parse_field)]
@@ -355,9 +359,13 @@ enum IssuesCommand {
         #[arg(long)]
         description: Option<String>,
 
-        /// New priority (e.g. High, Medium, Low)
+        /// New priority name or ID (also accepts unique labels/prefixes, e.g. Medium)
         #[arg(long)]
         priority: Option<String>,
+
+        /// Add to this epic (automatically resolves Epic Link or native parent)
+        #[arg(long, value_name = "KEY")]
+        epic: Option<String>,
 
         /// Components to set (replaces existing; use "none" alone to clear)
         #[arg(long)]
@@ -938,6 +946,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 assignee,
                 sprint,
                 parent,
+                epic,
                 field,
             } => {
                 let parsed_labels = vec_to_opt_refs(&labels);
@@ -962,6 +971,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     fix_versions: parsed_fix_versions.as_deref(),
                     assignee: assignee_str.as_deref(),
                     parent: parent.as_deref(),
+                    epic: epic.as_deref(),
                 };
                 commands::issues::create(&client, &out, &draft, sprint.as_deref(), &field).await?
             }
@@ -970,6 +980,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 summary,
                 description,
                 priority,
+                epic,
                 components,
                 fix_versions,
                 labels,
@@ -989,6 +1000,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     summary: summary.as_deref(),
                     description: description.as_deref(),
                     priority: priority.as_deref(),
+                    epic: epic.as_deref(),
                     components: parsed_components.as_deref(),
                     fix_versions: parsed_fix_versions.as_deref(),
                     labels: parsed_labels.as_deref(),
@@ -1398,6 +1410,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "id", "type": "string"},
                 {"name": "url", "type": "string"},
                 {"name": "parent", "type": "string", "optional": true, "description": "Present only when --parent was passed"},
+                {"name": "epic", "type": "string", "optional": true, "description": "Present only when --epic was passed"},
                 {"name": "sprintId", "type": "integer", "optional": true, "description": "Present only when --sprint was passed"},
                 {"name": "sprintName", "type": "string", "optional": true, "description": "Present only when --sprint was passed"}
             ]),
