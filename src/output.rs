@@ -96,6 +96,24 @@ pub fn print_error_envelope(kind: &str, message: &str) {
 
 /// Include the result of a completed write when a later step fails.
 pub fn error_envelope_for(err: &(dyn std::error::Error + 'static)) -> serde_json::Value {
+    if let Some(crate::api::ApiError::WithDetails { source, details }) =
+        err.downcast_ref::<crate::api::ApiError>()
+    {
+        let mut envelope = error_envelope_for(source.as_ref());
+        if let (Some(existing), Some(extra)) = (
+            envelope["error"]
+                .get_mut("details")
+                .and_then(serde_json::Value::as_object_mut),
+            details.as_object(),
+        ) {
+            for (key, value) in extra {
+                existing.entry(key).or_insert_with(|| value.clone());
+            }
+        } else {
+            envelope["error"]["details"] = details.clone();
+        }
+        return envelope;
+    }
     let mut envelope = serde_json::json!({"error": {
         "kind": contract_for_dyn(err).kind, "message": err.to_string()
     }});
@@ -110,6 +128,18 @@ pub fn error_envelope_for(err: &(dyn std::error::Error + 'static)) -> serde_json
             "key": key, "url": url, "created": true, "sprintId": sprint_id,
             "sprintMoved": false,
             "recoveryCommand": format!("jira issues move {key} --sprint {sprint_id}")
+        });
+    }
+    if let Some(crate::api::ApiError::BulkFailure {
+        total,
+        succeeded,
+        failed,
+        not_attempted,
+    }) = err.downcast_ref::<crate::api::ApiError>()
+    {
+        envelope["error"]["details"] = serde_json::json!({
+            "total": total, "succeeded": succeeded, "failed": failed,
+            "notAttempted": not_attempted, "resultsStream": "stdout"
         });
     }
     envelope
@@ -136,6 +166,8 @@ pub mod exit_codes {
     pub const CONFLICT: i32 = 7;
     /// A write completed, but a subsequent operation failed. Do not retry the whole command.
     pub const PARTIAL_SUCCESS: i32 = 8;
+    /// One or more bulk items failed; inspect the summary on stdout.
+    pub const BULK_FAILURE: i32 = 9;
 }
 
 /// One failure mode of the CLI, in the form an agent consumes it.
@@ -210,6 +242,13 @@ pub static PARTIAL_SUCCESS: ErrorContract = ErrorContract {
     description: "Issue created but sprint move failed. error.details contains key, url, created, sprintId, sprintMoved, and recoveryCommand. Retry only the move, not the create.",
 };
 
+pub static BULK_FAILURE: ErrorContract = ErrorContract {
+    kind: "bulk_failure",
+    exit_code: exit_codes::BULK_FAILURE,
+    retryable: false,
+    description: "One or more bulk items failed. Stdout contains the complete summary and per-issue results, including failures. Inspect those results instead of retrying the whole command.",
+};
+
 /// Every failure mode the CLI can report, in schema declaration order.
 ///
 /// New entries append, so an agent that indexed into this array keeps seeing
@@ -224,6 +263,7 @@ pub static ALL_ERRORS: &[&ErrorContract] = &[
     &UNEXPECTED_ERROR,
     &CONFLICT,
     &PARTIAL_SUCCESS,
+    &BULK_FAILURE,
 ];
 
 /// The contract row describing how this error is reported.
@@ -237,6 +277,8 @@ pub fn contract_for(err: &crate::api::ApiError) -> &'static ErrorContract {
         ApiError::RateLimit => &RATE_LIMIT,
         ApiError::Conflict(_) => &CONFLICT,
         ApiError::PartialSuccess { .. } => &PARTIAL_SUCCESS,
+        ApiError::BulkFailure { .. } => &BULK_FAILURE,
+        ApiError::WithDetails { source, .. } => contract_for(source),
         ApiError::Api { .. } => &API_ERROR,
         ApiError::Http(_) | ApiError::Other(_) => &UNEXPECTED_ERROR,
     }
@@ -415,6 +457,42 @@ mod tests {
     ///
     /// `Http` is omitted deliberately: it shares `unexpected_error` with
     /// `Other`, and constructing one costs a failed network round trip.
+    #[test]
+    fn structured_details_preserve_underlying_contract_and_message() {
+        let error = ApiError::WithDetails {
+            source: Box::new(ApiError::RateLimit),
+            details: serde_json::json!({"issue":"PROJ-1"}),
+        };
+        assert_eq!(contract_for(&error).kind, "rate_limit");
+        assert_eq!(contract_for(&error).exit_code, exit_codes::RATE_LIMIT);
+        assert!(contract_for(&error).retryable);
+        let envelope = error_envelope_for(&error);
+        assert_eq!(envelope["error"]["kind"], "rate_limit");
+        assert_eq!(envelope["error"]["details"]["issue"], "PROJ-1");
+        assert_eq!(error.to_string(), ApiError::RateLimit.to_string());
+    }
+
+    #[test]
+    fn attaching_context_preserves_partial_success_recovery_details() {
+        let error = ApiError::WithDetails {
+            source: Box::new(ApiError::PartialSuccess {
+                key: "PROJ-1".into(),
+                url: "https://example.invalid/browse/PROJ-1".into(),
+                sprint_id: 8,
+                source: Box::new(ApiError::RateLimit),
+            }),
+            details: serde_json::json!({"context":"additional", "key":"do not override"}),
+        };
+        let envelope = error_envelope_for(&error);
+        assert_eq!(envelope["error"]["details"]["key"], "PROJ-1");
+        assert_eq!(envelope["error"]["details"]["context"], "additional");
+        assert_eq!(
+            envelope["error"]["details"]["recoveryCommand"],
+            "jira issues move PROJ-1 --sprint 8"
+        );
+        assert_eq!(contract_for(&error).exit_code, exit_codes::PARTIAL_SUCCESS);
+    }
+
     fn witnesses() -> Vec<ApiError> {
         vec![
             ApiError::Auth("x".into()),
@@ -422,6 +500,12 @@ mod tests {
             ApiError::InvalidInput("x".into()),
             ApiError::ConfirmationRequired("x".into()),
             ApiError::RateLimit,
+            ApiError::BulkFailure {
+                total: 2,
+                succeeded: 1,
+                failed: 1,
+                not_attempted: 0,
+            },
             ApiError::Conflict("x".into()),
             ApiError::Api {
                 status: 500,

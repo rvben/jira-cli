@@ -1,3 +1,9 @@
+mod bulk;
+mod create_meta;
+pub use create_meta::create_meta;
+mod transitions;
+pub use bulk::{bulk_assign, bulk_transition};
+
 use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize;
@@ -256,6 +262,7 @@ pub async fn create(
     sprint: Option<&str>,
     board: Option<u64>,
     custom_fields: &[(String, serde_json::Value)],
+    dry_run: bool,
 ) -> Result<(), ApiError> {
     let project = custom_fields
         .iter()
@@ -276,6 +283,11 @@ pub async fn create(
         }
         None => None,
     };
+    if dry_run {
+        let prepared = client.preview_create_issue(draft, custom_fields).await?;
+        print_write_preview(out, "create", None, prepared, resolved_sprint.as_ref());
+        return Ok(());
+    }
     let resp = client.create_issue(draft, custom_fields).await?;
     let url = client.browse_url(&resp.key);
 
@@ -309,7 +321,15 @@ pub async fn update(
     key: &str,
     update: &IssueUpdate<'_>,
     custom_fields: &[(String, serde_json::Value)],
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    if dry_run {
+        let prepared = client
+            .preview_update_issue(key, update, custom_fields)
+            .await?;
+        print_write_preview(out, "update", Some(key), prepared, None);
+        return Ok(());
+    }
     client.update_issue(key, update, custom_fields).await?;
     out.print_result(
         &serde_json::json!({ "key": key, "updated": true }),
@@ -325,7 +345,10 @@ pub async fn move_to_sprint(
     key: &str,
     sprint: &str,
     board: Option<u64>,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    // Also confirms that a preview targets an existing issue when the sprint
+    // is supplied by ID or explicitly scoped to a board.
     let project = if board.is_none() && sprint.trim().parse::<u64>().is_err() {
         Some(client.issue_project(key).await?)
     } else {
@@ -335,6 +358,15 @@ pub async fn move_to_sprint(
         .resolve_sprint_scoped(sprint, project.as_deref(), board)
         .await?;
     validate_writable_sprint(&resolved)?;
+    if dry_run {
+        if project.is_none() {
+            client.issue_project(key).await?;
+        }
+        let prepared = serde_json::json!({"fields":null, "metadata":{"issueTypes":null,"fields":null},
+            "warnings":["Jira may apply additional permission or workflow validators when the move is submitted."]});
+        print_write_preview(out, "move", Some(key), prepared, Some(&resolved));
+        return Ok(());
+    }
     client.move_issue_to_sprint(key, resolved.id).await?;
     out.print_result(
         &serde_json::json!({
@@ -345,6 +377,38 @@ pub async fn move_to_sprint(
         &format!("Moved {key} to {} ({})", resolved.name, resolved.id),
     );
     Ok(())
+}
+
+fn print_write_preview(
+    out: &OutputConfig,
+    operation: &str,
+    key: Option<&str>,
+    mut prepared: serde_json::Value,
+    sprint: Option<&crate::api::Sprint>,
+) {
+    prepared["dryRun"] = serde_json::json!(true);
+    prepared["operation"] = serde_json::json!(operation);
+    prepared["key"] = serde_json::json!(key);
+    prepared["sprint"] = serde_json::json!(
+        sprint.map(|s| serde_json::json!({"id":s.id,"name":s.name,"state":s.state}))
+    );
+    let mut steps = match operation {
+        "create" => vec!["create_issue"],
+        "update" => vec!["update_issue"],
+        _ => vec![],
+    };
+    if sprint.is_some() {
+        steps.push("move_to_sprint");
+    }
+    prepared["steps"] = serde_json::json!(steps);
+    // Text previews retain the exact normalized fields, too.
+    out.print_result(
+        &prepared,
+        &format!(
+            "Dry run: no changes made.\n{}",
+            serde_json::to_string_pretty(&prepared).expect("preview JSON")
+        ),
+    );
 }
 
 fn validate_writable_sprint(sprint: &crate::api::Sprint) -> Result<(), ApiError> {
@@ -384,43 +448,17 @@ pub async fn transition(
     key: &str,
     to: &str,
 ) -> Result<(), ApiError> {
-    let transitions = client.get_transitions(key).await?;
-
-    let matched = transitions
-        .iter()
-        .find(|t| t.name.to_lowercase() == to.to_lowercase() || t.id == to);
-
-    match matched {
-        Some(t) => {
-            let name = t.name.clone();
-            let id = t.id.clone();
-            let status =
-                t.to.as_ref()
-                    .map(|tt| tt.name.clone())
-                    .unwrap_or_else(|| name.clone());
-            client.do_transition(key, &id).await?;
-            out.print_result(
-                &serde_json::json!({ "issue": key, "transition": name, "status": status, "id": id }),
-                &format!("Transitioned {key} → {status}"),
-            );
-        }
-        None => {
-            let hint = transitions
-                .iter()
-                .map(|t| format!("  {} ({})", t.name, t.id))
-                .collect::<Vec<_>>()
-                .join("\n");
-            out.print_message(&format!(
-                "Transition '{to}' not found for {key}. Available:\n{hint}"
-            ));
-            out.print_message(&format!(
-                "Tip: `jira issues list-transitions {key}` shows transitions as JSON."
-            ));
-            return Err(ApiError::NotFound(format!(
-                "Transition '{to}' not found for {key}"
-            )));
-        }
-    }
+    let available = client.get_transitions(key).await?;
+    let selected = transitions::resolve(key, to, &available)?;
+    client.do_transition(key, &selected.id).await?;
+    let status = selected
+        .to
+        .as_ref()
+        .map_or(selected.name.as_str(), |s| s.name.as_str());
+    out.print_result(
+        &serde_json::json!({"issue": key, "transition": selected.name, "status": status, "id": selected.id}),
+        &format!("Transitioned {key} to {status}"),
+    );
     Ok(())
 }
 
@@ -707,198 +745,6 @@ pub async fn delete_attachment(
         &serde_json::json!({ "id": id, "deleted": true }),
         &format!("Deleted attachment {id}"),
     );
-    Ok(())
-}
-
-/// Transition all issues matching a JQL query to a new status.
-pub async fn bulk_transition(
-    client: &JiraClient,
-    out: &OutputConfig,
-    jql: &str,
-    to: &str,
-    dry_run: bool,
-) -> Result<(), ApiError> {
-    let issues = fetch_all_issues(client, jql).await?;
-
-    if issues.is_empty() {
-        out.print_message("No issues matched the query.");
-        return Ok(());
-    }
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-
-    for issue in &issues {
-        if dry_run {
-            results.push(serde_json::json!({
-                "key": issue.key,
-                "status": issue.status(),
-                "action": "would transition",
-                "to": to,
-            }));
-            continue;
-        }
-
-        let transitions = client.get_transitions(&issue.key).await?;
-        let matched = transitions.iter().find(|t| {
-            t.name.eq_ignore_ascii_case(to)
-                || t.to
-                    .as_ref()
-                    .is_some_and(|tt| tt.name.eq_ignore_ascii_case(to))
-                || t.id == to
-        });
-
-        match matched {
-            Some(t) => match client.do_transition(&issue.key, &t.id).await {
-                Ok(()) => {
-                    succeeded += 1;
-                    results.push(serde_json::json!({
-                        "key": issue.key,
-                        "from": issue.status(),
-                        "to": to,
-                        "ok": true,
-                    }));
-                }
-                Err(e) => {
-                    failed += 1;
-                    results.push(serde_json::json!({
-                        "key": issue.key,
-                        "ok": false,
-                        "error": e.to_string(),
-                    }));
-                }
-            },
-            None => {
-                failed += 1;
-                results.push(serde_json::json!({
-                    "key": issue.key,
-                    "ok": false,
-                    "error": format!("transition '{to}' not available"),
-                }));
-            }
-        }
-    }
-
-    if out.json {
-        out.print_data(
-            &serde_json::to_string_pretty(&serde_json::json!({
-                "dryRun": dry_run,
-                "total": issues.len(),
-                "succeeded": succeeded,
-                "failed": failed,
-                "issues": results,
-            }))
-            .expect("failed to serialize JSON"),
-        );
-    } else if dry_run {
-        render_issue_table(&issues, out);
-        out.print_message(&format!(
-            "Dry run: {} issues would be transitioned to '{to}'",
-            issues.len()
-        ));
-    } else {
-        out.print_message(&format!(
-            "Transitioned {succeeded}/{} issues to '{to}'{}",
-            issues.len(),
-            if failed > 0 {
-                format!(" ({failed} failed)")
-            } else {
-                String::new()
-            }
-        ));
-    }
-    Ok(())
-}
-
-/// Assign all issues matching a JQL query to a user.
-pub async fn bulk_assign(
-    client: &JiraClient,
-    out: &OutputConfig,
-    jql: &str,
-    assignee: &str,
-    dry_run: bool,
-) -> Result<(), ApiError> {
-    // Resolve "me" once before the loop.
-    let account_id: Option<String> = match assignee {
-        "me" => {
-            let me = client.get_myself().await?;
-            Some(me.account_id)
-        }
-        "none" | "unassign" => None,
-        id => Some(id.to_string()),
-    };
-
-    let issues = fetch_all_issues(client, jql).await?;
-
-    if issues.is_empty() {
-        out.print_message("No issues matched the query.");
-        return Ok(());
-    }
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-
-    for issue in &issues {
-        if dry_run {
-            results.push(serde_json::json!({
-                "key": issue.key,
-                "currentAssignee": issue.fields.assignee.as_ref().map(|a| a.display_name.as_str()),
-                "action": "would assign",
-                "to": assignee,
-            }));
-            continue;
-        }
-
-        match client.assign_issue(&issue.key, account_id.as_deref()).await {
-            Ok(()) => {
-                succeeded += 1;
-                results.push(serde_json::json!({
-                    "key": issue.key,
-                    "assignee": assignee,
-                    "ok": true,
-                }));
-            }
-            Err(e) => {
-                failed += 1;
-                results.push(serde_json::json!({
-                    "key": issue.key,
-                    "ok": false,
-                    "error": e.to_string(),
-                }));
-            }
-        }
-    }
-
-    if out.json {
-        out.print_data(
-            &serde_json::to_string_pretty(&serde_json::json!({
-                "dryRun": dry_run,
-                "total": issues.len(),
-                "succeeded": succeeded,
-                "failed": failed,
-                "issues": results,
-            }))
-            .expect("failed to serialize JSON"),
-        );
-    } else if dry_run {
-        render_issue_table(&issues, out);
-        out.print_message(&format!(
-            "Dry run: {} issues would be assigned to '{assignee}'",
-            issues.len()
-        ));
-    } else {
-        out.print_message(&format!(
-            "Assigned {succeeded}/{} issues to '{assignee}'{}",
-            issues.len(),
-            if failed > 0 {
-                format!(" ({failed} failed)")
-            } else {
-                String::new()
-            }
-        ));
-    }
     Ok(())
 }
 

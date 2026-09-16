@@ -8,6 +8,8 @@ use jira_cli::output::{OutputConfig, exit_codes, machine_readable_errors};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use std::io::IsTerminal;
+mod schema_args;
+use schema_args::arg_type;
 
 /// Parse a comma-separated `--fields` argument into a list of field names.
 fn parse_fields_arg(s: &str) -> Vec<String> {
@@ -291,6 +293,16 @@ enum IssuesCommand {
         open: bool,
     },
 
+    /// Discover issue types, required fields, defaults, options, and epic support
+    CreateMeta {
+        /// Project key or ID
+        #[arg(short, long)]
+        project: String,
+        /// Issue type name or ID (omit to list available types)
+        #[arg(short = 't', long = "type")]
+        issue_type: Option<String>,
+    },
+
     /// Create a new issue
     Create {
         /// Project key
@@ -334,7 +346,7 @@ enum IssuesCommand {
         sprint: Option<String>,
 
         /// Sprint board ID (overrides automatic project scoping)
-        #[arg(long, requires = "sprint")]
+        #[arg(long, id = schema_args::CREATE_BOARD_REQUIREMENT.0, requires = schema_args::CREATE_BOARD_REQUIREMENT.1)]
         board: Option<u64>,
 
         /// Parent issue key (Epic targets use epic linkage; otherwise a subtask/child)
@@ -348,6 +360,9 @@ enum IssuesCommand {
         /// Custom field values as key=value pairs (e.g. --field customfield_10016=5)
         #[arg(long, value_parser = parse_field)]
         field: Vec<(String, serde_json::Value)>,
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Update fields on an existing issue
@@ -394,6 +409,9 @@ enum IssuesCommand {
         /// Custom field values as key=value pairs (e.g. --field customfield_10016=5)
         #[arg(long, value_parser = parse_field)]
         field: Vec<(String, serde_json::Value)>,
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Move an issue to a sprint
@@ -408,6 +426,9 @@ enum IssuesCommand {
         /// Sprint board ID (overrides automatic project scoping)
         #[arg(long)]
         board: Option<u64>,
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Add a comment to an issue
@@ -644,8 +665,12 @@ enum UsersCommand {
 
 #[derive(Subcommand)]
 enum BoardsCommand {
-    /// List all boards
-    List,
+    /// List boards, optionally scoped to a project
+    List {
+        /// Project key or ID
+        #[arg(short, long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -656,9 +681,13 @@ enum SprintsCommand {
         #[arg(long)]
         board: Option<String>,
 
-        /// Filter by state: active (default), closed, future, or all
-        #[arg(long, default_value = "active")]
-        state: String,
+        /// Project key or ID (intersects with --board)
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Sprint states (repeat or comma-separate): active, closed, future, all
+        #[arg(long, default_value = "active", value_delimiter = ',', value_parser = ["active", "closed", "future", "all"])]
+        state: Vec<String>,
     },
 }
 
@@ -755,7 +784,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 "version": env!("CARGO_PKG_VERSION"),
                 "clispec": "0.3",
                 "output": ["text", "json"],
-                "features": ["doctor", "command-scoped schema", "pagination", "field selection", "read-only guard"]
+                "features": ["doctor", "command-scoped schema", "pagination", "field selection", "read-only guard", "create metadata", "write previews", "project sprint discovery", "bulk outcome reporting"]
             });
             if out.json {
                 println!("{}", serde_json::to_string_pretty(&capabilities)?);
@@ -844,9 +873,9 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             &cli.command,
             Command::Issues(cmd) if matches!(
                 cmd.as_ref(),
-                IssuesCommand::Create { .. }
-                    | IssuesCommand::Update { .. }
-                    | IssuesCommand::Move { .. }
+                IssuesCommand::Create { dry_run: false, .. }
+                    | IssuesCommand::Update { dry_run: false, .. }
+                    | IssuesCommand::Move { dry_run: false, .. }
                     | IssuesCommand::Comment { .. }
                     | IssuesCommand::Transition { .. }
                     | IssuesCommand::Assign { .. }
@@ -855,8 +884,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     | IssuesCommand::LogWork { .. }
                     | IssuesCommand::Attach { .. }
                     | IssuesCommand::DeleteAttachment { .. }
-                    | IssuesCommand::BulkTransition { .. }
-                    | IssuesCommand::BulkAssign { .. }
+                    | IssuesCommand::BulkTransition { dry_run: false, .. }
+                    | IssuesCommand::BulkAssign { dry_run: false, .. }
             )
         );
         if is_write {
@@ -875,7 +904,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         cfg.api_version,
         cfg.cloud_id.as_deref(),
         &cfg.token_kind,
-    )?;
+    )?
+    .with_read_only(cfg.read_only);
 
     match cli.command {
         Command::Issues(cmd) => match *cmd {
@@ -946,7 +976,15 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             IssuesCommand::Show { key, open } => {
                 commands::issues::show(&client, &out, &key, open).await?
             }
+            IssuesCommand::CreateMeta {
+                project,
+                issue_type,
+            } => {
+                commands::issues::create_meta(&client, &out, &project, issue_type.as_deref())
+                    .await?
+            }
             IssuesCommand::Create {
+                dry_run,
                 project,
                 issue_type,
                 summary,
@@ -981,10 +1019,19 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     parent: parent.as_deref(),
                     epic: epic.as_deref(),
                 };
-                commands::issues::create(&client, &out, &draft, sprint.as_deref(), board, &field)
-                    .await?
+                commands::issues::create(
+                    &client,
+                    &out,
+                    &draft,
+                    sprint.as_deref(),
+                    board,
+                    &field,
+                    dry_run,
+                )
+                .await?
             }
             IssuesCommand::Update {
+                dry_run,
                 key,
                 summary,
                 description,
@@ -1017,10 +1064,16 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     labels: parsed_labels.as_deref(),
                     assignee: assignee_ref,
                 };
-                commands::issues::update(&client, &out, &key, &update, &field).await?
+                commands::issues::update(&client, &out, &key, &update, &field, dry_run).await?
             }
-            IssuesCommand::Move { key, sprint, board } => {
-                commands::issues::move_to_sprint(&client, &out, &key, &sprint, board).await?
+            IssuesCommand::Move {
+                key,
+                sprint,
+                board,
+                dry_run,
+            } => {
+                commands::issues::move_to_sprint(&client, &out, &key, &sprint, board, dry_run)
+                    .await?
             }
             IssuesCommand::Comment { key, body } => {
                 commands::issues::comment(&client, &out, &key, &body).await?
@@ -1124,18 +1177,31 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         },
 
         Command::Boards(cmd) => match cmd {
-            BoardsCommand::List => commands::boards::list(&client, &out).await?,
+            BoardsCommand::List { project } => {
+                commands::boards::list(&client, &out, project.as_deref()).await?
+            }
         },
 
         Command::Sprints(cmd) => match cmd {
-            SprintsCommand::List { board, state } => {
-                // "all" is a special token meaning no state filter.
-                let state_filter = if state == "all" {
+            SprintsCommand::List {
+                board,
+                state,
+                project,
+            } => {
+                let joined = state.join(",");
+                let state_filter = if state.iter().any(|s| s == "all") {
                     None
                 } else {
-                    Some(state.as_str())
+                    Some(joined.as_str())
                 };
-                commands::sprints::list(&client, &out, board.as_deref(), state_filter).await?
+                commands::sprints::list(
+                    &client,
+                    &out,
+                    board.as_deref(),
+                    state_filter,
+                    project.as_deref(),
+                )
+                .await?
             }
         },
 
@@ -1279,6 +1345,7 @@ fn schema_json() -> serde_json::Value {
         ("issues comments", false),
         ("issues show", false),
         ("issues create", true),
+        ("issues create-meta", false),
         ("issues update", true),
         ("issues move", true),
         ("issues comment", true),
@@ -1376,7 +1443,26 @@ fn schema_json() -> serde_json::Value {
         {"name": "created", "type": "string", "nullable": true},
         {"name": "updated", "type": "string", "nullable": true}
     ]);
+    let issue_type_fields = serde_json::json!([
+        {"name":"id","type":"string","nullable":true},
+        {"name":"name","type":"string"},
+        {"name":"subtask","type":"boolean"},
+        {"name":"hierarchyLevel","type":"integer","nullable":true}
+    ]);
     let output_fields: HashMap<&str, serde_json::Value> = [
+        ("issues create-meta", serde_json::json!([
+            {"name":"project","type":"string"},
+            {"name":"issueTypes","type":"object[]","fields":issue_type_fields},
+            {"name":"issueType","type":"object","nullable":true,"fields":issue_type_fields},
+            {"name":"fields","type":"object","nullable":true,"description":"Map keyed by Jira field ID; definitions retain required, hasDefaultValue, defaultValue, allowedValues, schema and other Jira properties. Null when unrequested or unavailable; null allowedValues means unknown, [] means none."},
+            {"name":"epic","type":"object","nullable":true,"fields":[
+                {"name":"status","type":"string","description":"available, unavailable, ambiguous, or not_applicable; based on the selected create screen"},
+                {"name":"field","type":"string","nullable":true},
+                {"name":"mechanism","type":"string","nullable":true},
+                {"name":"candidates","type":"string[]"}
+            ]},
+            {"name":"warnings","type":"string[]"}
+        ])),
         ("issues list", issue_summary_fields.clone()),
         ("issues mine", issue_summary_fields.clone()),
         ("search", issue_summary_fields),
@@ -1562,13 +1648,24 @@ fn schema_json() -> serde_json::Value {
                 {"name": "total", "type": "integer", "description": "Issues the JQL query matched"},
                 {"name": "succeeded", "type": "integer", "description": "Always 0 on a --dry-run, which changes nothing"},
                 {"name": "failed", "type": "integer"},
+                {"name": "notAttempted", "type": "integer", "description":"Unprocessed issues after a session, rate limit, or connection failure"},
+                {"name": "ready", "type": "integer", "description":"Preview entries that passed available checks; bulk assign resolves the assignee but does not check per-issue assignability. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
                 {"name": "issues", "type": "object[]", "description": "One entry per matched issue", "fields": [
                     {"name": "key", "type": "string"},
+                    {"name": "status", "type": "string", "optional":true, "description":"Current status on a dry run"},
+                    {"name": "transitionId", "type": "string", "optional":true, "description":"Resolved transition ID on successful writes and previews"},
+                    {"name": "destinationStatus", "type": "string", "nullable":true, "optional":true},
                     {"name": "from", "type": "string", "optional": true, "description": "Status before the transition; present only on a successful transition"},
                     {"name": "to", "type": "string", "optional": true},
                     {"name": "action", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
                     {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
-                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"}
+                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"},
+                    {"name": "errorKind", "type": "string", "optional": true},
+                    {"name": "phase", "type": "string", "optional":true, "description":"lookup or write, on failed requests"},
+                    {"name": "outcome", "type": "string", "optional":true, "description":"failed or unknown; unknown means a write may have been applied, so inspect issue state before retrying"},
+                    {"name": "retryable", "type": "boolean", "optional": true, "description":"Error category retryability; inspect issue state before retrying a write with an uncertain result"},
+                    {"name": "errorDetails", "type": "object", "optional": true, "description":"Context whose keys depend on errorKind"},
+                    {"name": "notAttempted", "type": "boolean", "optional": true}
                 ]}
             ]),
         ),
@@ -1579,6 +1676,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "total", "type": "integer", "description": "Issues the JQL query matched"},
                 {"name": "succeeded", "type": "integer", "description": "Always 0 on a --dry-run, which changes nothing"},
                 {"name": "failed", "type": "integer"},
+                {"name": "notAttempted", "type": "integer", "description":"Unprocessed issues after a session, rate limit, or connection failure"},
+                {"name": "ready", "type": "integer", "description":"Preview entries that passed available checks; bulk assign resolves the assignee but does not check per-issue assignability. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
                 {"name": "issues", "type": "object[]", "description": "One entry per matched issue", "fields": [
                     {"name": "key", "type": "string"},
                     {"name": "currentAssignee", "type": "string", "nullable": true, "optional": true, "description": "Present only on a --dry-run entry; null when the issue is unassigned"},
@@ -1586,7 +1685,13 @@ fn schema_json() -> serde_json::Value {
                     {"name": "to", "type": "string", "optional": true},
                     {"name": "assignee", "type": "string", "optional": true, "description": "Present only on a successful assignment"},
                     {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
-                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"}
+                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"},
+                    {"name": "errorKind", "type": "string", "optional": true},
+                    {"name": "phase", "type": "string", "optional":true, "description":"lookup or write, on failed requests"},
+                    {"name": "outcome", "type": "string", "optional":true, "description":"failed or unknown; unknown means a write may have been applied, so inspect issue state before retrying"},
+                    {"name": "retryable", "type": "boolean", "optional": true, "description":"Error category retryability; inspect issue state before retrying a write with an uncertain result"},
+                    {"name": "errorDetails", "type": "object", "optional": true, "description":"Context whose keys depend on errorKind"},
+                    {"name": "notAttempted", "type": "boolean", "optional": true}
                 ]}
             ]),
         ),
@@ -1640,7 +1745,10 @@ fn schema_json() -> serde_json::Value {
                 {"name": "name", "type": "string"},
                 {"name": "state", "type": "string"},
                 {"name": "boardId", "type": "integer"},
-                {"name": "boardName", "type": "string"},
+                {"name": "boardName", "type": "string", "description":"Origin board when matched, otherwise the lowest matched board ID"},
+                {"name": "boards", "type": "object[]", "description":"All matched boards that contain this sprint, ordered by ID", "fields":[
+                    {"name":"id","type":"integer"}, {"name":"name","type":"string"}
+                ]},
                 {"name": "startDate", "type": "string", "nullable": true},
                 {"name": "endDate", "type": "string", "nullable": true},
                 {"name": "completeDate", "type": "string", "nullable": true, "description": "Set once the sprint is closed"}
@@ -1809,7 +1917,8 @@ fn schema_json() -> serde_json::Value {
     .copied()
     .collect();
 
-    let root = Cli::command();
+    let mut root = Cli::command();
+    root.build();
     let commands = walk_commands(
         &root,
         &[],
@@ -1880,7 +1989,7 @@ fn schema_json() -> serde_json::Value {
         // write access, which is worth nothing if the agent cannot see that it
         // is on or which commands it stops.
         "read_only": {
-            "description": "Blocks every command that writes to Jira. Local-only writes (the config file, downloaded attachments) are unaffected.",
+            "description": "Blocks writes to Jira; --dry-run previews remain available. Local-only writes (the config file, downloaded attachments) are unaffected.",
             "env": "JIRA_READ_ONLY",
             "config_key": "read_only",
             "values_on": jira_cli::config::TRUTHY,
@@ -1923,6 +2032,8 @@ fn enrich_v0_3(schema: &mut serde_json::Value) {
                 | "issues link"
                 | "issues log-work"
                 | "issues attach"
+                | "issues transition"
+                | "issues bulk-transition"
         );
         object.insert(
             "effects".into(),
@@ -1975,6 +2086,13 @@ fn enrich_v0_3(schema: &mut serde_json::Value) {
         {
             normalize_output_fields(fields);
         }
+        if let Some(fields) = object
+            .get_mut("x-dry-run")
+            .and_then(|v| v.get_mut("output_fields"))
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            normalize_output_fields(fields);
+        }
         if !object.contains_key("output_fields") && !object.contains_key("stdout_schema") {
             object.insert("stdout_schema".into(), serde_json::json!({}));
         }
@@ -2008,6 +2126,13 @@ fn normalize_output_fields(fields: &mut [serde_json::Value]) {
         }
         if let Some(nested) = object
             .get_mut("fields")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            normalize_output_fields(nested);
+        }
+        if let Some(nested) = object
+            .get_mut("items")
+            .and_then(|v| v.get_mut("fields"))
             .and_then(serde_json::Value::as_array_mut)
         {
             normalize_output_fields(nested);
@@ -2099,6 +2224,7 @@ fn walk_commands(
             if let Some(help) = a.get_help() {
                 arg_obj.insert("description".into(), serde_json::json!(help.to_string()));
             }
+            schema_args::enrich(cmd, &base_path, a, &mut arg_obj);
             all_args.push(serde_json::Value::Object(arg_obj));
         }
 
@@ -2114,24 +2240,55 @@ fn walk_commands(
             }
             arg_obj.insert("type".into(), serde_json::json!(arg_type(a)));
             arg_obj.insert("required".into(), serde_json::json!(a.is_required_set()));
-            if !a.get_default_values().is_empty() {
-                let dv = a.get_default_values()[0].to_string_lossy();
-                if let Ok(n) = dv.parse::<i64>() {
-                    arg_obj.insert("default".into(), serde_json::json!(n));
-                } else {
-                    arg_obj.insert("default".into(), serde_json::json!(dv.as_ref()));
-                }
-            }
             if let Some(help) = a.get_help() {
                 let help_str = help.to_string();
                 if !help_str.is_empty() {
                     arg_obj.insert("description".into(), serde_json::json!(help_str));
                 }
             }
+            schema_args::enrich(cmd, &base_path, a, &mut arg_obj);
             all_args.push(serde_json::Value::Object(arg_obj));
         }
 
         entry.insert("args".into(), serde_json::json!(all_args));
+
+        if matches!(
+            base_path.as_str(),
+            "issues create" | "issues update" | "issues move"
+        ) {
+            entry.insert("x-dry-run".into(), serde_json::json!({
+                "arg":"--dry-run", "effects":"read_only", "output_fields":write_preview_fields(),
+                "description":"Uses the same normalization and preflight checks as the real write; no issue or sprint writes are sent. Server-only validators may still reject a later write."
+            }));
+        } else if matches!(
+            base_path.as_str(),
+            "issues bulk-transition" | "issues bulk-assign"
+        ) {
+            entry.insert("x-dry-run".into(), serde_json::json!({"arg":"--dry-run", "effects":"read_only", "output_fields":output_fields[base_path.as_str()]}));
+            entry.insert("x-output-on-error".into(), serde_json::json!({"kind":"bulk_failure", "exit_code":9, "stream":"stdout", "description":"Parse the full summary even on failure. Never blindly replay the entire bulk write."}));
+        }
+
+        if matches!(
+            base_path.as_str(),
+            "issues create" | "issues update" | "issues move"
+        ) {
+            entry.insert(
+                "stdout_schema".into(),
+                serde_json::json!({"anyOf":[
+                    schema_args::output_schema(&output_fields[base_path.as_str()]),
+                    schema_args::output_schema(&write_preview_fields())
+                ]}),
+            );
+        } else if base_path == "sprints list" {
+            entry.insert("stdout_schema".into(), serde_json::json!({
+                "type":"object", "required":["total","sprints","warnings"], "additionalProperties":false,
+                "properties":{
+                    "total":{"type":"integer"},
+                    "sprints":{"type":"array","items":schema_args::output_schema(&output_fields[base_path.as_str()])},
+                    "warnings":{"type":"array","items":{"type":"string"}}
+                }
+            }));
+        }
 
         // output_fields
         if let Some(fields) = output_fields.get(base_path.as_str()) {
@@ -2164,22 +2321,24 @@ fn walk_commands(
     }
 }
 
-/// Infer the type string for a clap argument.
-fn arg_type(a: &clap::Arg) -> &'static str {
-    use clap::ArgAction;
-    match a.get_action() {
-        ArgAction::SetTrue | ArgAction::SetFalse => "boolean",
-        ArgAction::Count => "integer",
-        ArgAction::Append => "string[]",
-        _ => {
-            // Numeric-looking IDs (limit/offset style args).
-            let id = a.get_id().as_str();
-            if id == "limit" || id == "offset" {
-                return "integer";
-            }
-            "string"
-        }
-    }
+fn write_preview_fields() -> serde_json::Value {
+    let mut fields = serde_json::json!([
+        {"name":"dryRun","type":"boolean"},
+        {"name":"operation","type":"string"},
+        {"name":"key","type":"string","nullable":true,"description":"Null for create: no issue has been created"},
+        {"name":"fields","type":"object","nullable":true,"description":"Exact normalized Jira fields payload; keys depend on requested and custom fields. Null for move."},
+        {"name":"sprint","type":"object","nullable":true,"fields":[
+            {"name":"id","type":"integer"},{"name":"name","type":"string"},{"name":"state","type":"string"}
+        ]},
+        {"name":"metadata","type":"object","fields":[
+            {"name":"issueTypes","type":"boolean","nullable":true,"description":"True when issue type metadata was available; null when not needed"},
+            {"name":"fields","type":"boolean","nullable":true,"description":"True when field metadata was available; null for move"}
+        ]},
+        {"name":"steps","type":"string[]","description":"Ordered operations: create_issue, update_issue, move_to_sprint. A move after create applies to the newly created issue."},
+        {"name":"warnings","type":"string[]"}
+    ]);
+    normalize_output_fields(fields.as_array_mut().unwrap());
+    fields
 }
 
 fn handle_completions(

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 mod validation;
 use validation::{normalize_named_arrays, validate_required};
 
-type Fields = BTreeMap<String, Value>;
+pub(super) type Fields = BTreeMap<String, Value>;
 const EPIC_LINK_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-link";
 
 #[derive(Clone, Debug, Deserialize)]
@@ -43,7 +43,7 @@ impl IssueType {
 
 pub(super) struct CreateMetadata {
     issue_type: IssueType,
-    fields: Option<Fields>,
+    pub(super) fields: Option<Fields>,
     subtask_types: Vec<Value>,
 }
 
@@ -120,6 +120,7 @@ impl JiraClient {
     async fn legacy_create_metadata(
         &self,
         project: &str,
+        include_fields: bool,
     ) -> Result<Option<Vec<IssueType>>, ApiError> {
         let parameter = if project.bytes().all(|b| b.is_ascii_digit()) {
             "projectIds"
@@ -132,10 +133,13 @@ impl JiraClient {
                 .query()
                 .unwrap()
                 .into();
+        let expand = if include_fields {
+            "projects.issuetypes.fields"
+        } else {
+            "projects.issuetypes"
+        };
         let Some(meta) = self
-            .optional_metadata(&format!(
-                "issue/createmeta?{project_query}&expand=projects.issuetypes.fields"
-            ))
+            .optional_metadata(&format!("issue/createmeta?{project_query}&expand={expand}"))
             .await?
         else {
             return Ok(None);
@@ -152,8 +156,33 @@ impl JiraClient {
                     || p["id"].as_str() == Some(project)
             })
             .map(|p| p["issuetypes"].clone())
-            .unwrap_or(json!([]));
+            .ok_or_else(|| ApiError::NotFound(format!("Project {project:?} is unavailable or you lack permission to create issues in it")))?;
         decode(types).map(Some)
+    }
+
+    async fn create_types(
+        &self,
+        project: &str,
+        include_fields: bool,
+    ) -> Result<Option<(Vec<IssueType>, bool)>, ApiError> {
+        if project.trim().is_empty() {
+            return Err(ApiError::InvalidInput("Project must not be empty".into()));
+        }
+        let path = format!("issue/createmeta/{}/issuetypes", encode_segment(project));
+        let (types, legacy): (Vec<IssueType>, bool) =
+            match self.metadata_pages(&path, "issueTypes").await? {
+                Some(types) => (decode(json!(types))?, false),
+                None => match self.legacy_create_metadata(project, include_fields).await? {
+                    Some(types) => (types, true),
+                    None => return Ok(None),
+                },
+            };
+        if types.is_empty() {
+            return Err(ApiError::NotFound(format!(
+                "No creatable issue types in project {project:?}; check the project and your create permission"
+            )));
+        }
+        Ok(Some((types, legacy)))
     }
 
     pub(super) async fn create_metadata(
@@ -161,14 +190,22 @@ impl JiraClient {
         project: &str,
         input: &str,
     ) -> Result<Option<CreateMetadata>, ApiError> {
-        let path = format!("issue/createmeta/{}/issuetypes", encode_segment(project));
-        let types: Vec<IssueType> = match self.metadata_pages(&path, "issueTypes").await? {
-            Some(types) => decode(json!(types))?,
-            None => match self.legacy_create_metadata(project).await? {
-                Some(types) => types,
-                None => return Ok(None),
-            },
+        let Some((types, legacy)) = self.create_types(project, true).await? else {
+            return Ok(None);
         };
+        self.select_create_metadata(project, input, &types, legacy)
+            .await
+            .map(Some)
+    }
+
+    async fn select_create_metadata(
+        &self,
+        project: &str,
+        input: &str,
+        types: &[IssueType],
+        legacy: bool,
+    ) -> Result<CreateMetadata, ApiError> {
+        let path = format!("issue/createmeta/{}/issuetypes", encode_segment(project));
         let options = types
             .iter()
             .map(|t| json!({"id": t.id, "name": t.name}))
@@ -182,6 +219,8 @@ impl JiraClient {
         let issue_type = types[selected].clone();
         let fields = if let Some(fields) = &issue_type.fields {
             Some(fields.clone())
+        } else if legacy {
+            None
         } else {
             match self
                 .metadata_pages(
@@ -206,18 +245,95 @@ impl JiraClient {
                         })
                         .collect::<Result<_, ApiError>>()?,
                 ),
-                None => self
-                    .legacy_create_metadata(project)
-                    .await?
-                    .and_then(|types| types.into_iter().find(|t| t.id == issue_type.id))
-                    .and_then(|t| t.fields),
+                None => {
+                    // The modern type response already established this project
+                    // and type. Legacy omission only means fields are unavailable.
+                    let fallback = match self.legacy_create_metadata(project, true).await {
+                        Ok(types) => types,
+                        Err(ApiError::NotFound(_)) => None,
+                        Err(error) => return Err(error),
+                    };
+                    fallback
+                        .and_then(|types| types.into_iter().find(|t| t.id == issue_type.id))
+                        .and_then(|t| t.fields)
+                }
             }
         };
-        Ok(Some(CreateMetadata {
+        Ok(CreateMetadata {
             issue_type,
             fields,
             subtask_types,
-        }))
+        })
+    }
+
+    /// Discover the create screen, retaining instance-specific field definitions.
+    /// Omitting the type lists available types without selecting a default.
+    pub async fn issue_create_metadata(
+        &self,
+        project: &str,
+        input: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let Some((types, legacy)) = self.create_types(project, input.is_some()).await? else {
+            self.get_project(project).await?;
+            return Err(ApiError::WithDetails {
+                source: Box::new(ApiError::NotFound("Create metadata is unavailable on this Jira instance; use `jira fields list` for global field discovery".into())),
+                details: json!({"reason":"unsupported", "project":project, "hint":"jira fields list"}),
+            });
+        };
+        let selected = match input {
+            Some(input) => Some(
+                self.select_create_metadata(project, input, &types, legacy)
+                    .await?,
+            ),
+            None => None,
+        };
+        let mut warnings = Vec::new();
+        let fields = selected
+            .as_ref()
+            .and_then(|m| m.fields.as_ref())
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|(id, definition)| {
+                        let mut definition = definition.clone();
+                        if let Some(object) = definition.as_object_mut() {
+                            object.entry("allowedValues").or_insert(Value::Null);
+                            object.entry("defaultValue").or_insert(Value::Null);
+                        }
+                        (id.clone(), definition)
+                    })
+                    .collect::<Fields>()
+            });
+        if selected.is_some() && fields.is_none() {
+            warnings.push("Field metadata is unavailable: required fields, defaults, allowed values, and epic support could not be discovered.");
+        }
+        let epic = selected.as_ref().map(|m| {
+            let candidates = m
+                .fields
+                .as_ref()
+                .map(|fields| epic_candidates(fields, self.api_version))
+                .unwrap_or_default();
+            let status = if !m.issue_type.can_belong_to_epic() {
+                "not_applicable"
+            } else {
+                match candidates.len() {
+                    1 => "available",
+                    0 => "unavailable",
+                    _ => "ambiguous",
+                }
+            };
+            let field = if status == "available" {
+                Some(candidates[0].as_str())
+            } else {
+                None
+            };
+            let mechanism = field.map(|f| if f == "parent" { "parent" } else { "epic_link" });
+            json!({"status":status, "field":field, "mechanism":mechanism, "candidates":candidates})
+        });
+        Ok(
+            json!({"project":project, "issueTypes":types.iter().map(type_json).collect::<Vec<_>>(),
+            "issueType":selected.as_ref().map(|m| type_json(&m.issue_type)), "fields":fields, "epic":epic, "warnings":warnings}),
+        )
     }
 
     pub(super) async fn issue_type_for_link(&self, key: &str) -> Result<IssueType, ApiError> {
@@ -228,16 +344,8 @@ impl JiraClient {
 
     async fn epic_field(&self, fields: Option<&Fields>) -> Result<String, ApiError> {
         if let Some(fields) = fields {
-            // Cloud has retired Epic Link. DC can expose parent for subtasks
-            // alongside Epic Link, so prefer the custom field there.
-            if self.api_version >= 3 && fields.contains_key("parent") {
-                return Ok("parent".into());
-            }
-            if let Some(id) = find_epic_field(fields)? {
+            if let Some(id) = choose_epic_field(epic_candidates(fields, self.api_version))? {
                 return Ok(id);
-            }
-            if fields.contains_key("parent") {
-                return Ok("parent".into());
             }
         } else if self.api_version >= 3 {
             return Ok("parent".into());
@@ -294,6 +402,11 @@ impl JiraClient {
         if draft.parent.is_some() && draft.epic.is_some() {
             return Err(ApiError::InvalidInput(
                 "--parent and --epic cannot be used together".into(),
+            ));
+        }
+        if draft.parent.is_some() && fields.get("parent").is_some() {
+            return Err(ApiError::InvalidInput(
+                "--parent conflicts with --field parent; choose one source".into(),
             ));
         }
         let input = fields["issuetype"]["id"]
@@ -473,7 +586,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ApiError> {
         .map_err(|err| ApiError::Other(format!("Invalid Jira metadata: {err}")))
 }
 
-fn encode_segment(value: &str) -> String {
+pub(super) fn encode_segment(value: &str) -> String {
     let mut url = reqwest::Url::parse("http://localhost").expect("static URL");
     url.path_segments_mut()
         .expect("URL supports paths")
@@ -498,29 +611,48 @@ pub(super) fn unresolved_option(input: &str) -> Value {
     }
 }
 
-fn find_epic_field(fields: &Fields) -> Result<Option<String>, ApiError> {
+fn epic_link_candidates(fields: &Fields) -> Vec<String> {
     let schema_matches = fields
         .iter()
         .filter(|(_, f)| f["schema"]["custom"] == EPIC_LINK_SCHEMA)
-        .map(|(id, _)| id)
+        .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
-    let matches = if schema_matches.is_empty() {
+    if schema_matches.is_empty() {
         fields
             .iter()
             .filter(|(id, f)| is_epic_field(id, f))
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
+            .map(|(id, _)| id.clone())
+            .collect()
     } else {
         schema_matches
-    };
-    match matches.as_slice() {
+    }
+}
+
+fn epic_candidates(fields: &Fields, api_version: u8) -> Vec<String> {
+    if api_version >= 3 && fields.contains_key("parent") {
+        return vec!["parent".into()];
+    }
+    let candidates = epic_link_candidates(fields);
+    if candidates.is_empty() && fields.contains_key("parent") {
+        vec!["parent".into()]
+    } else {
+        candidates
+    }
+}
+
+fn choose_epic_field(candidates: Vec<String>) -> Result<Option<String>, ApiError> {
+    match candidates.as_slice() {
         [] => Ok(None),
-        [id] => Ok(Some((*id).clone())),
+        [id] => Ok(Some(id.clone())),
         _ => Err(ApiError::InvalidInput(format!(
             "Ambiguous Epic Link fields: {}; use --field <ID>=<EPIC> to choose one",
-            matches.into_iter().cloned().collect::<Vec<_>>().join(", ")
+            candidates.join(", ")
         ))),
     }
+}
+
+fn find_epic_field(fields: &Fields) -> Result<Option<String>, ApiError> {
+    choose_epic_field(epic_link_candidates(fields))
 }
 
 fn is_epic_field(id: &str, field: &Value) -> bool {
@@ -708,4 +840,9 @@ pub(super) fn write_error(
     } else {
         err
     }
+}
+
+fn type_json(t: &IssueType) -> Value {
+    json!({"id": if t.id.is_empty() { None } else { Some(&t.id) }, "name": t.name,
+        "subtask": t.is_subtask(), "hierarchyLevel": t.hierarchy_level})
 }

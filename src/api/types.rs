@@ -234,6 +234,13 @@ pub struct Board {
     pub board_type: String,
 }
 
+impl Board {
+    /// Unknown board types may support sprints; let the Agile API decide.
+    pub(crate) fn may_support_sprints(&self) -> bool {
+        !self.board_type.eq_ignore_ascii_case("kanban")
+    }
+}
+
 /// Paginated board response from the Agile API.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

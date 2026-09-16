@@ -2486,6 +2486,7 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "issues comment",
     "issues comments",
     "issues create",
+    "issues create-meta",
     "issues delete-attachment",
     "issues download-attachment",
     "issues link",
@@ -2575,6 +2576,38 @@ fn every_command_declaring_output_fields_has_a_conformance_test() {
 /// means a new opaque object fails this test until someone decides which it is.
 const OBJECTS_WITHOUT_A_DECLARED_SHAPE: &[(&str, &str)] = &[
     (
+        "issues create.x-dry-run.fields",
+        "payload keys depend on the requested and custom fields",
+    ),
+    (
+        "issues update.x-dry-run.fields",
+        "payload keys depend on the requested and custom fields",
+    ),
+    (
+        "issues move.x-dry-run.fields",
+        "common preview shape; move does not carry a fields payload",
+    ),
+    (
+        "issues bulk-assign.x-dry-run.issues.errorDetails",
+        "context keys depend on the per-issue error kind",
+    ),
+    (
+        "issues bulk-transition.x-dry-run.issues.errorDetails",
+        "context keys depend on the per-issue error kind",
+    ),
+    (
+        "issues create-meta.fields",
+        "field IDs and metadata definitions depend on the Jira create screen",
+    ),
+    (
+        "issues bulk-assign.issues.errorDetails",
+        "context keys depend on the per-issue error kind",
+    ),
+    (
+        "issues bulk-transition.issues.errorDetails",
+        "context keys depend on the per-issue error kind",
+    ),
+    (
         "auth login.example.profiles",
         "keyed by profile name, chosen by the user",
     ),
@@ -2616,6 +2649,13 @@ fn every_declared_object_either_has_a_shape_or_a_stated_reason() {
             continue;
         };
         collect(command["name"].as_str().unwrap(), fields, &mut opaque);
+        if let Some(preview_fields) = command["x-dry-run"]["output_fields"].as_array() {
+            collect(
+                &format!("{}.x-dry-run", command["name"].as_str().unwrap()),
+                preview_fields,
+                &mut opaque,
+            );
+        }
     }
     opaque.sort();
 
@@ -3163,3 +3203,6 @@ fn schema_exposes_sprint_scope_epic_clearing_and_partial_success_recovery() {
         );
     }
 }
+
+#[path = "cli/usability.rs"]
+mod usability;

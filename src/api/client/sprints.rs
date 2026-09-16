@@ -7,7 +7,7 @@ impl JiraClient {
         self.resolve_sprint_scoped(specifier, None, None).await
     }
 
-    /// Names are scoped to a project's Scrum boards unless an explicit board
+    /// Names are scoped to a project's sprint-capable boards unless an explicit board
     /// overrides that scope. Numeric sprint IDs are already globally unique;
     /// when a board is supplied, also verify membership on that board.
     pub async fn resolve_sprint_scoped(
@@ -44,10 +44,10 @@ impl JiraClient {
         let board_ids = match board {
             Some(id) => vec![id],
             None => self
-                .list_boards_filtered(project, true)
+                .list_boards_for_project(project)
                 .await?
                 .into_iter()
-                .filter(|b| b.board_type.eq_ignore_ascii_case("scrum"))
+                .filter(|b| b.may_support_sprints())
                 .map(|b| b.id)
                 .collect::<Vec<_>>(),
         };
@@ -56,17 +56,22 @@ impl JiraClient {
                 .map(|p| format!(" for project {p}"))
                 .unwrap_or_default();
             return Err(ApiError::NotFound(format!(
-                "No Scrum boards found{scope}; use --board <ID> or a numeric --sprint <ID>"
+                "No sprint-capable boards found{scope}; use --board <ID> or a numeric --sprint <ID>"
             )));
         }
         let active = specifier.eq_ignore_ascii_case("active");
         let query = specifier.to_lowercase();
         let mut candidates: BTreeMap<u64, (Sprint, BTreeSet<u64>)> = BTreeMap::new();
         for board_id in board_ids {
-            for sprint in self
-                .list_sprints(board_id, if active { Some("active") } else { None })
-                .await?
-            {
+            let state = if active { Some("active") } else { None };
+            let sprints = if board.is_none() {
+                self.list_sprints_for_discovery(board_id, state)
+                    .await?
+                    .unwrap_or_default()
+            } else {
+                self.list_sprints(board_id, state).await?
+            };
+            for sprint in sprints {
                 let matches = if active {
                     sprint.state.eq_ignore_ascii_case("active")
                 } else {

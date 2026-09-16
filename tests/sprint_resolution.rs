@@ -142,7 +142,7 @@ async fn exact_name_wins_and_shared_sprints_are_deduplicated() {
 async fn project_scope_is_sent_to_jira_and_explicit_board_overrides_it() {
     let server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/rest/agile/1.0/board"))
-        .and(query_param("projectKeyOrId", "PROJ")).and(query_param("type", "scrum"))
+        .and(query_param("projectKeyOrId", "PROJ"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"isLast": true, "values": [{"id": 2, "name": "Project board", "type": "scrum"}]})))
         .expect(1).mount(&server).await;
     sprints(&server, 2, vec![sprint(20, "Project sprint")]).await;

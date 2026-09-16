@@ -156,6 +156,10 @@ jira issues mine --project MYAPP --status "To Do"
 # Show
 jira issues show MYAPP-123
 
+# Discover the create screen before choosing fields
+jira issues create-meta -p MYAPP             # available issue types
+jira issues create-meta -p MYAPP -t Story    # required fields, defaults, options, epic support
+
 # Create
 jira issues create --project MYAPP --summary "Fix login bug" --type Bug
 jira issues create --project MYAPP --summary "Add dark mode" --type Story \
@@ -164,6 +168,11 @@ jira issues create --project MYAPP --summary "Write unit tests" --type Subtask \
   --parent MYAPP-42                           # creates a subtask
 jira issues create --project MYAPP --summary "Add dark mode" --type Story \
   --epic MYAPP-10 --priority Medium           # resolves this project's fields
+
+# Preview normalized fields without making changes
+jira issues create -p MYAPP -t Story -s "Example" --priority Medium --dry-run
+jira issues update MYAPP-123 --priority Medium --dry-run
+jira issues move MYAPP-123 --sprint active --dry-run
 
 # Update
 jira issues update MYAPP-123 --summary "Updated title"
@@ -274,13 +283,63 @@ jira search 'assignee = currentUser() AND status != Done' --limit 20
 jira search 'project = MYAPP' --all                       # fetch every page
 ```
 
+### Write previews and bulk outcomes
+
+Create and update previews include the exact normalized `fields` payload;
+move previews identify the resolved sprint. `steps` lists the planned writes
+in order, including the sprint move after creation. Previews share the real
+write's normalization and preflight validation. Jira can still reject a later
+write because permissions, workflow or plugin validators, or server state
+changed. `metadata` and `warnings` identify checks that could not be completed.
+
+`issues create-meta` lists types when `--type` is omitted. With a type it
+returns the create screen's field definitions, including required fields,
+defaults and allowed values, plus epic support. `fields: null` means the fields
+were not requested or could not be discovered; warnings distinguish the
+latter. Epic support describes evidence from that screen; when metadata is
+unavailable, a write can still attempt the documented instance fallback.
+Unsupported create-meta endpoints return error details with `reason: "unsupported"`
+after confirming the project exists. `allowedValues: null` means unknown, while `[]` means no allowed values.
+
+Transitions accept an exact ID, a case-insensitive action name, or a
+case-insensitive destination status, in that order. Ambiguity is an error;
+the structured error details list candidates and a discovery command.
+
+Bulk commands emit a summary even for zero matches. Any per-issue failure
+returns exit 9 (`bulk_failure`); stdout still contains the full summary.
+`total = succeeded + ready + failed + notAttempted`, where `ready` counts
+dry-run entries that passed available checks and `succeeded` counts completed
+writes. Assignment previews resolve the assignee but do not check per-issue
+assignability; transition previews resolve the transition for each issue. Issue-local
+failures do not discard or replay completed work. Authentication/permission,
+rate-limit, network, and server failures stop further requests and mark the
+remaining issues `notAttempted`. Each failure includes `errorKind` and
+`retryable`, plus the failed `phase` (`lookup` or `write`). Write timeouts,
+connection failures, and server errors are marked `outcome: "unknown"`: the
+server may have applied the write. These count under `failed` because success
+was not confirmed; check issue state before retrying them. Never blindly rerun a partially completed bulk command.
+
 ### Boards and sprints
 
 ```sh
 jira boards list
-jira sprints list
+jira boards list --project MYAPP
+jira sprints list --project MYAPP            # current (active) sprints
+jira sprints list --project MYAPP --state active,future
 jira sprints list --board "MYAPP board"
+jira sprints list --board 42 --state all
 ```
+
+`--project` filters boards on the server. For sprint listing, a project and
+board filter intersect; a numeric board ID without a project is fetched
+directly. Kanban boards are skipped in broad discovery and rejected when
+they are the only boards selected by a filter. Unknown board types are queried;
+boards Jira explicitly reports as not supporting sprints are skipped, with
+messages in the top-level `warnings` array. Other errors still fail the command. Shared sprints appear once, with every matching board in
+`boards`; `total` counts unique sprints. The primary `boardId`/`boardName` is the
+origin board when matched, otherwise the lowest matched ID. Results and board
+context are ordered by ID. Repeat `--state` or comma-separate its values;
+`all` disables the state filter.
 
 ### Users and fields
 
@@ -331,9 +390,21 @@ jira schema --command 'issues transition'
 jira schema | jq '.commands[] | .name'
 ```
 
+Argument types, enum values, `conflicts_with`, and `requires` reflect the CLI
+parser. Commands with previews publish their conditional contract under
+`x-dry-run`: `arg`, `effects`, and `output_fields`. Those fields describe the
+preview; the command's ordinary `output_fields` describe the real result.
+Create, update, and move also publish a complete `stdout_schema` covering both
+results. Transitions are declared non-idempotent because repeating a workflow
+action can trigger additional effects.
+Bulk commands also declare `x-output-on-error` so consumers know to parse
+stdout when the exit code is nonzero.
+
 ### Read-only mode
 
 Set `JIRA_READ_ONLY=1` to block every command that writes to Jira. The CLI returns exit code 2 with a structured error for any blocked command, before it opens a connection. This is useful when giving an AI agent read access to Jira without the risk of unintended modifications.
+
+`--dry-run` remains available for create, update, move, and both bulk commands in read-only mode. These commands resolve and validate inputs without writing to Jira; the HTTP client also blocks write requests as a second check.
 
 The guard covers writes to Jira, not writes to your disk: `jira init`, `jira config init`, `jira config remove` and `jira issues download-attachment` still work, because they change local files only.
 
@@ -382,7 +453,9 @@ Any agent that supports environment variable configuration can use the same appr
 | 4 | Resource not found |
 | 5 | Jira API error |
 | 6 | Rate limited |
-| 7 | Target already exists (pass `--force` to overwrite) |
+| 7 | Conflict, including a target file that already exists |
+| 8 | Issue created, but sprint assignment failed; use the recovery command in the error details |
+| 9 | Bulk operation has failures; parse the complete per-issue summary on stdout |
 
 A downstream that stops reading, as in `jira issues list | head -5`, terminates
 the CLI with `SIGPIPE` rather than any of these codes. That is what every other

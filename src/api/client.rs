@@ -19,6 +19,7 @@ pub struct JiraClient {
     site_url: String,
     host: String,
     api_version: u8,
+    read_only: bool,
 }
 
 const SEARCH_FIELDS: [&str; 7] = [
@@ -130,7 +131,24 @@ impl JiraClient {
             site_url,
             host: domain.to_string(),
             api_version,
+            read_only: false,
         })
+    }
+
+    /// Enforce the CLI's read-only policy at every HTTP write boundary.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    fn ensure_writable(&self) -> Result<(), ApiError> {
+        if self.read_only {
+            Err(ApiError::InvalidInput(
+                "read-only mode is enabled; Jira writes are blocked".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn host(&self) -> &str {
@@ -162,24 +180,20 @@ impl JiraClient {
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let url = format!("{}/{path}", self.base_url);
-        let resp = self.http.get(&url).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body));
-        }
-        resp.json::<T>().await.map_err(ApiError::Http)
+        self.send(self.http.get(&url))
+            .await?
+            .json()
+            .await
+            .map_err(ApiError::Http)
     }
 
     async fn agile_get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let url = format!("{}/{path}", self.agile_base_url);
-        let resp = self.http.get(&url).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body));
-        }
-        resp.json::<T>().await.map_err(ApiError::Http)
+        self.send(self.http.get(&url))
+            .await?
+            .json()
+            .await
+            .map_err(ApiError::Http)
     }
 
     async fn post<T: DeserializeOwned>(
@@ -188,13 +202,11 @@ impl JiraClient {
         body: &serde_json::Value,
     ) -> Result<T, ApiError> {
         let url = format!("{}/{path}", self.base_url);
-        let resp = self.http.post(&url).json(body).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body_text));
-        }
-        resp.json::<T>().await.map_err(ApiError::Http)
+        self.send(self.http.post(&url).json(body))
+            .await?
+            .json()
+            .await
+            .map_err(ApiError::Http)
     }
 
     async fn post_empty_response(
@@ -203,12 +215,7 @@ impl JiraClient {
         body: &serde_json::Value,
     ) -> Result<(), ApiError> {
         let url = format!("{}/{path}", self.base_url);
-        let resp = self.http.post(&url).json(body).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body_text));
-        }
+        self.send(self.http.post(&url).json(body)).await?;
         Ok(())
     }
 
@@ -218,19 +225,26 @@ impl JiraClient {
         body: &serde_json::Value,
     ) -> Result<(), ApiError> {
         let url = format!("{}/{path}", self.base_url);
-        let resp = self.http.put(&url).json(body).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body_text));
-        }
+        self.send(self.http.put(&url).json(body)).await?;
         Ok(())
     }
 
-    /// Send a request whose response body is not JSON, mapping a non-success
-    /// status to an `ApiError` like the helpers above.
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
-        let resp = request.send().await?;
+    /// All requests pass through this boundary. Only the explicitly enumerated
+    /// search POSTs are reads; other non-GET/HEAD requests require write access.
+    async fn send(&self, builder: reqwest::RequestBuilder) -> Result<reqwest::Response, ApiError> {
+        let request = builder.build()?;
+        let method = request.method();
+        let read_post = method == reqwest::Method::POST
+            && ["search", "search/jql"].iter().any(|path| {
+                // Compare canonical URLs: configured hosts may include an
+                // uppercase name or a default port that reqwest normalizes.
+                reqwest::Url::parse(&format!("{}/{path}", self.base_url))
+                    .is_ok_and(|allowed| &allowed == request.url())
+            });
+        if !matches!(*method, reqwest::Method::GET | reqwest::Method::HEAD) && !read_post {
+            self.ensure_writable()?;
+        }
+        let resp = self.http.execute(request).await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -474,12 +488,44 @@ impl JiraClient {
         Ok(issue)
     }
 
-    /// Create a new issue.
+    /// Create a new issue using the same prepared fields as a preview.
     pub async fn create_issue(
         &self,
         draft: &IssueDraft<'_>,
         custom_fields: &[(String, serde_json::Value)],
     ) -> Result<CreateIssueResponse, ApiError> {
+        let (fields, meta) = self.prepare_create_payload(draft, custom_fields).await?;
+        self.post("issue", &serde_json::json!({ "fields": fields }))
+            .await
+            .map_err(|err| metadata::create_error(err, meta.as_ref(), draft))
+    }
+
+    /// Resolve and validate a create request without sending a write.
+    pub async fn preview_create_issue(
+        &self,
+        draft: &IssueDraft<'_>,
+        custom_fields: &[(String, serde_json::Value)],
+    ) -> Result<serde_json::Value, ApiError> {
+        let (fields, meta) = self.prepare_create_payload(draft, custom_fields).await?;
+        if meta.is_none() {
+            let project = fields["project"]["key"]
+                .as_str()
+                .or_else(|| fields["project"]["id"].as_str())
+                .expect("validated project");
+            self.get_project(project).await?;
+        }
+        Ok(write_preview(
+            fields,
+            Some(meta.is_some()),
+            meta.as_ref().is_some_and(|m| m.fields.is_some()),
+        ))
+    }
+
+    async fn prepare_create_payload(
+        &self,
+        draft: &IssueDraft<'_>,
+        custom_fields: &[(String, serde_json::Value)],
+    ) -> Result<(serde_json::Value, Option<metadata::CreateMetadata>), ApiError> {
         let mut fields = serde_json::json!({
             "project": { "key": draft.project_key },
             "issuetype": metadata::unresolved_option(draft.issue_type),
@@ -518,9 +564,7 @@ impl JiraClient {
         let meta = self
             .prepare_create(&mut fields, draft, custom_fields)
             .await?;
-        self.post("issue", &serde_json::json!({ "fields": fields }))
-            .await
-            .map_err(|err| metadata::create_error(err, meta.as_ref(), draft))
+        Ok((fields, meta))
     }
 
     /// Log work on an issue.
@@ -615,6 +659,39 @@ impl JiraClient {
         update: &IssueUpdate<'_>,
         custom_fields: &[(String, serde_json::Value)],
     ) -> Result<(), ApiError> {
+        let (fields, meta) = self
+            .prepare_update_payload(key, update, custom_fields)
+            .await?;
+        self.put_empty_response(
+            &format!("issue/{key}"),
+            &serde_json::json!({"fields": fields}),
+        )
+        .await
+        .map_err(|err| metadata::write_error(err, meta.as_ref(), update.priority, update.epic))
+    }
+
+    /// Resolve and validate an update request without sending a write.
+    pub async fn preview_update_issue(
+        &self,
+        key: &str,
+        update: &IssueUpdate<'_>,
+        custom_fields: &[(String, serde_json::Value)],
+    ) -> Result<serde_json::Value, ApiError> {
+        let (fields, meta) = self
+            .prepare_update_payload(key, update, custom_fields)
+            .await?;
+        if meta.is_none() {
+            self.issue_type_for_link(key).await?;
+        }
+        Ok(write_preview(fields, None, meta.is_some()))
+    }
+
+    async fn prepare_update_payload(
+        &self,
+        key: &str,
+        update: &IssueUpdate<'_>,
+        custom_fields: &[(String, serde_json::Value)],
+    ) -> Result<(serde_json::Value, Option<metadata::Fields>), ApiError> {
         validate_issue_key(key)?;
         let mut fields = serde_json::Map::new();
         if let Some(s) = update.summary {
@@ -655,12 +732,7 @@ impl JiraClient {
         let meta = self
             .prepare_update(key, &mut fields, update, custom_fields)
             .await?;
-        self.put_empty_response(
-            &format!("issue/{key}"),
-            &serde_json::json!({ "fields": fields }),
-        )
-        .await
-        .map_err(|err| metadata::write_error(err, meta.as_ref(), update.priority, update.epic))
+        Ok((fields, meta))
     }
 
     /// Build the appropriate body value for a description or comment field.
@@ -703,6 +775,7 @@ impl JiraClient {
         key: &str,
         paths: &[PathBuf],
     ) -> Result<Vec<Attachment>, ApiError> {
+        self.ensure_writable()?;
         validate_issue_key(key)?;
 
         let mut form = reqwest::multipart::Form::new();
@@ -757,6 +830,7 @@ impl JiraClient {
 
     /// Delete an attachment by its ID.
     pub async fn delete_attachment(&self, id: &str) -> Result<(), ApiError> {
+        self.ensure_writable()?;
         validate_attachment_id(id)?;
         let url = format!("{}/attachment/{id}", self.base_url);
         self.send(self.http.delete(&url)).await?;
@@ -803,6 +877,7 @@ impl JiraClient {
         to_key: &str,
         link_type: &str,
     ) -> Result<(), ApiError> {
+        self.ensure_writable()?;
         validate_issue_key(from_key)?;
         validate_issue_key(to_key)?;
         let payload = serde_json::json!({
@@ -811,24 +886,15 @@ impl JiraClient {
             "outwardIssue": { "key": to_key },
         });
         let url = format!("{}/issueLink", self.base_url);
-        let resp = self.http.post(&url).json(&payload).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body));
-        }
+        self.send(self.http.post(&url).json(&payload)).await?;
         Ok(())
     }
 
     /// Remove an issue link by its ID.
     pub async fn unlink_issues(&self, link_id: &str) -> Result<(), ApiError> {
+        self.ensure_writable()?;
         let url = format!("{}/issueLink/{link_id}", self.base_url);
-        let resp = self.http.delete(&url).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body));
-        }
+        self.send(self.http.delete(&url)).await?;
         Ok(())
     }
 
@@ -836,13 +902,12 @@ impl JiraClient {
 
     /// List all boards, fetching all pages.
     pub async fn list_boards(&self) -> Result<Vec<Board>, ApiError> {
-        self.list_boards_filtered(None, false).await
+        self.list_boards_for_project(None).await
     }
 
-    async fn list_boards_filtered(
+    pub async fn list_boards_for_project(
         &self,
         project: Option<&str>,
-        scrum_only: bool,
     ) -> Result<Vec<Board>, ApiError> {
         let mut all = Vec::new();
         let mut start_at = 0usize;
@@ -851,9 +916,7 @@ impl JiraClient {
             let project_param = project
                 .map(|p| format!("&projectKeyOrId={}", percent_encode(p)))
                 .unwrap_or_default();
-            let type_param = if scrum_only { "&type=scrum" } else { "" };
-            let path =
-                format!("board?startAt={start_at}&maxResults={PAGE}{project_param}{type_param}");
+            let path = format!("board?startAt={start_at}&maxResults={PAGE}{project_param}");
             let page: BoardSearchResponse = self.agile_get(&path).await?;
             let received = page.values.len();
             all.extend(page.values);
@@ -863,6 +926,33 @@ impl JiraClient {
             start_at += received;
         }
         Ok(all)
+    }
+
+    /// Fetch one board without scanning unrelated boards.
+    pub async fn get_board(&self, id: u64) -> Result<Board, ApiError> {
+        self.agile_get(&format!("board/{id}")).await
+    }
+
+    /// Discovery may include nonstandard board types. Skip only Jira's explicit
+    /// unsupported-sprints response, never authentication or unrelated errors.
+    pub(crate) async fn list_sprints_for_discovery(
+        &self,
+        board_id: u64,
+        state: Option<&str>,
+    ) -> Result<Option<Vec<Sprint>>, ApiError> {
+        match self.list_sprints(board_id, state).await {
+            Ok(sprints) => Ok(Some(sprints)),
+            Err(ApiError::Api {
+                status: 400,
+                ref message,
+            }) if message
+                .to_ascii_lowercase()
+                .contains("does not support sprints") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// List sprints for a board, optionally filtered by state.
@@ -877,7 +967,9 @@ impl JiraClient {
         let mut start_at = 0usize;
         const PAGE: usize = 50;
         loop {
-            let state_param = state.map(|s| format!("&state={s}")).unwrap_or_default();
+            let state_param = state
+                .map(|s| format!("&state={}", percent_encode(s)))
+                .unwrap_or_default();
             let path = format!(
                 "board/{board_id}/sprint?startAt={start_at}&maxResults={PAGE}{state_param}"
             );
@@ -934,7 +1026,8 @@ impl JiraClient {
 
     /// Fetch a single project by key.
     pub async fn get_project(&self, key: &str) -> Result<Project, ApiError> {
-        self.get(&format!("project/{key}")).await
+        self.get(&format!("project/{}", metadata::encode_segment(key)))
+            .await
     }
 
     /// List all components for a project.
@@ -970,15 +1063,11 @@ impl JiraClient {
         issue_key: &str,
         sprint_id: u64,
     ) -> Result<(), ApiError> {
+        self.ensure_writable()?;
         validate_issue_key(issue_key)?;
         let url = format!("{}/sprint/{sprint_id}/issue", self.agile_base_url);
         let payload = serde_json::json!({ "issues": [issue_key] });
-        let resp = self.http.post(&url).json(&payload).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body));
-        }
+        self.send(self.http.post(&url).json(&payload)).await?;
         Ok(())
     }
 
@@ -1156,6 +1245,23 @@ struct JiraErrorPayload {
     error_messages: Vec<String>,
     #[serde(default)]
     errors: BTreeMap<String, String>,
+}
+
+fn write_preview(
+    fields: serde_json::Value,
+    issue_types: Option<bool>,
+    field_metadata: bool,
+) -> serde_json::Value {
+    let mut warnings = vec![
+        "Jira may apply additional workflow, permission, or plugin validators when the write is submitted.",
+    ];
+    if issue_types == Some(false) {
+        warnings.push("Issue type metadata is unavailable; the issue type could not be normalized or validated.");
+    }
+    if !field_metadata {
+        warnings.push("Field metadata is unavailable; required fields and allowed values could not be fully validated.");
+    }
+    serde_json::json!({"fields":fields, "metadata":{"issueTypes":issue_types, "fields":field_metadata}, "warnings":warnings})
 }
 
 #[cfg(test)]

@@ -2,8 +2,17 @@ use crate::api::{ApiError, JiraClient};
 use crate::output::OutputConfig;
 
 /// List all Jira Agile boards.
-pub async fn list(client: &JiraClient, out: &OutputConfig) -> Result<(), ApiError> {
-    let boards = client.list_boards().await?;
+pub async fn list(
+    client: &JiraClient,
+    out: &OutputConfig,
+    project: Option<&str>,
+) -> Result<(), ApiError> {
+    let boards = client.list_boards_for_project(project).await?;
+    if boards.is_empty()
+        && let Some(project) = project
+    {
+        client.get_project(project).await?;
+    }
 
     if out.json {
         out.print_data(

@@ -960,17 +960,12 @@ async fn transition_not_found_returns_structured_error() {
     let err = jira_cli::commands::issues::transition(&client, &out, "PROJ-1", "Nonexistent")
         .await
         .unwrap_err();
-    assert!(matches!(err, ApiError::NotFound(_)));
-    // Error message must reference the missing transition name
-    if let ApiError::NotFound(msg) = &err {
-        assert!(
-            msg.contains("Nonexistent"),
-            "expected transition name in error, got: {msg}"
-        );
-    }
+    assert_eq!(jira_cli::output::contract_for(&err).kind, "not_found");
+    assert_eq!(jira_cli::output::contract_for(&err).exit_code, 4);
+    assert!(err.to_string().contains("Nonexistent"));
+    let envelope = jira_cli::output::error_envelope_for(&err);
+    assert_eq!(envelope["error"]["details"]["candidates"][0]["id"], "11");
 }
-
-// ── Projects ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn list_projects_returns_all_projects() {
@@ -1568,7 +1563,7 @@ async fn issue_json_includes_assignee_account_id() {
 #[tokio::test]
 async fn transition_not_found_produces_no_stdout_data() {
     // Verifies that a failed transition does NOT write JSON to stdout.
-    // Error information goes to stderr via print_message; stdout stays clean
+    // The CLI renders the returned error once on stderr; stdout stays clean
     // so agents piping stdout get nothing on failure.
     let server = MockServer::start().await;
 
@@ -1591,7 +1586,7 @@ async fn transition_not_found_produces_no_stdout_data() {
 
     // Must return NotFound (exit code 4), not a generic error
     assert!(
-        matches!(err, ApiError::NotFound(_)),
+        jira_cli::output::contract_for(&err).exit_code == 4,
         "expected NotFound, got: {err}"
     );
     // The error message must identify the missing transition
@@ -2854,7 +2849,7 @@ async fn log_work_with_comment_includes_body_in_payload() {
 // ── Bulk transition ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn bulk_transition_dry_run_makes_no_api_calls() {
+async fn bulk_transition_dry_run_validates_without_writes() {
     let server = MockServer::start().await;
     let client = test_client(&server);
 
@@ -2869,7 +2864,24 @@ async fn bulk_transition_dry_run_makes_no_api_calls() {
         .mount(&server)
         .await;
 
-    // No transition calls should happen in dry-run mode (mock would fail if called)
+    for key in ["PROJ-1", "PROJ-2"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/3/issue/{key}/transitions")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"transitions":[
+                    {"id":"21","name":"Start work","to":{"name":"In Progress"}}
+                ]}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/rest/api/3/issue/{key}/transitions")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+    }
     let out = json_out();
     jira_cli::commands::issues::bulk_transition(
         &client,
@@ -3020,6 +3032,7 @@ async fn create_issue_with_parent_includes_parent_field() {
         None,
         None,
         &[],
+        false,
     )
     .await
     .unwrap();
@@ -3314,9 +3327,16 @@ async fn move_to_sprint_command_resolves_name_and_posts_to_agile() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::issues::move_to_sprint(&client, &out, "PROJ-1", "Sprint Alpha", None)
-        .await
-        .unwrap();
+    jira_cli::commands::issues::move_to_sprint(
+        &client,
+        &out,
+        "PROJ-1",
+        "Sprint Alpha",
+        None,
+        false,
+    )
+    .await
+    .unwrap();
 }
 
 // ── bulk_assign with "me" resolves current user once ─────────────────────────
@@ -3409,7 +3429,7 @@ async fn boards_list_json_shape() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::boards::list(&client, &out)
+    jira_cli::commands::boards::list(&client, &out, None)
         .await
         .unwrap();
 }
@@ -3430,7 +3450,7 @@ async fn boards_list_json_contains_id_name_type() {
     // but we exercise the code path and verify the API call shape.
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::boards::list(&client, &out)
+    jira_cli::commands::boards::list(&client, &out, None)
         .await
         .unwrap();
 
@@ -3452,7 +3472,7 @@ async fn boards_list_empty_succeeds() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::boards::list(&client, &out)
+    jira_cli::commands::boards::list(&client, &out, None)
         .await
         .unwrap();
 }
@@ -3668,7 +3688,7 @@ async fn sprints_list_json_shape() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::sprints::list(&client, &out, None, None)
+    jira_cli::commands::sprints::list(&client, &out, None, None, None)
         .await
         .unwrap();
 }
@@ -3680,7 +3700,7 @@ async fn sprints_list_json_includes_board_context() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::sprints::list(&client, &out, None, Some("active"))
+    jira_cli::commands::sprints::list(&client, &out, None, Some("active"), None)
         .await
         .unwrap();
 }
@@ -3725,7 +3745,7 @@ async fn sprints_list_filtered_by_board_name() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::sprints::list(&client, &out, Some("TST"), None)
+    jira_cli::commands::sprints::list(&client, &out, Some("TST"), None, None)
         .await
         .unwrap();
 }
@@ -3746,7 +3766,7 @@ async fn sprints_list_board_not_found_returns_error() {
 
     let client = test_client(&server);
     let out = json_out();
-    let err = jira_cli::commands::sprints::list(&client, &out, Some("NOPE"), None)
+    let err = jira_cli::commands::sprints::list(&client, &out, Some("NOPE"), None, None)
         .await
         .unwrap_err();
     assert!(
@@ -3767,7 +3787,7 @@ async fn sprints_list_empty_boards_returns_empty_json() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::sprints::list(&client, &out, None, None)
+    jira_cli::commands::sprints::list(&client, &out, None, None, None)
         .await
         .unwrap();
 }
@@ -4809,4 +4829,82 @@ fn conflicting_download_maps_to_conflict_exit_code() {
     use jira_cli::output::{exit_code_for_error, exit_codes};
     let err = ApiError::Conflict("/tmp/report.pdf already exists".into());
     assert_eq!(exit_code_for_error(&err), exit_codes::CONFLICT);
+}
+
+#[tokio::test]
+async fn read_only_client_blocks_every_write_boundary_but_allows_search_posts() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).with_read_only(true);
+    let draft = minimal_draft("PROJ", "Story", "Example");
+    let update = IssueUpdate {
+        summary: Some("Example"),
+        ..Default::default()
+    };
+    let results = [
+        client.create_issue(&draft, &[]).await.map(|_| ()),
+        client.update_issue("PROJ-1", &update, &[]).await,
+        client.assign_issue("PROJ-1", None).await,
+        client.do_transition("PROJ-1", "21").await,
+        client.add_comment("PROJ-1", "Example").await.map(|_| ()),
+        client
+            .log_work("PROJ-1", "1h", None, None)
+            .await
+            .map(|_| ()),
+        client.move_issue_to_sprint("PROJ-1", 8).await,
+        client.link_issues("PROJ-1", "PROJ-2", "Blocks").await,
+        client.unlink_issues("123").await,
+        client.upload_attachments("PROJ-1", &[]).await.map(|_| ()),
+        client.delete_attachment("123").await,
+    ];
+    for result in results {
+        assert!(
+            matches!(result, Err(ApiError::InvalidInput(ref message)) if message.contains("read-only")),
+            "{result:?}"
+        );
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET")
+    );
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_response(vec![])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        client
+            .search("project = PROJ", 50, 0)
+            .await
+            .unwrap()
+            .issues
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn read_only_search_accepts_normalized_host_spellings() {
+    let server = MockServer::start().await;
+    let host = server.uri().replace("127.0.0.1", "LOCALHOST");
+    let client = JiraClient::new(&host, "test@example.com", "test-token", AuthType::Basic, 3)
+        .unwrap()
+        .with_read_only(true);
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_response(vec![])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        client
+            .search("project = PROJ", 50, 0)
+            .await
+            .unwrap()
+            .issues
+            .is_empty()
+    );
 }

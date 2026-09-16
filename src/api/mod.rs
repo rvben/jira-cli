@@ -43,6 +43,19 @@ pub enum ApiError {
         sprint_id: u64,
         source: Box<ApiError>,
     },
+    /// A bulk command completed with one or more failed items. Its complete
+    /// per-issue summary is emitted on stdout, including on failure.
+    BulkFailure {
+        total: usize,
+        succeeded: usize,
+        failed: usize,
+        not_attempted: usize,
+    },
+    /// Structured context without changing the underlying failure contract.
+    WithDetails {
+        source: Box<ApiError>,
+        details: serde_json::Value,
+    },
     /// Non-2xx response from the Jira API.
     Api { status: u16, message: String },
     /// Network / TLS error.
@@ -73,6 +86,16 @@ impl fmt::Display for ApiError {
                 "Created {key} ({url}), but adding it to sprint {sprint_id} failed: {source}. Retry only `jira issues move {key} --sprint {sprint_id}`; do not rerun issues create."
             ),
             ApiError::Api { status, message } => write!(f, "API error {status}: {message}"),
+            ApiError::BulkFailure {
+                total,
+                succeeded,
+                failed,
+                not_attempted,
+            } => write!(
+                f,
+                "Bulk operation: {succeeded} succeeded, {failed} failed, {not_attempted} not attempted out of {total}. Inspect the per-issue results; do not retry the whole command."
+            ),
+            ApiError::WithDetails { source, .. } => source.fmt(f),
             ApiError::Http(e) => write!(f, "HTTP error: {e}"),
             ApiError::Other(msg) => write!(f, "{msg}"),
         }
@@ -84,6 +107,7 @@ impl std::error::Error for ApiError {
         match self {
             ApiError::Http(e) => Some(e),
             ApiError::PartialSuccess { source, .. } => Some(source.as_ref()),
+            ApiError::WithDetails { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
