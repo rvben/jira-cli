@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.11](https://github.com/rvben/jira-cli/compare/v0.4.10...v0.4.11) - 2026-09-16
+
 ### Added
 
 - `issues create` and `issues move` scope sprint names and `active` to project Scrum boards, with `--board ID` to choose a board. Ambiguous matches list candidate sprint and board IDs.
