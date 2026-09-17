@@ -41,6 +41,7 @@ pub async fn list(
     fields: Option<&[String]>,
 ) -> Result<(), ApiError> {
     let jql = build_list_jql(&filters);
+    enable_epic_lookup_for(client, out, fields);
     if all {
         let issues = fetch_all_issues(client, &jql).await?;
         let n = issues.len();
@@ -219,6 +220,17 @@ fn render_results(
     }
 }
 
+/// Look epics up only when the output includes them: listing tables never do.
+pub(crate) fn enable_epic_lookup_for(
+    client: &JiraClient,
+    out: &OutputConfig,
+    fields: Option<&[String]>,
+) {
+    if out.json && fields.is_none_or(|names| names.iter().any(|n| n == "epic")) {
+        client.enable_epic_lookup();
+    }
+}
+
 /// Parse a comma-separated `--fields` argument, refusing names that are not
 /// keys of the issue JSON. An unknown name must fail rather than quietly
 /// filter every item down to an object that looks like the field is empty.
@@ -268,6 +280,7 @@ pub async fn show(
     key: &str,
     open: bool,
 ) -> Result<(), ApiError> {
+    client.enable_epic_lookup();
     let issue = client.get_issue(key).await?;
 
     if open {
@@ -870,6 +883,18 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
     writeln!(out, "  Status:     {status_str}")?;
     writeln!(out, "  Priority:   {}", issue.priority())?;
     writeln!(out, "  Assignee:   {}", issue.assignee())?;
+    if let Some(ref parent) = issue.fields.parent {
+        let parent_type = parent
+            .fields
+            .as_ref()
+            .and_then(|f| f.issuetype.as_ref())
+            .map(|t| format!(" ({})", t.name))
+            .unwrap_or_default();
+        writeln!(out, "  Parent:     {}{parent_type}", parent.key)?;
+    }
+    if let Some(ref epic) = issue.epic {
+        writeln!(out, "  Epic:       {epic}")?;
+    }
     if let Some(ref reporter) = issue.fields.reporter {
         writeln!(out, "  Reporter:   {}", reporter.display_name)?;
     }
@@ -981,9 +1006,24 @@ fn user_to_json(user: Option<&UserField>) -> serde_json::Value {
 }
 
 /// Keys of an `issue_to_json` object: the names `--fields` accepts.
-pub(crate) const ISSUE_SUMMARY_KEYS: [&str; 10] = [
-    "key", "id", "url", "summary", "status", "assignee", "priority", "type", "created", "updated",
+pub(crate) const ISSUE_SUMMARY_KEYS: [&str; 12] = [
+    "key", "id", "url", "summary", "status", "assignee", "priority", "type", "parent", "epic",
+    "created", "updated",
 ];
+
+fn parent_to_json(issue: &Issue) -> serde_json::Value {
+    match &issue.fields.parent {
+        Some(parent) => {
+            let fields = parent.fields.as_ref();
+            serde_json::json!({
+                "key": parent.key,
+                "summary": fields.and_then(|f| f.summary.as_deref()),
+                "type": fields.and_then(|f| f.issuetype.as_ref()).map(|t| t.name.as_str()),
+            })
+        }
+        None => serde_json::Value::Null,
+    }
+}
 
 pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::Value {
     serde_json::json!({
@@ -997,6 +1037,8 @@ pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         // same reason `assignee` is.
         "priority": issue.fields.priority.as_ref().map(|p| p.name.as_str()),
         "type": issue.issue_type(),
+        "parent": parent_to_json(issue),
+        "epic": issue.epic,
         "created": issue.fields.created,
         "updated": issue.fields.updated,
     })
@@ -1103,6 +1145,8 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "affectedVersions": issue.fields.versions.as_ref().map(|vs| {
             vs.iter().map(version_to_json).collect::<Vec<_>>()
         }),
+        "parent": parent_to_json(issue),
+        "epic": issue.epic,
         // Null when the issue has no description at all, so that state stays
         // distinguishable from a description that is present but empty.
         "description": issue.fields.description.as_ref().map(|_| issue.description_text()),
@@ -1329,7 +1373,10 @@ mod tests {
                 assignee: None,
                 reporter: None,
                 priority: None,
-                issuetype: IssueTypeField { name: "Bug".into() },
+                issuetype: IssueTypeField {
+                    name: "Bug".into(),
+                    hierarchy_level: None,
+                },
                 description: None,
                 labels: None,
                 components: None,
@@ -1339,7 +1386,10 @@ mod tests {
                 updated: None,
                 comment: None,
                 issue_links: None,
+                parent: None,
+                extra: serde_json::Map::new(),
             },
+            epic: None,
         }
     }
 

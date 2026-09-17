@@ -374,6 +374,11 @@ enum IssuesCommand {
         #[arg(long)]
         priority: Option<String>,
 
+        /// Change the issue type (name or ID) within the same hierarchy level, e.g. Task to Story.
+        /// Subtask <-> standard issue conversions need Move in the Jira web UI.
+        #[arg(long = "type", value_name = "TYPE")]
+        issue_type: Option<String>,
+
         /// Add to this epic (automatically resolves Epic Link or native parent)
         #[arg(long, value_name = "KEY")]
         epic: Option<String>,
@@ -1034,6 +1039,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 summary,
                 description,
                 priority,
+                issue_type,
                 epic,
                 clear_epic,
                 components,
@@ -1055,6 +1061,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     summary: summary.as_deref(),
                     description: description.as_deref(),
                     priority: priority.as_deref(),
+                    issue_type: issue_type.as_deref(),
                     epic: epic.as_deref(),
                     clear_epic,
                     components: parsed_components.as_deref(),
@@ -1431,6 +1438,15 @@ fn schema_json() -> serde_json::Value {
         {"name": "summary", "type": "string"},
         {"name": "status", "type": "string"}
     ]);
+    let parent_fields = serde_json::json!([
+        {"name": "key", "type": "string"},
+        {"name": "summary", "type": "string", "nullable": true},
+        {"name": "type", "type": "string", "nullable": true, "description": "Issue type name of the parent"}
+    ]);
+    let parent_field = serde_json::json!({"name": "parent", "type": "object", "nullable": true, "fields": parent_fields,
+        "description": "Direct parent as Jira reports it: a subtask's parent issue, or on Jira Cloud also the epic above a standard issue. Null when the issue has no parent"});
+    let epic_field = serde_json::json!({"name": "epic", "type": "string", "nullable": true,
+        "description": "Key of the epic the issue belongs to directly. Cloud: the parent when it is at the epic hierarchy level. Data Center/Server: the Epic Link value, so a subtask whose parent is an epic shows that epic under `parent` and null here. Null when not in an epic"});
     // Element shape shared by `issues list`, `issues mine` and `search`.
     let issue_summary_fields = serde_json::json!([
         {"name": "key", "type": "string", "description": "Issue key (e.g. PROJ-123)"},
@@ -1441,6 +1457,8 @@ fn schema_json() -> serde_json::Value {
         {"name": "assignee", "type": "object", "nullable": true, "fields": user_fields, "description": "Null when the issue is unassigned"},
         {"name": "priority", "type": "string", "nullable": true, "description": "Null when the project does not set a priority"},
         {"name": "type", "type": "string"},
+        parent_field.clone(),
+        epic_field.clone(),
         {"name": "created", "type": "string", "nullable": true},
         {"name": "updated", "type": "string", "nullable": true}
     ]);
@@ -1488,6 +1506,8 @@ fn schema_json() -> serde_json::Value {
                 ]},
                 {"name": "fixVersions", "type": "object[]", "nullable": true, "fields": version_fields},
                 {"name": "affectedVersions", "type": "object[]", "nullable": true, "fields": version_fields},
+                parent_field,
+                epic_field,
                 {"name": "comments", "type": "object[]", "fields": comment_fields, "description": "Already included here - no separate `issues comments` call is needed"},
                 {"name": "issueLinks", "type": "object[]", "description": "Already included here - no separate call is needed", "fields": [
                     {"name": "id", "type": "string"},

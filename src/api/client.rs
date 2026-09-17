@@ -9,6 +9,7 @@ use super::ApiError;
 use super::AuthType;
 use super::types::*;
 
+mod hierarchy;
 mod metadata;
 mod sprints;
 
@@ -20,16 +21,39 @@ pub struct JiraClient {
     host: String,
     api_version: u8,
     read_only: bool,
+    /// Whether issue reads fill in `Issue::epic`; see `enable_epic_lookup`.
+    epic_lookup: std::sync::atomic::AtomicBool,
+    /// Data Center Epic Link field IDs, resolved at most once per client.
+    epic_link_fields: tokio::sync::OnceCell<Vec<String>>,
 }
 
-const SEARCH_FIELDS: [&str; 7] = [
+const SEARCH_FIELDS: [&str; 8] = [
     "summary",
     "status",
     "assignee",
     "priority",
     "issuetype",
+    "parent",
     "created",
     "updated",
+];
+const ISSUE_DETAIL_FIELDS: [&str; 16] = [
+    "summary",
+    "status",
+    "assignee",
+    "reporter",
+    "priority",
+    "issuetype",
+    "parent",
+    "description",
+    "labels",
+    "components",
+    "fixVersions",
+    "versions",
+    "created",
+    "updated",
+    "comment",
+    "issuelinks",
 ];
 const SEARCH_GET_JQL_LIMIT: usize = 1500;
 
@@ -132,6 +156,8 @@ impl JiraClient {
             host: domain.to_string(),
             api_version,
             read_only: false,
+            epic_lookup: std::sync::atomic::AtomicBool::new(false),
+            epic_link_fields: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -284,7 +310,8 @@ impl JiraClient {
         max_results: usize,
         start_at: usize,
     ) -> Result<SearchResponse, ApiError> {
-        let fields = SEARCH_FIELDS.join(",");
+        let field_list = self.issue_fields(&SEARCH_FIELDS).await?;
+        let fields = field_list.join(",");
         let encoded_jql = percent_encode(jql);
         // Every counter is optional because a response that omits one must stay
         // distinguishable from one reporting zero. Defaulting `total` to 0 made
@@ -299,7 +326,7 @@ impl JiraClient {
             #[serde(rename = "maxResults")]
             max_results: Option<usize>,
         }
-        let raw: RawV2 = if encoded_jql.len() <= SEARCH_GET_JQL_LIMIT {
+        let mut raw: RawV2 = if encoded_jql.len() <= SEARCH_GET_JQL_LIMIT {
             let path = format!(
                 "search?jql={encoded_jql}&maxResults={max_results}&startAt={start_at}&fields={fields}"
             );
@@ -311,11 +338,12 @@ impl JiraClient {
                     "jql": jql,
                     "maxResults": max_results,
                     "startAt": start_at,
-                    "fields": SEARCH_FIELDS,
+                    "fields": field_list,
                 }),
             )
             .await?
         };
+        self.fill_epics(&mut raw.issues).await?;
         // An absent offset or page size is reported as what was asked for, which
         // is true of the request even when the server does not echo it back.
         let echoed_start_at = raw.start_at.unwrap_or(start_at);
@@ -444,6 +472,7 @@ impl JiraClient {
             }
         }
 
+        self.fill_epics(&mut collected).await?;
         let returned = collected.len();
         Ok(SearchResponse {
             issues: collected,
@@ -462,9 +491,10 @@ impl JiraClient {
     /// the remaining comments.
     pub async fn get_issue(&self, key: &str) -> Result<Issue, ApiError> {
         validate_issue_key(key)?;
-        let fields = "summary,status,assignee,reporter,priority,issuetype,description,labels,components,fixVersions,versions,created,updated,comment,issuelinks";
+        let fields = self.issue_fields(&ISSUE_DETAIL_FIELDS).await?.join(",");
         let path = format!("issue/{key}?fields={fields}");
         let mut issue: Issue = self.get(&path).await?;
+        self.fill_epics(std::slice::from_mut(&mut issue)).await?;
 
         // Fetch remaining comment pages if the embedded page is incomplete
         if let Some(ref mut comment_list) = issue.fields.comment
@@ -668,6 +698,15 @@ impl JiraClient {
         )
         .await
         .map_err(|err| metadata::write_error(err, meta.as_ref(), update.priority, update.epic))
+        .map_err(|err| match (err, update.issue_type) {
+            (ApiError::Api { status: 400, mut message }, Some(_))
+                if message.contains("issuetype") =>
+            {
+                message.push_str("; Jira only changes an issue type in place when both types share a workflow and field configuration, otherwise use More > Move in the Jira web UI");
+                ApiError::Api { status: 400, message }
+            }
+            (err, _) => err,
+        })
     }
 
     /// Resolve and validate an update request without sending a write.
@@ -722,9 +761,13 @@ impl JiraClient {
         for (k, value) in custom_fields {
             fields.insert(k.clone(), value.clone());
         }
-        if fields.is_empty() && update.epic.is_none() && !update.clear_epic {
+        if fields.is_empty()
+            && update.issue_type.is_none()
+            && update.epic.is_none()
+            && !update.clear_epic
+        {
             return Err(ApiError::InvalidInput(
-                "At least one field (--summary, --description, --priority, --epic, --clear-epic, --components, --fix-versions, --labels, --assignee, or --field) is required"
+                "At least one field (--summary, --description, --priority, --type, --epic, --clear-epic, --components, --fix-versions, --labels, --assignee, or --field) is required"
                     .into(),
             ));
         }

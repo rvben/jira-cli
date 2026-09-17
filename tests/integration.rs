@@ -234,7 +234,7 @@ async fn get_issue_includes_components() {
         .and(path("/rest/api/3/issue/PROJ-1"))
         .and(query_param(
             "fields",
-            "summary,status,assignee,reporter,priority,issuetype,description,labels,components,fixVersions,versions,created,updated,comment,issuelinks",
+            "summary,status,assignee,reporter,priority,issuetype,parent,description,labels,components,fixVersions,versions,created,updated,comment,issuelinks",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(fixture))
         .expect(1)
@@ -266,7 +266,7 @@ async fn get_issue_includes_fix_versions() {
         .and(path("/rest/api/3/issue/PROJ-1"))
         .and(query_param(
             "fields",
-            "summary,status,assignee,reporter,priority,issuetype,description,labels,components,fixVersions,versions,created,updated,comment,issuelinks",
+            "summary,status,assignee,reporter,priority,issuetype,parent,description,labels,components,fixVersions,versions,created,updated,comment,issuelinks",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(fixture))
         .expect(1)

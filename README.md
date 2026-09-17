@@ -152,6 +152,7 @@ jira issues list --all                        # fetch every page
 # Assigned to you
 jira issues mine
 jira issues mine --project MYAPP --status "To Do"
+jira issues list --fields key,summary,parent,epic
 
 # Show
 jira issues show MYAPP-123
@@ -180,6 +181,7 @@ jira issues update MYAPP-123 --priority Low --assignee me
 jira issues update MYAPP-123 --field customfield_10016=5
 jira issues update MYAPP-123 --epic MYAPP-10
 jira issues update MYAPP-123 --clear-epic
+jira issues update MYAPP-123 --type Story     # Task -> Story, same hierarchy level
 jira issues update MYAPP-123 --assignee none
 
 # Transition
@@ -231,6 +233,24 @@ resolving the same native or custom field. It conflicts with `--epic` and
 explicit relationship overrides. Subtasks belong under a Story or Task, not directly under
 an epic. Jira's Cloud and Server/DC metadata formats are supported, including
 [older Server metadata](https://developer.atlassian.com/server/jira/platform/jira-rest-api-examples/).
+
+Issue JSON from `issues show`, `issues list`, `issues mine` and `search`
+includes `parent` (the direct parent's key, summary and type, or `null`) and
+`epic` (the key of the epic the issue belongs to directly, or `null`). On Cloud
+`epic` is the parent when that parent sits at the epic hierarchy level. On Data
+Center it is the Epic Link field, so a subtask created directly under an epic
+shows that epic as `parent` with `epic: null`. `--fields` rejects names that are
+not output fields and lists the valid ones.
+
+`issues update --type` changes an issue's type by name or ID within one
+hierarchy level, for example Task to Story. Jira applies it only when both
+types share a workflow and field configuration. Changing a subtask into a
+standard issue (or back), or moving across hierarchy levels such as Story to
+Epic, is refused: the Jira edit API cannot do it, so use **More > Move** in the
+Jira web UI. On Data Center the flag needs Jira 9.10.0 or later, because older
+releases accept an incompatible type change and leave the issue in an invalid
+workflow state. Combined with `--epic`, epic eligibility is checked against the
+new type.
 
 Priority matching uses the allowed values for the project and issue type, or
 the existing issue's edit metadata. Exact names and IDs take precedence, then

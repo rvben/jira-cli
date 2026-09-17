@@ -5,11 +5,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+mod type_change;
 mod validation;
 use validation::{normalize_named_arrays, validate_required};
 
 pub(super) type Fields = BTreeMap<String, Value>;
-const EPIC_LINK_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-link";
+pub(super) const EPIC_LINK_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-link";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,20 +18,23 @@ pub(super) struct IssueType {
     #[serde(default)]
     id: String,
     name: String,
-    #[serde(default)]
-    subtask: bool,
+    /// As reported: a missing flag is unknown, not false.
+    subtask: Option<bool>,
     hierarchy_level: Option<i64>,
     fields: Option<Fields>,
 }
 
 impl IssueType {
+    /// Explicit metadata decides; the name is a fallback for metadata that
+    /// omits the subtask flag.
     fn is_subtask(&self) -> bool {
-        self.subtask
-            || self.hierarchy_level == Some(-1)
-            || matches!(
-                self.name.to_ascii_lowercase().as_str(),
-                "subtask" | "sub-task"
-            )
+        self.hierarchy_level == Some(-1)
+            || self.subtask.unwrap_or_else(|| {
+                matches!(
+                    self.name.to_ascii_lowercase().as_str(),
+                    "subtask" | "sub-task"
+                )
+            })
     }
     fn is_epic(&self) -> bool {
         self.hierarchy_level == Some(1) || self.name.eq_ignore_ascii_case("Epic")
@@ -422,7 +426,7 @@ impl JiraClient {
         let fallback = IssueType {
             id: String::new(),
             name: input,
-            subtask: false,
+            subtask: None,
             hierarchy_level: None,
             fields: None,
         };
@@ -494,6 +498,21 @@ impl JiraClient {
             normalize_priority(fields, meta.as_ref(), priority)?;
         }
         normalize_named_arrays(fields, meta.as_ref(), custom)?;
+        // The epic checks below judge the type the issue will have after this
+        // write, since a type change and epic linkage travel in one request.
+        let target_type = match update.issue_type {
+            Some(input) => {
+                if custom.iter().any(|(key, _)| key == "issuetype") {
+                    return Err(ApiError::InvalidInput(
+                        "--type conflicts with --field issuetype; choose one source".into(),
+                    ));
+                }
+                let target = self.resolve_type_change(key, input, meta.as_ref()).await?;
+                fields["issuetype"] = json!({"id": target.id});
+                Some(target)
+            }
+            None => None,
+        };
         if let Some(epic) = update.epic {
             if key.eq_ignore_ascii_case(epic) {
                 return Err(ApiError::InvalidInput(
@@ -507,12 +526,18 @@ impl JiraClient {
                     target.name
                 )));
             }
-            let issue_type = self.issue_type_for_link(key).await?;
+            let issue_type = match &target_type {
+                Some(target) => target.clone(),
+                None => self.issue_type_for_link(key).await?,
+            };
             self.set_epic(fields, meta.as_ref(), &issue_type, epic)
                 .await?;
         }
         if update.clear_epic {
-            let issue_type = self.issue_type_for_link(key).await?;
+            let issue_type = match &target_type {
+                Some(target) => target.clone(),
+                None => self.issue_type_for_link(key).await?,
+            };
             if !issue_type.can_belong_to_epic() {
                 return Err(ApiError::InvalidInput(format!(
                     "Cannot use --clear-epic on issue type {:?}; only standard issues can have epic membership cleared",

@@ -8,6 +8,11 @@ pub struct Issue {
     #[serde(rename = "self")]
     pub url: Option<String>,
     pub fields: IssueFields,
+    /// Key of the epic this issue belongs to directly. Filled in by the client
+    /// after fetching: from `parent` on Cloud, from the Epic Link field on
+    /// Data Center / Server.
+    #[serde(skip)]
+    pub epic: Option<String>,
 }
 
 impl Issue {
@@ -77,6 +82,26 @@ pub struct IssueFields {
     pub comment: Option<CommentList>,
     #[serde(rename = "issuelinks")]
     pub issue_links: Option<Vec<IssueLink>>,
+    pub parent: Option<ParentIssue>,
+    /// Requested fields without a typed slot (the Data Center Epic Link custom
+    /// field, whose ID differs per instance).
+    #[serde(flatten, skip_serializing)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The `parent` field of an issue: a subtask's parent, or on Cloud also the
+/// epic above a standard issue.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ParentIssue {
+    pub key: String,
+    #[serde(default)]
+    pub fields: Option<ParentIssueFields>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ParentIssueFields {
+    pub summary: Option<String>,
+    pub issuetype: Option<IssueTypeField>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -100,8 +125,12 @@ pub struct PriorityField {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct IssueTypeField {
     pub name: String,
+    /// Cloud only; `1` is the epic level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_level: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -462,6 +491,8 @@ pub struct IssueUpdate<'a> {
     pub summary: Option<&'a str>,
     pub description: Option<&'a str>,
     pub priority: Option<&'a str>,
+    /// Issue type name or ID to switch to, within the same hierarchy level.
+    pub issue_type: Option<&'a str>,
     pub epic: Option<&'a str>,
     /// Remove epic membership; conflicts with `epic`.
     pub clear_epic: bool,

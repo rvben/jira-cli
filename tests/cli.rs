@@ -31,6 +31,7 @@ fn jira_cmd(dir: &TempDir) -> Command {
         .env_remove("JIRA_EMAIL")
         .env_remove("JIRA_TOKEN")
         .env_remove("JIRA_PROFILE")
+        .env_remove("JIRA_API_VERSION")
         .env_remove("JIRA_READ_ONLY");
     cmd
 }
@@ -1565,6 +1566,15 @@ fn full_issue() -> serde_json::Value {
             "reporter": { "displayName": "Bob", "accountId": "def456" },
             "priority": { "name": "Medium" },
             "issuetype": { "name": "Bug" },
+            "parent": {
+                "id": "10000",
+                "key": "PROJ-100",
+                "fields": {
+                    "summary": "An epic",
+                    "status": { "name": "In Progress" },
+                    "issuetype": { "name": "Epic", "hierarchyLevel": 1 }
+                }
+            },
             "description": {
                 "type": "doc", "version": 1,
                 "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Body"}]}]
@@ -1930,11 +1940,18 @@ async fn absent_issue_fields_are_null_in_json_and_dashes_only_in_the_table() {
 
     let output = run_jira_against(&server, &["issues", "show", "PROJ-2", "--json"]);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    for field in ["assignee", "priority", "reporter", "description"] {
+    for field in [
+        "assignee",
+        "priority",
+        "reporter",
+        "description",
+        "parent",
+        "epic",
+    ] {
         assert!(
-            json[field].is_null(),
-            "issues show must report an absent {field} as null, got: {}",
-            json[field]
+            json.get(field).is_some_and(serde_json::Value::is_null),
+            "issues show must report an absent {field} as null, got: {:?}",
+            json.get(field)
         );
     }
 
@@ -1945,6 +1962,10 @@ async fn absent_issue_fields_are_null_in_json_and_dashes_only_in_the_table() {
     assert!(
         stdout.contains("Assignee:   -"),
         "table must still show a dash for an unassigned issue; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Parent:") && !stdout.contains("Epic:"),
+        "an issue outside any hierarchy has no Parent or Epic line; got:\n{stdout}"
     );
 }
 
@@ -3209,3 +3230,6 @@ mod usability;
 
 #[path = "cli/fields.rs"]
 mod fields;
+
+#[path = "cli/hierarchy.rs"]
+mod hierarchy;
