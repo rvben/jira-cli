@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.13](https://github.com/rvben/jira-cli/compare/v0.4.12...v0.4.13) - 2026-09-17
+
+### Added
+
+- **issues**: report parent and epic, change issue type in place ([27a4156](https://github.com/rvben/jira-cli/commit/27a41566a8dbeb1a6f6e0401887112038cf7fcf8))
+
+### Fixed
+
+- **issues**: refuse issue type changes into or out of Epic ([4df9855](https://github.com/rvben/jira-cli/commit/4df9855242c01ada9699fdf2a4675f761bd2dc7e))
+- **cli**: reject unknown --fields names ([019896a](https://github.com/rvben/jira-cli/commit/019896a6962ff1d3c5245f65d6ae120372f83e97))
+
 ## [0.4.12](https://github.com/rvben/jira-cli/compare/v0.4.11...v0.4.12) - 2026-09-16
 
 ### Added
