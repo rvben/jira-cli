@@ -588,31 +588,207 @@ async fn data_center_refuses_subtask_conversions_without_writing() {
     }
 }
 
+const EPIC_NAME_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-label";
+
+/// Data Center create screens for project 10000: each type with whether its
+/// screen carries the Epic Name field. `None` leaves that type's screen
+/// unreported.
+async fn dc_create_screens(server: &MockServer, types: &[(&str, &str, Option<bool>)]) {
+    let listed: Vec<Value> = types
+        .iter()
+        .map(|(id, name, _)| json!({"id": id, "name": name, "subtask": false}))
+        .collect();
+    get_json(
+        server,
+        "/rest/api/2/issue/createmeta/10000/issuetypes",
+        json!({"values": listed, "startAt": 0, "total": types.len(), "isLast": true}),
+    )
+    .await;
+    for (id, _, epic_name) in types {
+        let Some(epic_name) = epic_name else { continue };
+        let mut fields = vec![
+            json!({"fieldId": "summary", "name": "Summary", "schema": {"type": "string", "system": "summary"}}),
+        ];
+        if *epic_name {
+            fields.push(json!({"fieldId": "customfield_10011", "name": "Epic Name", "schema": {"type": "string", "custom": EPIC_NAME_SCHEMA}}));
+        }
+        get_json(
+            server,
+            &format!("/rest/api/2/issue/createmeta/10000/issuetypes/{id}"),
+            json!({"values": fields, "startAt": 0, "total": fields.len(), "isLast": true}),
+        )
+        .await;
+    }
+}
+
+/// Mount Jira Software's answer to whether PROJ-1 is an epic.
+async fn dc_epic_lookup(server: &MockServer, status: u16) {
+    let response = match status {
+        200 => ResponseTemplate::new(200).set_body_json(json!({"id": 1, "key": "PROJ-1", "name": "An epic"})),
+        404 => ResponseTemplate::new(404).set_body_json(json!({"errorMessages": ["The requested epic cannot be viewed because it either does not exist or you do not have permission to view it."]})),
+        other => ResponseTemplate::new(other).set_body_json(json!({"errorMessages": ["Unexpected failure"]})),
+    };
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/epic/PROJ-1"))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// Data Center reports no hierarchy levels, and an epic type can be renamed.
+/// Jira Software says whether the issue is an epic, and the Epic Name field
+/// on the target's create screen says whether that type is one.
+#[tokio::test]
+async fn data_center_refuses_changes_into_or_out_of_epic_without_writing() {
+    struct Case {
+        current: &'static str,
+        target: &'static str,
+        /// Jira Software's status for "is PROJ-1 an epic".
+        epic_lookup: u16,
+        /// Whether Jira reports the Story create screen.
+        story_screen: bool,
+        /// `None` is the epic refusal, `Some("")` a successful write,
+        /// otherwise the expected error text.
+        outcome: Option<&'static str>,
+    }
+    let case = |current, target, epic_lookup, story_screen, outcome| Case {
+        current,
+        target,
+        epic_lookup,
+        story_screen,
+        outcome,
+    };
+    let cases = [
+        case("Task", "Epic", 404, true, None),
+        case("Epic", "Task", 404, true, None),
+        // A renamed epic, whether or not its own screens carry Epic Name.
+        case("Feature", "Task", 200, true, None),
+        case("Task", "Feature", 404, true, None),
+        case(
+            "Task",
+            "Story",
+            404,
+            false,
+            Some("whether it is an epic cannot be checked"),
+        ),
+        case(
+            "Task",
+            "Story",
+            500,
+            true,
+            Some("did not say whether PROJ-1 is an epic"),
+        ),
+        case("Task", "Story", 404, true, Some("")),
+    ];
+    let types = [
+        ("1", "Task"),
+        ("2", "Story"),
+        ("3", "Epic"),
+        ("4", "Feature"),
+    ];
+    let type_id = |name: &str| types.iter().find(|(_, n)| *n == name).unwrap().0;
+    for c in cases {
+        let label = format!(
+            "{} -> {}, lookup {}, story screen {}",
+            c.current, c.target, c.epic_lookup, c.story_screen
+        );
+        let server = MockServer::start().await;
+        server_info(
+            &server,
+            json!({"version": "10.3.1", "versionNumbers": [10, 3, 1]}),
+        )
+        .await;
+        let fields = json!({"issuetype": {"allowedValues": types
+            .iter()
+            .map(|(id, name)| json!({"id": id, "name": name, "subtask": false}))
+            .collect::<Vec<_>>()}});
+        editmeta(&server, 2, "PROJ-1", fields).await;
+        dc_epic_lookup(&server, c.epic_lookup).await;
+        // Only "Epic" and the renamed "Feature" carry Epic Name. The Feature
+        // screen of the current issue is never consulted.
+        let screens: Vec<(&str, &str, Option<bool>)> = types
+            .iter()
+            .map(|(id, name)| {
+                let reported = c.story_screen || *name != "Story";
+                (
+                    *id,
+                    *name,
+                    reported.then_some(matches!(*name, "Epic" | "Feature")),
+                )
+            })
+            .collect();
+        dc_create_screens(&server, &screens).await;
+        current_type(
+            &server,
+            2,
+            "PROJ-1",
+            json!({"id": type_id(c.current), "name": c.current, "subtask": false}),
+        )
+        .await;
+        if c.outcome == Some("") {
+            expect_put(
+                &server,
+                2,
+                json!({"fields": {"issuetype": {"id": type_id(c.target)}}}),
+                1,
+            )
+            .await;
+        } else {
+            forbid_put(&server).await;
+        }
+
+        let output = run_v2(&server, &["issues", "update", "PROJ-1", "--type", c.target]);
+        if c.outcome == Some("") {
+            assert!(
+                output.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            continue;
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(exit_codes::INPUT_ERROR),
+            "{label}"
+        );
+        let err = stderr(&output);
+        let expected = c.outcome.unwrap_or("converting into or out of Epic");
+        assert!(err.contains(expected), "{label}: {err}");
+        assert!(err.contains("More > Move"), "{label}: {err}");
+    }
+}
+
 #[tokio::test]
 async fn update_type_trusts_reported_classification_over_names() {
-    // A standard type that happens to be named "Sub-task".
-    let server = MockServer::start().await;
-    editmeta(
-        &server,
-        3,
-        "PROJ-1",
-        json!({"issuetype": {"allowedValues": [
-            type_value("7", "Sub-task", false, Some(0)),
-            type_value("2", "Story", false, Some(0)),
-        ]}}),
-    )
-    .await;
-    current_type(
-        &server,
-        3,
-        "PROJ-1",
-        type_value("7", "Sub-task", false, Some(0)),
-    )
-    .await;
-    expect_put(&server, 3, json!({"fields": {"issuetype": {"id": "2"}}}), 1).await;
+    // Standard types that happen to be named like a subtask or an epic.
+    for misnamed in ["Sub-task", "Epic"] {
+        let server = MockServer::start().await;
+        editmeta(
+            &server,
+            3,
+            "PROJ-1",
+            json!({"issuetype": {"allowedValues": [
+                type_value("7", misnamed, false, Some(0)),
+                type_value("2", "Story", false, Some(0)),
+            ]}}),
+        )
+        .await;
+        current_type(
+            &server,
+            3,
+            "PROJ-1",
+            type_value("7", misnamed, false, Some(0)),
+        )
+        .await;
+        expect_put(&server, 3, json!({"fields": {"issuetype": {"id": "2"}}}), 1).await;
 
-    let output = run_jira_against(&server, &["issues", "update", "PROJ-1", "--type", "Story"]);
-    stdout_json(&output);
+        let output = run_jira_against(&server, &["issues", "update", "PROJ-1", "--type", "Story"]);
+        assert!(
+            output.status.success(),
+            "{misnamed}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[tokio::test]
@@ -779,6 +955,77 @@ async fn update_type_explains_a_jira_refusal() {
     );
 }
 
+/// With `--epic` in the same write, a refused type change still reads as a
+/// type problem rather than an epic linking one.
+#[tokio::test]
+async fn update_type_refusal_with_epic_explains_only_the_type() {
+    let server = MockServer::start().await;
+    server_info(
+        &server,
+        json!({"version": "9.12.4", "versionNumbers": [9, 12, 4]}),
+    )
+    .await;
+    editmeta(
+        &server,
+        2,
+        "PROJ-1",
+        json!({
+            "issuetype": {"allowedValues": [
+                {"id": "1", "name": "Task", "subtask": false},
+                {"id": "2", "name": "Story", "subtask": false}
+            ]},
+            "customfield_10100": {"name": "Epic Link", "schema": {"type": "any", "custom": EPIC_LINK_SCHEMA}}
+        }),
+    )
+    .await;
+    dc_create_screens(
+        &server,
+        &[("1", "Task", Some(false)), ("2", "Story", Some(false))],
+    )
+    .await;
+    current_type(
+        &server,
+        2,
+        "PROJ-1",
+        json!({"id": "1", "name": "Task", "subtask": false}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/issue/PROJ-9"))
+        .and(query_param("fields", "issuetype"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "fields": {"issuetype": {"id": "5", "name": "Epic", "subtask": false}}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/2/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "errorMessages": [],
+            "errors": {"issuetype": "The issue type selected is invalid."}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_v2(
+        &server,
+        &[
+            "issues", "update", "PROJ-1", "--type", "Story", "--epic", "PROJ-9",
+        ],
+    );
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("fields: issuetype"), "{err}");
+    assert_eq!(
+        err.matches("share a workflow and field configuration")
+            .count(),
+        1,
+        "{err}"
+    );
+    assert!(!err.contains("Epic Link"), "{err}");
+}
+
 /// The type-change hint belongs to refusals about the type, not to every 400
 /// of a write that happens to include `--type`.
 #[tokio::test]
@@ -854,9 +1101,8 @@ async fn update_type_refuses_data_center_releases_that_skip_workflow_checks() {
     }
 }
 
-/// On Data Center there are no hierarchy levels and an Epic is a standard
-/// type, so Epic -> Story is an ordinary edit. Adding the result to an epic in
-/// the same write must be judged against Story, the type it is becoming.
+/// Adding an issue to an epic in the same write as a type change is judged
+/// against the type it is becoming, which the type change already resolved.
 #[tokio::test]
 async fn update_type_with_epic_checks_the_target_type() {
     let server = MockServer::start().await;
@@ -871,18 +1117,23 @@ async fn update_type_with_epic_checks_the_target_type() {
         "PROJ-1",
         json!({
             "issuetype": {"allowedValues": [
-                {"id": "5", "name": "Epic", "subtask": false},
+                {"id": "1", "name": "Task", "subtask": false},
                 {"id": "2", "name": "Story", "subtask": false}
             ]},
             "customfield_10100": {"name": "Epic Link", "schema": {"type": "any", "custom": EPIC_LINK_SCHEMA}}
         }),
     )
     .await;
+    dc_create_screens(
+        &server,
+        &[("1", "Task", Some(false)), ("2", "Story", Some(false))],
+    )
+    .await;
     current_type(
         &server,
         2,
         "PROJ-1",
-        json!({"id": "5", "name": "Epic", "subtask": false}),
+        json!({"id": "1", "name": "Task", "subtask": false}),
     )
     .await;
     Mock::given(method("GET"))
@@ -893,7 +1144,7 @@ async fn update_type_with_epic_checks_the_target_type() {
         })))
         .mount(&server)
         .await;
-    // The current type is not what the epic check looks at.
+    // The epic check needs no second lookup of the issue being changed.
     Mock::given(method("GET"))
         .and(path("/rest/api/2/issue/PROJ-1"))
         .and(query_param("fields", "issuetype"))
@@ -939,6 +1190,11 @@ async fn update_type_with_epic_trusts_the_reported_target_classification() {
             ]},
             "customfield_10100": {"name": "Epic Link", "schema": {"type": "any", "custom": EPIC_LINK_SCHEMA}}
         }),
+    )
+    .await;
+    dc_create_screens(
+        &server,
+        &[("1", "Task", Some(false)), ("7", "Sub-task", Some(false))],
     )
     .await;
     current_type(

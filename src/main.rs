@@ -375,7 +375,7 @@ enum IssuesCommand {
         priority: Option<String>,
 
         /// Change the issue type (name or ID) within the same hierarchy level, e.g. Task to Story.
-        /// Subtask <-> standard issue conversions need Move in the Jira web UI.
+        /// Subtask <-> standard issue and changes into or out of Epic need Move in the Jira web UI.
         #[arg(long = "type", value_name = "TYPE")]
         issue_type: Option<String>,
 

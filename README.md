@@ -249,8 +249,11 @@ standard issue (or back), or moving across hierarchy levels such as Story to
 Epic, is refused: the Jira edit API cannot do it, so use **More > Move** in the
 Jira web UI. On Data Center the flag needs Jira 9.10.0 or later, because older
 releases accept an incompatible type change and leave the issue in an invalid
-workflow state. Combined with `--epic`, epic eligibility is checked against the
-new type.
+workflow state. Data Center has no hierarchy levels, so Jira Software is asked
+whether the issue is an epic, and a target type counts as an epic when its
+create screen carries the Epic Name field. A renamed epic type whose create
+screen lacks Epic Name is therefore not recognized as a target. Combined with
+`--epic`, epic eligibility is checked against the new type.
 
 Priority matching uses the allowed values for the project and issue type, or
 the existing issue's edit metadata. Exact names and IDs take precedence, then

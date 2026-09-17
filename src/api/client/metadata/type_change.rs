@@ -12,6 +12,9 @@ const SAFE_SERVER_VERSION: [u64; 3] = [9, 10, 0];
 
 const MOVE_HINT: &str = "use More > Move in the Jira web UI instead";
 
+/// Jira Software's Epic Name field, which only epics carry.
+const EPIC_NAME_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-label";
+
 #[derive(Deserialize)]
 struct CurrentIssue {
     fields: CurrentFields,
@@ -75,17 +78,71 @@ impl JiraClient {
                 target.name
             )));
         }
-        check_same_level(&current.issuetype, &target, self.api_version >= 3)?;
+        let cloud = self.api_version >= 3;
+        check_same_level(&current.issuetype, &target, cloud)?;
         if target.id == current.issuetype.id {
             return Err(ApiError::InvalidInput(format!(
                 "{key} is already of issue type {:?}",
                 current.issuetype.name
             )));
         }
+        // Cloud's hierarchy levels, checked above, already separate epics.
+        // Data Center has no levels, and an epic type can be renamed: Jira
+        // Software says whether the issue itself is an epic, and the Epic Name
+        // field on the target type's create screen marks that type as one.
+        if !cloud {
+            let current_is_epic = current.issuetype.is_epic() || self.issue_is_epic(key).await?;
+            let target_is_epic = target.is_epic()
+                || self
+                    .type_has_epic_name(&current.project.id, &target)
+                    .await?;
+            if current_is_epic != target_is_epic {
+                return Err(ApiError::InvalidInput(format!(
+                    "Cannot change {:?} to {:?}: converting into or out of Epic is not supported by the Jira edit API; {MOVE_HINT}",
+                    current.issuetype.name, target.name
+                )));
+            }
+        }
         Ok(IssueType {
             fields: None,
             ..target
         })
+    }
+
+    /// Whether Jira Software reports `key` as an epic. The issue was just read,
+    /// so a 404 means it is not one; without Jira Software the whole endpoint
+    /// is missing and no issue is an epic either.
+    async fn issue_is_epic(&self, key: &str) -> Result<bool, ApiError> {
+        match self.agile_get::<Value>(&format!("epic/{key}")).await {
+            Ok(_) => Ok(true),
+            Err(ApiError::NotFound(_)) => Ok(false),
+            Err(ApiError::Api { status, message }) => Err(ApiError::InvalidInput(format!(
+                "Jira Software did not say whether {key} is an epic (HTTP {status}: {message}), so the change cannot be checked; {MOVE_HINT}"
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Whether the create screen of `issue_type` in `project` carries the Epic
+    /// Name field. A screen Jira will not report leaves the question open, so
+    /// the change is refused rather than assumed safe.
+    async fn type_has_epic_name(
+        &self,
+        project: &str,
+        issue_type: &IssueType,
+    ) -> Result<bool, ApiError> {
+        let fields = match self.create_metadata(project, &issue_type.id).await {
+            Ok(meta) => meta.and_then(|meta| meta.fields),
+            Err(ApiError::NotFound(_) | ApiError::InvalidInput(_)) => None,
+            Err(err) => return Err(err),
+        };
+        match fields {
+            Some(fields) => Ok(has_epic_name(&fields)),
+            None => Err(ApiError::InvalidInput(format!(
+                "Jira did not report the create screen of issue type {:?}, so whether it is an epic cannot be checked; {MOVE_HINT}",
+                issue_type.name
+            ))),
+        }
     }
 
     async fn ensure_server_type_edit_is_safe(&self) -> Result<(), ApiError> {
@@ -134,6 +191,13 @@ fn select_type<'a>(input: &str, options: &'a [Value]) -> Result<&'a Value, ApiEr
             option_names(options)
         ))),
     }
+}
+
+/// Whether a screen's fields include Epic Name.
+fn has_epic_name(fields: &Fields) -> bool {
+    fields
+        .values()
+        .any(|field| field["schema"]["custom"] == EPIC_NAME_SCHEMA)
 }
 
 /// An edit can only swap types within one hierarchy level. Moving between
@@ -236,7 +300,7 @@ mod tests {
         assert!(err.contains("did not report whether"), "{err}");
 
         // Cloud always reports levels; a missing one is not a match.
-        let unlevelled = reported("Epic", Some(false), None);
+        let unlevelled = reported("Improvement", Some(false), None);
         for (from, to) in [(&story, &unlevelled), (&unlevelled, &story)] {
             let err = check_same_level(from, to, true).unwrap_err().to_string();
             assert!(err.contains("did not report the hierarchy level"), "{err}");
@@ -245,5 +309,18 @@ mod tests {
         let dc_task = reported("Task", Some(false), None);
         assert!(check_same_level(&dc_task, &unlevelled, false).is_ok());
         assert!(check_same_level(&story, &unlevelled, false).is_err());
+    }
+
+    #[test]
+    fn epic_name_field_marks_the_screens_of_an_epic() {
+        let fields = |schema: &str| -> Fields {
+            serde_json::from_value(json!({
+                "summary": {"schema": {"type": "string", "system": "summary"}},
+                "customfield_10011": {"schema": {"type": "string", "custom": schema}},
+            }))
+            .unwrap()
+        };
+        assert!(has_epic_name(&fields(EPIC_NAME_SCHEMA)));
+        assert!(!has_epic_name(&fields(super::super::EPIC_LINK_SCHEMA)));
     }
 }

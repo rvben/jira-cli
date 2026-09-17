@@ -697,15 +697,21 @@ impl JiraClient {
             &serde_json::json!({"fields": fields}),
         )
         .await
-        .map_err(|err| metadata::write_error(err, meta.as_ref(), update.priority, update.epic))
-        .map_err(|err| match (err, update.issue_type) {
-            (ApiError::Api { status: 400, mut message }, Some(_))
-                if message.contains("issuetype") =>
-            {
-                message.push_str("; Jira only changes an issue type in place when both types share a workflow and field configuration, otherwise use More > Move in the Jira web UI");
-                ApiError::Api { status: 400, message }
+        .map_err(|err| {
+            // A refused type change is explained as such, not as an epic
+            // linking problem.
+            let type_refused = update.issue_type.is_some()
+                && matches!(&err, ApiError::Api { status: 400, message } if message.contains("issuetype"));
+            if !type_refused {
+                return metadata::write_error(err, meta.as_ref(), update.priority, update.epic);
             }
-            (err, _) => err,
+            match metadata::write_error(err, meta.as_ref(), update.priority, None) {
+                ApiError::Api { status, mut message } => {
+                    message.push_str("; Jira only changes an issue type in place when both types share a workflow and field configuration, otherwise use More > Move in the Jira web UI");
+                    ApiError::Api { status, message }
+                }
+                err => err,
+            }
         })
     }
 
