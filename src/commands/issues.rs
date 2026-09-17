@@ -219,6 +219,36 @@ fn render_results(
     }
 }
 
+/// Parse a comma-separated `--fields` argument, refusing names that are not
+/// keys of the issue JSON. An unknown name must fail rather than quietly
+/// filter every item down to an object that looks like the field is empty.
+pub fn parse_fields_arg(arg: &str) -> Result<Vec<String>, ApiError> {
+    let names: Vec<String> = arg
+        .split(',')
+        .map(|f| f.trim().to_owned())
+        .filter(|f| !f.is_empty())
+        .collect();
+    if names.is_empty() {
+        return Err(ApiError::InvalidInput(format!(
+            "--fields needs at least one name. Valid names: {}",
+            ISSUE_SUMMARY_KEYS.join(", ")
+        )));
+    }
+    let unknown: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !ISSUE_SUMMARY_KEYS.contains(name))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(ApiError::InvalidInput(format!(
+            "Unknown --fields name(s): {}. Valid names: {}",
+            unknown.join(", "),
+            ISSUE_SUMMARY_KEYS.join(", ")
+        )));
+    }
+    Ok(names)
+}
+
 /// Retain only the requested fields from a JSON object. When `fields` is `None`
 /// or empty, the original value is returned unchanged.
 pub fn filter_fields(mut value: serde_json::Value, fields: Option<&[String]>) -> serde_json::Value {
@@ -949,6 +979,11 @@ fn user_to_json(user: Option<&UserField>) -> serde_json::Value {
         None => serde_json::Value::Null,
     }
 }
+
+/// Keys of an `issue_to_json` object: the names `--fields` accepts.
+pub(crate) const ISSUE_SUMMARY_KEYS: [&str; 10] = [
+    "key", "id", "url", "summary", "status", "assignee", "priority", "type", "created", "updated",
+];
 
 pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::Value {
     serde_json::json!({
@@ -1695,6 +1730,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, Some(Some("literal-id-999".to_string())));
+    }
+
+    #[test]
+    fn fields_names_are_exactly_the_issue_json_keys() {
+        let client = crate::api::JiraClient::new(
+            "https://example.atlassian.net",
+            "test@example.com",
+            "test-token",
+            crate::api::AuthType::Basic,
+            3,
+        )
+        .unwrap();
+        let json = issue_to_json(&issue_fixture(None, None), &client);
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut expected = ISSUE_SUMMARY_KEYS.to_vec();
+        keys.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 }
 

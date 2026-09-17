@@ -11,14 +11,6 @@ use std::io::IsTerminal;
 mod schema_args;
 use schema_args::arg_type;
 
-/// Parse a comma-separated `--fields` argument into a list of field names.
-fn parse_fields_arg(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(|f| f.trim().to_string())
-        .filter(|f| !f.is_empty())
-        .collect()
-}
-
 fn parse_field(s: &str) -> Result<(String, serde_json::Value), String> {
     let (key, raw) = s
         .split_once('=')
@@ -938,7 +930,10 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     fix_versions: parsed_fix_versions.as_deref(),
                     jql_extra: jql.as_deref(),
                 };
-                let field_filter = fields.as_deref().map(parse_fields_arg);
+                let field_filter = fields
+                    .as_deref()
+                    .map(commands::issues::parse_fields_arg)
+                    .transpose()?;
                 commands::issues::list(
                     &client,
                     &out,
@@ -966,7 +961,10 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     sprint: sprint.as_deref(),
                     ..Default::default()
                 };
-                let field_filter = fields.as_deref().map(parse_fields_arg);
+                let field_filter = fields
+                    .as_deref()
+                    .map(commands::issues::parse_fields_arg)
+                    .transpose()?;
                 commands::issues::mine(&client, &out, filters, limit, all, field_filter.as_deref())
                     .await?
             }
@@ -1212,7 +1210,10 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             all,
             fields,
         } => {
-            let field_filter = fields.as_deref().map(parse_fields_arg);
+            let field_filter = fields
+                .as_deref()
+                .map(commands::issues::parse_fields_arg)
+                .transpose()?;
             commands::search::run(
                 &client,
                 &out,

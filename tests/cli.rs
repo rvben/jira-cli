@@ -3206,3 +3206,6 @@ fn schema_exposes_sprint_scope_epic_clearing_and_partial_success_recovery() {
 
 #[path = "cli/usability.rs"]
 mod usability;
+
+#[path = "cli/fields.rs"]
+mod fields;
