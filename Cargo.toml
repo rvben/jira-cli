@@ -31,7 +31,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 mime_guess = { version = "2", default-features = false }
 terminal_size = "0.4"
 tempfile = "3"
-keyring = "4.1"
+keyring = "4.2"
 open = "5.4"
 
 [target.'cfg(unix)'.dependencies]
