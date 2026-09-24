@@ -64,11 +64,7 @@ pub async fn run(
         }
     };
 
-    let project_detail = match projects.len() {
-        0 => "accessible; no projects visible".to_string(),
-        1 => "1 project accessible".to_string(),
-        count => format!("{count} projects accessible"),
-    };
+    let project_detail = project_access_detail(projects.len());
     let checks = serde_json::json!([
         {"name": "configuration", "ok": true, "detail": configuration},
         {"name": "authentication", "ok": true, "detail": me.display_name},
@@ -130,6 +126,15 @@ fn render_failure(
         {"name": "write_safety", "ok": true, "detail": safety}
     ]);
     render_failed_checks(out, checks);
+}
+
+/// Describe how many projects the account can see, as `doctor` and `init` report it.
+pub(crate) fn project_access_detail(count: usize) -> String {
+    match count {
+        0 => "accessible; no projects visible".to_string(),
+        1 => "1 project accessible".to_string(),
+        count => format!("{count} projects accessible"),
+    }
 }
 
 fn render_project_failure(

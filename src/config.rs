@@ -937,7 +937,17 @@ async fn init_interactive(
         Ok(client) => match client.get_myself().await {
             Ok(myself) => {
                 eprintln!(" {} Authenticated as {}", sym_ok(), myself.display_name);
-                true
+                match check_project_access(&client).await {
+                    Ok(detail) => {
+                        eprintln!("  {} {detail}", sym_ok());
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("  {} Could not list projects: {e}", sym_fail());
+                        eprintln!();
+                        prompt_bool("Save config anyway?", false)?
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(" {} {e}", sym_fail());
@@ -1028,14 +1038,51 @@ async fn init_interactive(
         })
     );
     eprintln!("{sep}");
-    if profile_name == "default" {
-        eprintln!("  Run: jira projects list");
-    } else {
-        eprintln!("  Run: jira --profile {profile_name} projects list");
+    eprintln!("  Next:");
+    for (command, purpose) in next_commands(&profile_name) {
+        eprintln!("    {command:<width$}  {}", sym_dim(purpose), width = 36);
     }
     eprintln!();
 
     Ok(())
+}
+
+/// Confirm the verified credentials can read projects, not just `/myself`.
+///
+/// An account can authenticate yet see nothing: a scoped Cloud token without
+/// read access, or a Data Center account without Browse Projects. Reporting it
+/// during setup puts the problem where the credential is chosen.
+async fn check_project_access(client: &crate::api::client::JiraClient) -> Result<String, ApiError> {
+    let projects = client.list_projects().await?;
+    if projects.is_empty() {
+        return Ok(
+            "No projects visible yet; ask a Jira administrator for Browse Projects permission"
+                .to_owned(),
+        );
+    }
+    Ok(crate::commands::doctor::project_access_detail(
+        projects.len(),
+    ))
+}
+
+/// Commands worth running first after `jira init`, addressed to the saved profile.
+fn next_commands(profile: &str) -> Vec<(String, &'static str)> {
+    let prefix = if profile == "default" {
+        "jira".to_owned()
+    } else {
+        format!("jira --profile {}", shell_word(profile))
+    };
+    vec![
+        (format!("{prefix} doctor"), "Check the complete connection"),
+        (
+            format!("{prefix} issues mine"),
+            "See what needs your attention",
+        ),
+        (
+            format!("{prefix} projects list"),
+            "List the projects you can see",
+        ),
+    ]
 }
 
 /// List all profile names present in the config file (default first, then named profiles).
@@ -2013,6 +2060,95 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body, serde_json::json!({"name": "jira-cli / work"}));
+    }
+
+    async fn project_check_against(
+        response: wiremock::ResponseTemplate,
+    ) -> Result<String, ApiError> {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/project"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = crate::api::JiraClient::new(
+            &server.uri(),
+            "me@example.com",
+            "token",
+            AuthType::Basic,
+            2,
+        )
+        .unwrap();
+        check_project_access(&client).await
+    }
+
+    #[tokio::test]
+    async fn init_project_check_counts_the_visible_projects() {
+        let projects = serde_json::json!([
+            {"id": "1", "key": "ONE", "name": "One"},
+            {"id": "2", "key": "TWO", "name": "Two"}
+        ]);
+        let detail =
+            project_check_against(wiremock::ResponseTemplate::new(200).set_body_json(projects))
+                .await
+                .unwrap();
+        assert_eq!(detail, "2 projects accessible");
+    }
+
+    /// Authenticating proves the token, not that the account can see any work,
+    /// so setup names the permission to ask for instead of reporting success.
+    #[tokio::test]
+    async fn init_project_check_names_the_permission_when_nothing_is_visible() {
+        let detail = project_check_against(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([])),
+        )
+        .await
+        .unwrap();
+        assert!(detail.contains("No projects visible"), "got: {detail}");
+        assert!(detail.contains("Browse Projects"), "got: {detail}");
+    }
+
+    #[tokio::test]
+    async fn init_project_check_reports_a_refused_project_listing() {
+        let error = project_check_against(
+            wiremock::ResponseTemplate::new(403)
+                .set_body_json(serde_json::json!({"errorMessages": ["Forbidden"]})),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)), "got: {error:?}");
+    }
+
+    #[test]
+    fn init_next_commands_address_the_saved_profile() {
+        let default: Vec<String> = next_commands("default")
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(
+            default,
+            ["jira doctor", "jira issues mine", "jira projects list"]
+        );
+
+        let work: Vec<String> = next_commands("work").into_iter().map(|(c, _)| c).collect();
+        assert_eq!(
+            work,
+            [
+                "jira --profile work doctor",
+                "jira --profile work issues mine",
+                "jira --profile work projects list"
+            ]
+        );
+
+        let spaced: Vec<String> = next_commands("work team")
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(spaced[0], "jira --profile 'work team' doctor");
     }
 
     #[test]
