@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.16](https://github.com/rvben/jira-cli/compare/v0.4.15...v0.4.16) - 2026-09-24
+
+### Fixed
+
+- **sprints**: keep issue reads available and preflight moves ([ced43cb](https://github.com/rvben/jira-cli/commit/ced43cbf1140d0bf9a737b5d44595c67331207db))
+
 ## [0.4.15](https://github.com/rvben/jira-cli/compare/v0.4.14...v0.4.15) - 2026-09-24
 
 ### Fixed
