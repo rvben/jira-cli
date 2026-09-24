@@ -1365,6 +1365,12 @@ fn schema_json() -> serde_json::Value {
         "dcPatInstructions": dc_pat_instructions,
         "configExists": false,
         "recommendedPermissions": permission_advice,
+        "cloudTokenScopes": {
+            "readOnly": jira_cli::api::scopes::platform(true),
+            "readWrite": jira_cli::api::scopes::platform(false),
+            "boardsAndSprintsReadOnly": jira_cli::api::scopes::agile(true),
+            "boardsAndSprintsReadWrite": jira_cli::api::scopes::agile(false)
+        },
         "site": {
             "input": "https://jira.mycompany.com/browse/PROJ-1",
             "host": "jira.mycompany.com",
@@ -1383,6 +1389,12 @@ fn schema_json() -> serde_json::Value {
         {"name": "tokenInstructions", "type": "string", "description": "Where to create a Jira Cloud API token"},
         {"name": "dcPatInstructions", "type": "string", "description": "Where to create a Personal Access Token on Jira Data Center/Server"},
         {"name": "recommendedPermissions", "type": "string"},
+        {"name": "cloudTokenScopes", "type": "object", "description": "Scopes to select when creating a scoped Jira Cloud API token. Board and sprint requests accept only the granular Jira Software scopes, so they are listed separately", "fields": [
+            {"name": "readOnly", "type": "string[]", "description": "Every command except boards and sprints, for a read-only profile"},
+            {"name": "readWrite", "type": "string[]", "description": "Every command except boards and sprints, for a profile that writes"},
+            {"name": "boardsAndSprintsReadOnly", "type": "string[]", "description": "Added for `jira boards` and `jira sprints` reads"},
+            {"name": "boardsAndSprintsReadWrite", "type": "string[]", "description": "Added for boards and sprints when the profile also moves issues into sprints"}
+        ]},
         {"name": "site", "type": "object", "optional": true, "description": "Present when --host is given: what the site reports about itself", "fields": [
             {"name": "input", "type": "string", "description": "The --host value as given"},
             {"name": "host", "type": "string", "description": "The host a profile for this site stores; null when the input is not an address"},

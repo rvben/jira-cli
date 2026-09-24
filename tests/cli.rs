@@ -3273,47 +3273,109 @@ async fn rejected_stored_token_names_the_profile_and_the_login_command() {
     assert!(!stderr.contains("JIRA_TOKEN"), "{stderr}");
 }
 
-/// A profile name can hold a space, and the suggested command still has to
-/// reach the shell as one `--profile` argument.
-#[cfg(unix)]
+/// The Cloud API gateway refuses a scoped token that lacks a scope with a 401,
+/// the same status as a revoked token. The body tells them apart, and the
+/// advice follows it: a new token with more scopes, not a check for expiry.
 #[tokio::test]
-async fn suggested_login_command_quotes_a_profile_name_with_a_space() {
+async fn token_missing_a_scope_is_told_which_scopes_to_add() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/rest/api/2/myself"))
-        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "code": 401,
+            "message": "Unauthorized; scope does not match"
+        })))
+        .expect(1)
         .mount(&server)
         .await;
     let dir = TempDir::new().unwrap();
     write_config(
         dir.path(),
         &format!(
-            "[profiles.\"work team\"]\nhost = \"{}\"\nauth_type = \"pat\"\napi_version = 2\ntoken = \"stale\"\ncredential_store = \"file\"\n",
+            "[profiles.work]\nhost = \"{}\"\nemail = \"me@example.com\"\ntoken = \"narrow\"\ncredential_store = \"file\"\n",
             server.uri()
         ),
     )
     .unwrap();
 
     let output = jira_cmd(&dir)
-        .args(["--profile", "work team", "myself", "--output", "text"])
+        .args(["--profile", "work", "myself", "--json"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let command = stderr
-        .split("Run `")
-        .nth(1)
-        .and_then(|rest| rest.split('`').next())
-        .unwrap_or_else(|| panic!("no suggested command in: {stderr}"));
 
-    let words = std::process::Command::new("sh")
-        .args(["-c", &format!("printf '%s\\n' {command}")])
-        .output()
-        .unwrap();
-    let words = String::from_utf8(words.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "auth");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("scope does not match"), "{message}");
+    assert!(
+        message.contains("The token stored for profile `work` lacks a scope"),
+        "{message}"
+    );
+    assert!(message.contains("cloudTokenScopes"), "{message}");
+    assert!(
+        message.contains("jira auth login --profile work"),
+        "{message}"
+    );
+    assert!(!message.contains("expired"), "{message}");
+}
+
+#[tokio::test]
+async fn environment_token_missing_a_scope_points_at_jira_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "code": 401,
+            "message": "Unauthorized; scope does not match"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["myself", "--json"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("The token in JIRA_TOKEN lacks a scope"),
+        "{message}"
+    );
+    assert!(!message.contains("auth login"), "{message}");
+}
+
+/// Board and sprint requests accept only granular Jira Software scopes, so a
+/// token built from the classic list alone would fail on exactly those commands.
+#[test]
+fn init_json_lists_the_scopes_for_a_scoped_cloud_token() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["init", "--json"]).output().unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let scopes = &json["cloudTokenScopes"];
+
     assert_eq!(
-        words.lines().collect::<Vec<_>>(),
-        ["jira", "auth", "login", "--profile", "work team"],
-        "{command}"
+        scopes["readOnly"],
+        serde_json::json!(["read:jira-work", "read:jira-user"])
+    );
+    assert_eq!(
+        scopes["readWrite"],
+        serde_json::json!(["read:jira-work", "read:jira-user", "write:jira-work"])
+    );
+    let agile_read = scopes["boardsAndSprintsReadOnly"].as_array().unwrap();
+    assert!(agile_read.contains(&serde_json::json!("read:sprint:jira-software")));
+    assert!(agile_read.contains(&serde_json::json!("read:board-scope:jira-software")));
+    assert!(
+        agile_read
+            .iter()
+            .all(|scope| !scope.as_str().unwrap().starts_with("write:"))
+    );
+    assert!(
+        scopes["boardsAndSprintsReadWrite"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("write:sprint:jira-software"))
     );
 }
 
@@ -3618,6 +3680,50 @@ async fn doctor_project_check_rejected_by_401_carries_the_remedy() {
     assert!(
         detail.contains("The token in JIRA_TOKEN was rejected"),
         "{detail}"
+    );
+}
+
+/// A profile name can hold a space, and the suggested command still has to
+/// reach the shell as one `--profile` argument.
+#[cfg(unix)]
+#[tokio::test]
+async fn suggested_login_command_quotes_a_profile_name_with_a_space() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[profiles.\"work team\"]\nhost = \"{}\"\nauth_type = \"pat\"\napi_version = 2\ntoken = \"stale\"\ncredential_store = \"file\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["--profile", "work team", "myself", "--output", "text"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let command = stderr
+        .split("Run `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("no suggested command in: {stderr}"));
+
+    let words = std::process::Command::new("sh")
+        .args(["-c", &format!("printf '%s\\n' {command}")])
+        .output()
+        .unwrap();
+    let words = String::from_utf8(words.stdout).unwrap();
+    assert_eq!(
+        words.lines().collect::<Vec<_>>(),
+        ["jira", "auth", "login", "--profile", "work team"],
+        "{command}"
     );
 }
 

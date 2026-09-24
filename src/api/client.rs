@@ -23,7 +23,7 @@ pub struct JiraClient {
     read_only: bool,
     /// How to replace a rejected token, attached to every 401; see
     /// `with_auth_remedy`.
-    auth_remedy: Option<String>,
+    auth_remedy: Option<super::AuthRemedy>,
     /// Whether issue reads fill in `Issue::epic`; see `enable_epic_lookup`.
     epic_lookup: std::sync::atomic::AtomicBool,
     /// Data Center Epic Link field IDs, resolved at most once per client.
@@ -168,7 +168,7 @@ impl JiraClient {
     /// Advice every 401 from this client carries, naming where the token came
     /// from and how to replace it. Set once here so each reporting path, per-item
     /// bulk results included, publishes the same guidance.
-    pub fn with_auth_remedy(mut self, remedy: String) -> Self {
+    pub fn with_auth_remedy(mut self, remedy: super::AuthRemedy) -> Self {
         self.auth_remedy = Some(remedy);
         self
     }
@@ -208,10 +208,16 @@ impl JiraClient {
     fn map_status(&self, status: u16, body: String) -> ApiError {
         let message = summarize_error_body(status, &body);
         match status {
-            401 => ApiError::Auth {
-                message,
-                remedy: self.auth_remedy.clone(),
-            },
+            401 => {
+                let missing_scope = super::scopes::is_scope_mismatch(&body);
+                let remedy = match (&self.auth_remedy, missing_scope) {
+                    (Some(remedy), true) => Some(remedy.missing_scope.clone()),
+                    (Some(remedy), false) => Some(remedy.rejected.clone()),
+                    (None, true) => Some(super::DEFAULT_MISSING_SCOPE_REMEDY.to_owned()),
+                    (None, false) => None,
+                };
+                ApiError::Auth { message, remedy }
+            }
             403 => ApiError::Forbidden(message),
             404 => ApiError::NotFound(message),
             409 => ApiError::Conflict(message),
@@ -1239,6 +1245,8 @@ fn summarize_json_error_body(body: &str) -> Option<String> {
 
     if !parsed.error_messages.is_empty() {
         parts.push(format_error_messages(&parsed.error_messages));
+    } else if let Some(message) = parsed.message.as_deref().filter(|m| !m.trim().is_empty()) {
+        parts.push(truncate_message(message.trim()));
     }
 
     if !parsed.errors.is_empty() {
@@ -1309,6 +1317,10 @@ fn should_include_raw_error_body() -> bool {
 struct JiraErrorPayload {
     #[serde(default)]
     error_messages: Vec<String>,
+    /// The Cloud API gateway reports its own refusals, a missing token scope
+    /// among them, as a single `message` rather than `errorMessages`.
+    #[serde(default)]
+    message: Option<String>,
     #[serde(default)]
     errors: BTreeMap<String, String>,
 }

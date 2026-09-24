@@ -105,7 +105,7 @@ fn shell_word(word: &str) -> std::borrow::Cow<'_, str> {
 impl Config {
     /// How to replace this profile's token when Jira rejects it: the variable to
     /// change, or the exact command to rerun, rather than a generic checklist.
-    pub fn auth_remedy(&self) -> String {
+    pub fn auth_remedy(&self) -> crate::api::AuthRemedy {
         let causes = match self.auth_type {
             AuthType::Basic => format!(
                 "it may have expired or been revoked, or belong to an account other than {}",
@@ -113,16 +113,27 @@ impl Config {
             ),
             AuthType::Pat => "it may have expired or been revoked".to_string(),
         };
+        let scopes_advice = "lacks a scope this request needs. Create a token with the scopes `jira init --json` lists under cloudTokenScopes";
         if self.credential_store == "environment" {
-            format!(
-                "The token in JIRA_TOKEN was rejected: {causes}. Replace JIRA_TOKEN with a current token."
-            )
+            crate::api::AuthRemedy {
+                rejected: format!(
+                    "The token in JIRA_TOKEN was rejected: {causes}. Replace JIRA_TOKEN with a current token."
+                ),
+                missing_scope: format!(
+                    "The token in JIRA_TOKEN {scopes_advice}, then put it in JIRA_TOKEN."
+                ),
+            }
         } else {
-            format!(
-                "The token stored for profile `{profile}` was rejected: {causes}. Run `jira auth login --profile {argument}` to store a new one.",
-                profile = self.profile,
-                argument = shell_word(&self.profile)
-            )
+            let profile = &self.profile;
+            let argument = shell_word(profile);
+            crate::api::AuthRemedy {
+                rejected: format!(
+                    "The token stored for profile `{profile}` was rejected: {causes}. Run `jira auth login --profile {argument}` to store a new one."
+                ),
+                missing_scope: format!(
+                    "The token stored for profile `{profile}` {scopes_advice}, then run `jira auth login --profile {argument}` to store it."
+                ),
+            }
         }
     }
 
@@ -623,6 +634,7 @@ async fn init_json(out: &OutputConfig, host: Option<&str>, detect_site: bool) {
         "pathResolution": path_resolution,
         "configExists": path.exists(),
         "tokenInstructions": CLOUD_TOKEN_URL,
+        "cloudTokenScopes": cloud_token_scopes_json(),
         "dcPatInstructions": pat_url,
         "recommendedPermissions": permission_advice,
         "example": example,
@@ -762,6 +774,13 @@ async fn init_interactive(
     let is_cloud = deployment == site::Deployment::Cloud;
     eprintln!();
 
+    // Asked before the token, because a scoped token's scopes follow from it.
+    let default_read_only = existing
+        .as_ref()
+        .and_then(|profile| profile.read_only)
+        .unwrap_or(false);
+    let read_only = prompt_bool("Read-only mode?", default_read_only)?;
+
     let prior_token = match (
         existing
             .as_ref()
@@ -810,10 +829,7 @@ async fn init_interactive(
         }
         eprintln!("  {}", sym_dim(&format!("→ {CLOUD_TOKEN_URL}")));
         if token_kind == "scoped" {
-            eprintln!(
-                "  {}",
-                sym_dim("Choose Jira scopes and the least privilege needed for this profile.")
-            );
+            print_token_scopes(read_only);
         }
         let token_hint = if prior_token.is_some() {
             "(Enter to keep)"
@@ -892,12 +908,6 @@ async fn init_interactive(
         (None, token, "pat", api_version, None, "classic".to_owned())
     };
 
-    let default_read_only = existing
-        .as_ref()
-        .and_then(|profile| profile.read_only)
-        .unwrap_or(false);
-    let read_only = prompt_bool("Read-only mode?", default_read_only)?;
-
     // Verify credentials against the API before writing anything.
     use std::io::Write;
     eprintln!();
@@ -911,13 +921,18 @@ async fn init_interactive(
     };
 
     // The token was pasted a moment ago, so nothing stored is to blame.
-    let remedy = match email.as_deref() {
-        Some(email) => {
-            format!("Check that the whole token was pasted and that it belongs to {email}.")
-        }
-        None => {
-            "Check that the whole token was pasted and that it has not been revoked.".to_owned()
-        }
+    let remedy = crate::api::AuthRemedy {
+        rejected: match email.as_deref() {
+            Some(email) => {
+                format!("Check that the whole token was pasted and that it belongs to {email}.")
+            }
+            None => {
+                "Check that the whole token was pasted and that it has not been revoked.".to_owned()
+            }
+        },
+        missing_scope:
+            "The token lacks a scope setup needs. Create it again with the scopes listed above."
+                .to_owned(),
     };
     let verified = match crate::api::client::JiraClient::new_with_cloud(
         &host,
@@ -1063,6 +1078,29 @@ async fn check_project_access(client: &crate::api::client::JiraClient) -> Result
     Ok(crate::commands::doctor::project_access_detail(
         projects.len(),
     ))
+}
+
+/// List the scopes to select when creating a scoped Cloud token for this profile.
+fn print_token_scopes(read_only: bool) {
+    let access = if read_only { "read-only" } else { "read-write" };
+    eprintln!(
+        "  {}",
+        sym_dim(&format!("Select these scopes for {access} access:"))
+    );
+    eprintln!("    {}", crate::api::scopes::platform(read_only).join("  "));
+    eprintln!("  {}", sym_dim("Boards and sprints also need:"));
+    eprintln!("    {}", crate::api::scopes::agile(read_only).join("  "));
+}
+
+/// Scopes a scoped Cloud token needs, as `init --json` reports them.
+fn cloud_token_scopes_json() -> serde_json::Value {
+    use crate::api::scopes;
+    serde_json::json!({
+        "readOnly": scopes::platform(true),
+        "readWrite": scopes::platform(false),
+        "boardsAndSprintsReadOnly": scopes::agile(true),
+        "boardsAndSprintsReadWrite": scopes::agile(false),
+    })
 }
 
 /// Commands worth running first after `jira init`, addressed to the saved profile.

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod scopes;
 pub mod types;
 
 pub use client::JiraClient;
@@ -72,6 +73,18 @@ pub enum ApiError {
 
 /// Advice for a rejected token when the credential source is unknown.
 const DEFAULT_AUTH_REMEDY: &str = "The token may have expired or been revoked. Check JIRA_TOKEN, or run `jira auth login` to store a new one.";
+
+/// Advice for a scoped token that lacks a scope, when the credential source is unknown.
+pub(crate) const DEFAULT_MISSING_SCOPE_REMEDY: &str = "The token lacks a scope this request needs. Create a token with the scopes `jira init --json` lists under cloudTokenScopes, then store it with `jira auth login`.";
+
+/// What a 401 tells the user to do, by the reason Jira gave for it.
+#[derive(Debug, Clone)]
+pub struct AuthRemedy {
+    /// Jira rejected the token itself.
+    pub rejected: String,
+    /// A scoped Cloud token is valid but lacks a scope the request needs.
+    pub missing_scope: String,
+}
 
 impl ApiError {
     /// A rejected-credentials error carrying only Jira's message.

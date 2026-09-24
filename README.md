@@ -48,10 +48,23 @@ Run `jira auth login` (or the shorter `jira init`) for guided setup. Enter your
 Cloud subdomain, your site's address, or paste any link from Jira; setup asks the
 site whether it runs Jira Cloud or Data Center, so there is no deployment type or
 API version to choose. It offers to open the token page, discovers the Cloud ID required by scoped
-tokens, hides token entry, verifies the account, and stores the token in your
-operating-system keychain. Existing profile values are reused safely. If no OS
-credential service is available, setup offers an explicit protected-file
-fallback rather than silently weakening storage.
+tokens, hides token entry, verifies the account and its project access, and stores
+the token in your operating-system keychain. Existing profile values are reused
+safely. If no OS credential service is available, setup offers an explicit
+protected-file fallback rather than silently weakening storage.
+
+A scoped Cloud token needs these scopes:
+
+| Access | Scopes |
+|--------|--------|
+| Read-only | `read:jira-work`, `read:jira-user` |
+| Read-write | the read-only scopes plus `write:jira-work` |
+| Boards and sprints, added | `read:board-scope:jira-software`, `read:project:jira`, `read:issue-details:jira`, `read:sprint:jira-software`, plus `write:sprint:jira-software` to move issues into sprints |
+
+Jira's board and sprint API accepts only the granular scopes in the last row, so
+a token with just the classic scopes works for every command except `boards` and
+`sprints`. Setup prints the list for the access you choose, and
+`jira init --json` returns it as `cloudTokenScopes`.
 
 For Jira Data Center, setup can create a dedicated PAT through Jira's official
 API using a one-time password or existing PAT. That bootstrap credential is
