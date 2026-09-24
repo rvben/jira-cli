@@ -57,15 +57,15 @@ fn vec_to_opt_refs(values: &[String]) -> Option<Vec<&str>> {
 )]
 struct Cli {
     /// Atlassian domain (e.g. mycompany.atlassian.net) [env: JIRA_HOST]
-    #[arg(long, env = "JIRA_HOST")]
+    #[arg(long, env = "JIRA_HOST", global = true)]
     host: Option<String>,
 
     /// Account email [env: JIRA_EMAIL]
-    #[arg(long, env = "JIRA_EMAIL")]
+    #[arg(long, env = "JIRA_EMAIL", global = true)]
     email: Option<String>,
 
     /// Config profile to use [env: JIRA_PROFILE]
-    #[arg(long, env = "JIRA_PROFILE")]
+    #[arg(long, env = "JIRA_PROFILE", global = true)]
     profile: Option<String>,
 
     /// Output format: auto (default), text, or json
@@ -616,7 +616,7 @@ enum ConfigCommand {
     /// Remove a profile from the config file
     Remove {
         /// Profile name to remove (use "default" for the default profile)
-        profile: String,
+        name: String,
     },
 }
 
@@ -836,8 +836,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref())
                         .await?;
                 }
-                ConfigCommand::Remove { profile } => {
-                    jira_cli::config::remove_profile(&out, &profile)?;
+                ConfigCommand::Remove { name } => {
+                    jira_cli::config::remove_profile(&out, &name)?;
                 }
             }
             return Ok(());

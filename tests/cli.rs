@@ -3482,3 +3482,22 @@ async fn doctor_project_check_rejected_by_401_carries_the_remedy() {
         "{detail}"
     );
 }
+
+/// The command the remedy suggests has to parse as written: `--profile` after
+/// the subcommand, as well as before it.
+#[test]
+fn suggested_login_command_accepts_profile_after_the_subcommand() {
+    let dir = TempDir::new().unwrap();
+    for args in [
+        &["auth", "login", "--profile", "work", "--json"][..],
+        &["--profile", "work", "auth", "login", "--json"][..],
+        &["init", "--host", "not a host", "--json"][..],
+    ] {
+        let output = jira_cmd(&dir).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
