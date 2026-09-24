@@ -7,6 +7,8 @@ use crate::api::ApiError;
 use crate::api::AuthType;
 use crate::output::OutputConfig;
 
+mod site;
+
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct ProfileConfig {
     pub host: Option<String>,
@@ -712,33 +714,20 @@ async fn init_interactive(
             (Some("default".to_owned()), None)
         };
 
-    // Instance type - derive from existing config, or ask.
-    let is_cloud = if let Some(ref p) = existing {
-        p.auth_type.as_deref() != Some("pat")
-    } else {
-        let t = prompt("Type", sym_dim("[cloud/dc]").as_str(), Some("cloud"))?;
-        eprintln!();
-        !t.trim().eq_ignore_ascii_case("dc")
-    };
-
-    // Host
-    let host = if is_cloud {
-        let default_sub = existing
-            .as_ref()
-            .and_then(|p| p.host.clone())
-            .as_deref()
-            .or(prefill_host)
-            .map(|h| h.trim_end_matches(".atlassian.net").to_owned());
-        let raw = prompt_required("Subdomain", "", default_sub.as_deref())?;
-        let sub = raw.trim().trim_end_matches(".atlassian.net");
-        format!("{sub}.atlassian.net")
-    } else {
-        let default = existing
-            .as_ref()
-            .and_then(|p| p.host.clone())
-            .or_else(|| prefill_host.map(str::to_owned));
-        prompt_required("Host", "", default.as_deref())?
-    };
+    // Site, and whether it runs Cloud or Data Center, which the site reports itself.
+    let default_site = prefill_host
+        .map(str::to_owned)
+        .or_else(|| existing.as_ref().and_then(|p| p.host.clone()));
+    let previous_deployment = existing.as_ref().map(|p| {
+        if p.auth_type.as_deref() == Some("pat") {
+            site::Deployment::DataCenter
+        } else {
+            site::Deployment::Cloud
+        }
+    });
+    let (host, deployment) = prompt_site(default_site.as_deref(), previous_deployment).await?;
+    let is_cloud = deployment == site::Deployment::Cloud;
+    eprintln!();
 
     let prior_token = match (
         existing
@@ -785,11 +774,8 @@ async fn init_interactive(
         } else {
             None
         };
-        if prior_token.is_none()
-            && prompt_bool("Open Atlassian's token page now?", true)?
-            && let Err(error) = open::that(CLOUD_URL)
-        {
-            eprintln!("  {} Could not open browser: {error}", sym_fail());
+        if prior_token.is_none() {
+            offer_to_open(CLOUD_URL)?;
         }
         eprintln!("  {}", sym_dim(&format!("→ {CLOUD_URL}")));
         if token_kind == "scoped" {
@@ -877,8 +863,8 @@ async fn init_interactive(
                 }
                 Err(error) => {
                     eprintln!(" {} {error}", sym_fail());
-                    eprintln!("  Falling back to browser-assisted PAT creation.");
-                    let _ = open::that(&pat_url);
+                    eprintln!("  Falling back to creating the token in the browser.");
+                    offer_to_open(&pat_url)?;
                     print_dc_pat_link(&pat_url);
                     (
                         prompt_secret("Personal access token", "")?,
@@ -887,19 +873,20 @@ async fn init_interactive(
                 }
             }
         } else {
-            let _ = open::that(&pat_url);
+            offer_to_open(&pat_url)?;
             print_dc_pat_link(&pat_url);
             (
                 prompt_secret("Personal access token", "")?,
                 Some(prompt_expiration_date(90)?),
             )
         };
-        let default_ver = existing
+        // Data Center serves REST API v2. A version set by hand on an existing
+        // Data Center profile is kept.
+        let api_version = existing
             .as_ref()
-            .and_then(|p| p.api_version.map(|v| v.to_string()))
-            .unwrap_or_else(|| "2".to_owned());
-        let ver_str = prompt("API version", "", Some(&default_ver))?;
-        let api_version: u8 = ver_str.trim().parse().unwrap_or(2);
+            .filter(|p| p.auth_type.as_deref() == Some("pat"))
+            .and_then(|p| p.api_version)
+            .unwrap_or(2);
         (
             None,
             token,
@@ -950,8 +937,7 @@ async fn init_interactive(
             Err(e) => {
                 eprintln!(" {} {e}", sym_fail());
                 eprintln!();
-                let save = prompt("Save config anyway?", sym_dim("[y/N]").as_str(), Some("n"))?;
-                save.trim().eq_ignore_ascii_case("y")
+                prompt_bool("Save config anyway?", false)?
             }
         },
     };
@@ -1136,8 +1122,8 @@ fn prompt_secret(label: &str, hint: &str) -> Result<String, std::io::Error> {
 }
 
 fn prompt_bool(label: &str, default: bool) -> Result<bool, std::io::Error> {
-    let default_value = if default { "y" } else { "n" };
-    let value = prompt(label, "[y/n]", Some(default_value))?;
+    let choices = if default { "[Y/n]" } else { "[y/N]" };
+    let value = prompt(label, choices, None)?;
     Ok(match value.to_ascii_lowercase().as_str() {
         "y" | "yes" | "true" | "1" => true,
         "n" | "no" | "false" | "0" => false,
@@ -1181,6 +1167,107 @@ fn choose_credential_storage() -> Result<bool, Box<dyn std::error::Error>> {
             }
         }
     }
+}
+
+/// Ask for the Jira site and identify its deployment.
+///
+/// Accepts anything a user has at hand: a Cloud subdomain, a host, or a link
+/// copied from the browser. The deployment comes from the site itself; the user
+/// is asked only when the site cannot be identified, and may re-enter the address
+/// instead. `previous` is the deployment of the profile being updated, offered as
+/// the default in that case.
+async fn prompt_site(
+    default: Option<&str>,
+    previous: Option<site::Deployment>,
+) -> Result<(String, site::Deployment), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut default = default.map(str::to_owned);
+    loop {
+        let raw = prompt_required(
+            "Jira site",
+            &sym_dim("subdomain, address, or any Jira link"),
+            default.as_deref(),
+        )?;
+        let entered = match site::normalize_site(&raw) {
+            Ok(entered) => entered,
+            Err(error) => {
+                eprintln!("  {} {error}", sym_fail());
+                continue;
+            }
+        };
+        let host = entered.host.clone();
+        default = Some(raw.trim().to_owned());
+
+        eprint!("  Checking {host}...");
+        std::io::stderr().flush().ok();
+        match site::detect(&entered).await {
+            Ok(detected) => {
+                eprintln!(" {} {}", sym_ok(), detected.describe());
+                if detected.site != host {
+                    let reason = match detected.deployment {
+                        site::Deployment::Cloud => "the site's Atlassian address",
+                        site::Deployment::DataCenter => "where Jira answers",
+                    };
+                    eprintln!(
+                        "  {}",
+                        sym_dim(&format!("Using {}, {reason}", detected.site))
+                    );
+                }
+                return Ok((detected.site, detected.deployment));
+            }
+            Err(error) => {
+                eprintln!(" {} {error}", sym_fail());
+                eprintln!(
+                    "  {}",
+                    sym_dim(&format!(
+                        "Setup will use {host} as entered; choose retry to correct it."
+                    ))
+                );
+                let fallback = previous.unwrap_or(if site::is_cloud_host(&host) {
+                    site::Deployment::Cloud
+                } else {
+                    site::Deployment::DataCenter
+                });
+                match prompt_deployment(fallback)? {
+                    Some(deployment) => return Ok((host, deployment)),
+                    None => continue,
+                }
+            }
+        }
+    }
+}
+
+/// Ask which deployment an unidentified site runs. `None` means the user chose
+/// to re-enter the address.
+fn prompt_deployment(
+    fallback: site::Deployment,
+) -> Result<Option<site::Deployment>, std::io::Error> {
+    let default = match fallback {
+        site::Deployment::Cloud => "cloud",
+        site::Deployment::DataCenter => "dc",
+    };
+    loop {
+        let answer = prompt("Deployment", &sym_dim("[cloud/dc/retry]"), Some(default))?;
+        match answer.to_ascii_lowercase().as_str() {
+            "cloud" | "c" => return Ok(Some(site::Deployment::Cloud)),
+            "dc" | "d" | "datacenter" | "data center" | "server" => {
+                return Ok(Some(site::Deployment::DataCenter));
+            }
+            "retry" | "r" => return Ok(None),
+            _ => eprintln!("  {} Answer cloud, dc, or retry.", sym_fail()),
+        }
+    }
+}
+
+/// Offer to open a token page in the browser. The caller prints the link either
+/// way, so declining or a missing browser still leaves the address on screen.
+fn offer_to_open(url: &str) -> Result<(), std::io::Error> {
+    if prompt_bool("Open the token page in your browser?", true)?
+        && let Err(error) = open::that(url)
+    {
+        eprintln!("  {} Could not open browser: {error}", sym_fail());
+    }
+    Ok(())
 }
 
 async fn discover_cloud_id(host: &str) -> Result<String, Box<dyn std::error::Error>> {

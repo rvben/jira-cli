@@ -44,8 +44,10 @@ make install          # runs check + release build, copies to ~/.local/bin/jira
 
 ## Configuration
 
-Run `jira auth login` (or the shorter `jira init`) for guided setup. It opens
-Atlassian's token page when useful, discovers the Cloud ID required by scoped
+Run `jira auth login` (or the shorter `jira init`) for guided setup. Enter your
+Cloud subdomain, your site's address, or paste any link from Jira; setup asks the
+site whether it runs Jira Cloud or Data Center, so there is no deployment type or
+API version to choose. It offers to open the token page, discovers the Cloud ID required by scoped
 tokens, hides token entry, verifies the account, and stores the token in your
 operating-system keychain. Existing profile values are reused safely. If no OS
 credential service is available, setup offers an explicit protected-file
