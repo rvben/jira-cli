@@ -115,12 +115,60 @@ async fn e2e_boards_and_sprints_list() {
         eprintln!("No boards found, skipping sprint check");
         return;
     }
+    let Some(board) = boards.iter().find(|board| board.board_type == "scrum") else {
+        eprintln!("No Scrum board found, skipping sprint check");
+        return;
+    };
     let sprints = client
-        .list_sprints(boards[0].id, None)
+        .list_sprints(board.id, None)
         .await
         .expect("list_sprints failed");
     // May be empty on a fresh instance; just ensure it doesn't error
     let _ = sprints;
+}
+
+/// Opt-in, read-only check against a Server/Data Center issue in a known sprint.
+/// Requires JIRA_E2E_SPRINT_ISSUE, JIRA_E2E_SPRINT_ID and JIRA_E2E_SPRINT_BOARD.
+#[tokio::test]
+async fn e2e_data_center_sprint_issue_smoke() {
+    let Some((client, _)) = e2e_client() else {
+        return;
+    };
+    if std::env::var("JIRA_E2E_HOST")
+        .unwrap_or_default()
+        .contains("atlassian.net")
+    {
+        return;
+    }
+    let (Ok(key), Ok(id), Ok(board)) = (
+        std::env::var("JIRA_E2E_SPRINT_ISSUE"),
+        std::env::var("JIRA_E2E_SPRINT_ID"),
+        std::env::var("JIRA_E2E_SPRINT_BOARD"),
+    ) else {
+        return;
+    };
+    let id: u64 = id.parse().expect("JIRA_E2E_SPRINT_ID must be numeric");
+    let board: u64 = board
+        .parse()
+        .expect("JIRA_E2E_SPRINT_BOARD must be numeric");
+    let (issue, warning) = client
+        .get_issue_with_sprints_diagnostic(&key)
+        .await
+        .expect("issue show failed");
+    assert!(
+        warning.is_none(),
+        "sprint field discovery failed: {warning:?}"
+    );
+    assert_eq!(issue.key, key);
+    assert!(
+        issue.sprints.iter().any(|s| s.id == id),
+        "issue is missing sprint {id}"
+    );
+    let sprint = client
+        .resolve_sprint_scoped(&id.to_string(), None, Some(board))
+        .await
+        .expect("sprint was not found on the selected board");
+    assert_eq!(sprint.id, id);
 }
 
 #[tokio::test]

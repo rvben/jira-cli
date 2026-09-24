@@ -1990,6 +1990,54 @@ async fn issues_show_reads_current_and_historical_sprints_by_schema() {
 }
 
 #[tokio::test]
+async fn issues_show_remains_readable_when_field_discovery_fails() {
+    for api in [2, 3] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/{api}/field")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Field catalog restricted"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/{api}/issue/PROJ-1")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(full_issue()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let mut cmd = jira_cmd(&dir);
+        cmd.args(["issues", "show", "PROJ-1", "--json"])
+            .env("JIRA_HOST", server.uri())
+            .env("JIRA_EMAIL", "test@example.com")
+            .env("JIRA_TOKEN", "test-token")
+            .env("JIRA_API_VERSION", api.to_string());
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let detail: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(detail["key"], "PROJ-1");
+        assert_eq!(detail["sprints"], serde_json::json!([]));
+        assert!(
+            detail["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("field discovery failed")
+        );
+        assert_json_keys_match_schema("issues show", &detail, &[]);
+        let field_requests = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/field"))
+            .count();
+        assert_eq!(field_requests, 1, "a failed lookup must not be repeated");
+    }
+}
+
+#[tokio::test]
 async fn issues_log_work_emits_exactly_the_fields_it_declares() {
     let server = MockServer::start().await;
 

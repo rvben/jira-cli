@@ -712,6 +712,55 @@ async fn update_sprint_only_and_combined_partial_success_keep_the_issue_key() {
 }
 
 #[tokio::test]
+async fn denied_schedule_permission_prevents_combined_update_write() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/sprint/8"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":8,"name":"Iteration","state":"active"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/mypermissions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "permissions":{"SCHEDULE_ISSUES":{"havePermission":false}}
+        })))
+        .mount(&server)
+        .await;
+    let result = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "update",
+            "PROJ-1",
+            "-s",
+            "New title",
+            "--sprint",
+            "8",
+            "--json",
+        ],
+    );
+    assert!(!result.status.success());
+    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "auth");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Schedule Issues")
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.iter().all(|r| r.method == "GET"));
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.path().ends_with("/mypermissions")
+                && r.url.query().unwrap_or("").contains("issueKey=PROJ-1"))
+    );
+}
+
+#[tokio::test]
 async fn sprint_only_update_moves_without_a_field_write() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

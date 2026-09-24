@@ -1694,6 +1694,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "sprints", "type": "object[]", "description": "All discovered current and past sprints, ordered by ID", "fields": [
                     {"name":"id","type":"integer"},{"name":"name","type":"string"},{"name":"state","type":"string"}
                 ]},
+                {"name": "warnings", "type": "string[]", "description": "Field discovery failures that prevented sprint data, and on Data Center epic data, from being loaded"},
                 {"name": "comments", "type": "object[]", "fields": comment_fields, "description": "Already included here - no separate `issues comments` call is needed"},
                 {"name": "issueLinks", "type": "object[]", "description": "Already included here - no separate call is needed", "fields": [
                     {"name": "id", "type": "string"},

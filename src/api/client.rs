@@ -579,40 +579,81 @@ impl JiraClient {
     /// the embedded page is incomplete, additional requests are made to fetch
     /// the remaining comments.
     pub async fn get_issue(&self, key: &str) -> Result<Issue, ApiError> {
-        self.get_issue_with_sprint_fields(key, &[]).await
+        self.get_issue_with_sprint_fields(key, &[], true).await
     }
 
     /// Read sprint values for `issues show` without adding a field lookup to
     /// every issue read. Jira assigns the Sprint custom field a site-specific ID.
     pub async fn get_issue_with_sprints(&self, key: &str) -> Result<Issue, ApiError> {
+        self.get_issue_with_sprints_diagnostic(key)
+            .await
+            .map(|(issue, _)| issue)
+    }
+
+    /// Like `get_issue_with_sprints`, but includes any field discovery warning.
+    /// The CLI prints the warning so an empty sprint list is not misleading.
+    pub async fn get_issue_with_sprints_diagnostic(
+        &self,
+        key: &str,
+    ) -> Result<(Issue, Option<String>), ApiError> {
         validate_issue_key(key)?;
         const SPRINT_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
-        let ids: Vec<String> = self
-            .list_fields()
-            .await?
-            .into_iter()
-            .filter(|f| {
-                f.schema
-                    .as_ref()
-                    .is_some_and(|s| s.custom.as_deref() == Some(SPRINT_SCHEMA))
-            })
-            .map(|f| f.id)
-            .collect();
-        self.get_issue_with_sprint_fields(key, &ids).await
+        let (ids, warning): (Vec<String>, Option<String>) = match self.list_fields().await {
+            Ok(fields) => (
+                fields
+                    .into_iter()
+                    .filter(|f| {
+                        f.schema
+                            .as_ref()
+                            .is_some_and(|s| s.custom.as_deref() == Some(SPRINT_SCHEMA))
+                    })
+                    .map(|f| f.id)
+                    .collect(),
+                None,
+            ),
+            Err(error) => (
+                Vec::new(),
+                Some(format!(
+                    "Sprint{} data unavailable: field discovery failed: {error}",
+                    if self.api_version < 3 {
+                        " and epic"
+                    } else {
+                        ""
+                    }
+                )),
+            ),
+        };
+        // Data Center uses the same catalog for Epic Link. Skip that lookup
+        // for this read only when the catalog already failed.
+        let include_epic_lookup = warning.is_none() || self.api_version >= 3;
+        let issue = self
+            .get_issue_with_sprint_fields(key, &ids, include_epic_lookup)
+            .await?;
+        Ok((issue, warning))
     }
 
     async fn get_issue_with_sprint_fields(
         &self,
         key: &str,
         sprint_fields: &[String],
+        include_epic_lookup: bool,
     ) -> Result<Issue, ApiError> {
         validate_issue_key(key)?;
-        let mut fields = self.issue_fields(&ISSUE_DETAIL_FIELDS).await?;
+        let mut fields = if include_epic_lookup {
+            self.issue_fields(&ISSUE_DETAIL_FIELDS).await?
+        } else {
+            ISSUE_DETAIL_FIELDS
+                .iter()
+                .map(|f| (*f).to_owned())
+                .collect()
+        };
         fields.extend(sprint_fields.iter().cloned());
         let fields = fields.join(",");
         let path = format!("issue/{key}?fields={fields}");
         let mut issue: Issue = self.get(&path).await?;
-        self.fill_epics(std::slice::from_mut(&mut issue)).await?;
+        if include_epic_lookup {
+            self.fill_epics(std::slice::from_mut(&mut issue)).await?;
+        }
         issue.sprints = parse_issue_sprints(&issue.fields.extra, sprint_fields);
 
         // Fetch remaining comment pages if the embedded page is incomplete
@@ -1224,6 +1265,32 @@ impl JiraClient {
     /// List all available fields (system and custom).
     pub async fn list_fields(&self) -> Result<Vec<Field>, ApiError> {
         self.get::<Vec<Field>>("field").await
+    }
+
+    /// Catch a known sprint-move denial before a separate issue-field write.
+    /// Older Jira installations may not expose this permission; in that case
+    /// the move endpoint remains authoritative and partial-success recovery applies.
+    pub async fn preflight_sprint_move_permission(&self, issue_key: &str) -> Result<(), ApiError> {
+        validate_issue_key(issue_key)?;
+        let permission = if self.api_version >= 3 {
+            "SCHEDULE_ISSUES"
+        } else {
+            "SCHEDULE_ISSUE"
+        };
+        let path = format!(
+            "mypermissions?permissions={permission}&issueKey={}",
+            percent_encode(issue_key)
+        );
+        let response: serde_json::Value = match self.get(&path).await {
+            Ok(value) => value,
+            Err(_) => return Ok(()),
+        };
+        if response["permissions"][permission]["havePermission"].as_bool() == Some(false) {
+            return Err(ApiError::Forbidden(format!(
+                "Schedule Issues permission is required to move {issue_key} to a sprint"
+            )));
+        }
+        Ok(())
     }
 
     /// Move an issue to a sprint.

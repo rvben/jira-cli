@@ -281,19 +281,23 @@ pub async fn show(
     open: bool,
 ) -> Result<(), ApiError> {
     client.enable_epic_lookup();
-    let issue = client.get_issue_with_sprints(key).await?;
+    let (issue, warning) = client.get_issue_with_sprints_diagnostic(key).await?;
 
     if open {
         open_in_browser(&client.browse_url(&issue.key));
     }
 
     if out.json {
-        out.print_data(
-            &serde_json::to_string_pretty(&issue_detail_to_json(&issue, client))
-                .expect("failed to serialize JSON"),
-        );
+        let mut detail = issue_detail_to_json(&issue, client);
+        if let Some(ref warning) = warning {
+            detail["warnings"] = serde_json::json!([warning]);
+        }
+        out.print_data(&serde_json::to_string_pretty(&detail).expect("failed to serialize JSON"));
     } else {
         render_issue_detail(&issue);
+        if let Some(warning) = warning {
+            eprintln!("Warning: {warning}");
+        }
     }
     Ok(())
 }
@@ -397,6 +401,9 @@ pub async fn update(
         }
         None => None,
     };
+    if has_fields && resolved_sprint.is_some() {
+        client.preflight_sprint_move_permission(key).await?;
+    }
     if dry_run {
         if !has_fields && resolved_sprint.is_some() {
             client.issue_project(key).await?;
@@ -1262,6 +1269,7 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "epic": issue.epic,
         "sprint": if current.len() == 1 { serde_json::json!(current[0]) } else { serde_json::Value::Null },
         "sprints": issue.sprints,
+        "warnings": [],
         // Null when the issue has no description at all, so that state stays
         // distinguishable from a description that is present but empty.
         "description": issue.fields.description.as_ref().map(|_| issue.description_text()),

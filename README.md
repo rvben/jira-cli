@@ -319,13 +319,23 @@ of picking one. Numeric sprint IDs identify a sprint directly; if `--board` is
 also supplied, membership on that board is checked.
 
 Creation and updates resolve the sprint and check that it is active or future before
-writing issue fields. If a sprint move after a create or field update fails, the CLI exits with code `8`
+writing issue fields. Combined field-and-sprint updates also check Schedule Issues
+permission when Jira exposes it. Jira can still reject the final move for other
+reasons. If a sprint move after a create or field update fails, the CLI exits with code `8`
 and error kind `partial_success`. JSON stderr includes `error.details.key`,
 `url`, `created`, `updated`, `sprintId`, `sprintMoved`, and `recoveryCommand`. The error is
 not retryable as a whole: use the returned `jira issues move KEY --sprint ID`
 command to finish the operation. Rerunning `issues create` would create a duplicate.
 `issues show` reports the sole current sprint in `sprint` and all current and
 historical sprint values in `sprints`; the text view labels current and past sprints.
+If Jira's field catalog is unavailable, the issue still displays and JSON
+`warnings` explains why sprint data could not be loaded (and epic data on Data Center).
+
+To check Server/Data Center sprint behavior against a real instance without
+writing to Jira, set `JIRA_E2E_HOST`, `JIRA_E2E_TOKEN`, and these three values
+for a known issue in a sprint: `JIRA_E2E_SPRINT_ISSUE`, `JIRA_E2E_SPRINT_ID`,
+`JIRA_E2E_SPRINT_BOARD`. Then run
+`cargo test --test e2e e2e_data_center_sprint_issue_smoke -- --exact`.
 
 ### Projects
 
