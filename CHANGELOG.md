@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.14](https://github.com/rvben/jira-cli/compare/v0.4.13...v0.4.14) - 2026-09-24
+
+### Added
+
+- **auth**: save a profile from a piped token with auth login --with-token ([6b53ee8](https://github.com/rvben/jira-cli/commit/6b53ee81952143290114bc8010f64dedeab6a7be))
+- **doctor**: check the profile fits the site's deployment ([bcd3493](https://github.com/rvben/jira-cli/commit/bcd34937805c8e26657834a202fa95f5e7077308))
+- **auth**: list the scopes a scoped Cloud token needs ([f1c222e](https://github.com/rvben/jira-cli/commit/f1c222eabc67de032e030d5d5ea8341ad75988ef))
+- **init**: check project access and list next commands after setup ([34309bd](https://github.com/rvben/jira-cli/commit/34309bd0a51a189a874adf83a9bea7d27d13bd21))
+- **init**: report the site's deployment and token page in init --json ([06e2bfe](https://github.com/rvben/jira-cli/commit/06e2bfe4124a41f2b4836a8ea0ae10d6c142c4f8))
+- **auth**: name the fix when Jira rejects a token ([0b5135e](https://github.com/rvben/jira-cli/commit/0b5135e33b11c6ec8b535068929afe43ad1a41d8))
+- **auth**: stop recording token expiry ([22ebde9](https://github.com/rvben/jira-cli/commit/22ebde99819ecf51b76ba2f55cc8ca4f4b7bea6e))
+- **init**: detect Cloud or Data Center from the site address ([5df40de](https://github.com/rvben/jira-cli/commit/5df40de18d6b25a762bc6c6a6e37812202534139))
+
+### Fixed
+
+- **cli**: accept --host, --email and --profile after the subcommand ([0811245](https://github.com/rvben/jira-cli/commit/0811245edca9c07288746b8709125b2d9a046665))
+
 ## [0.4.13](https://github.com/rvben/jira-cli/compare/v0.4.12...v0.4.13) - 2026-09-17
 
 ### Added
