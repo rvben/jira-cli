@@ -540,13 +540,18 @@ pub fn logout(out: &OutputConfig, profile_arg: Option<String>) -> Result<(), Api
 /// In an interactive terminal it prompts for Jira type, host, credentials, and profile
 /// name, verifies the credentials against the API, then writes (or updates)
 /// `~/.config/jira/config.toml`.
+///
+/// `detect_site` asks `host` which deployment it runs; only a host the user
+/// named for this run is contacted, so the JSON instructions stay offline
+/// otherwise.
 pub async fn init(
     out: &OutputConfig,
     host: Option<&str>,
+    detect_site: bool,
     profile: Option<&str>,
 ) -> Result<(), ApiError> {
     if out.json {
-        init_json(out, host);
+        init_json(out, host, detect_site).await;
         return Ok(());
     }
 
@@ -599,27 +604,68 @@ pub fn schema_example_config() -> serde_json::Value {
     })
 }
 
-fn init_json(out: &OutputConfig, host: Option<&str>) {
+async fn init_json(out: &OutputConfig, host: Option<&str>, detect_site: bool) {
     let path = config_path();
     let path_resolution = schema_config_path_description();
     let permission_advice = recommended_permissions(&path);
     let example = schema_example_config();
 
-    const CLOUD_TOKEN_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
-    let pat_url = dc_pat_url(host);
+    let normalized = host.map(site::normalize_site);
+    let site_host = normalized
+        .as_ref()
+        .and_then(|site| site.as_ref().ok())
+        .map(|site| site.host.as_str())
+        .or(host);
+    let pat_url = dc_pat_url(site_host);
 
-    out.print_data(
-        &serde_json::to_string_pretty(&serde_json::json!({
-            "configPath": path,
-            "pathResolution": path_resolution,
-            "configExists": path.exists(),
-            "tokenInstructions": CLOUD_TOKEN_URL,
-            "dcPatInstructions": pat_url,
-            "recommendedPermissions": permission_advice,
-            "example": example,
-        }))
-        .expect("failed to serialize JSON"),
-    );
+    let mut result = serde_json::json!({
+        "configPath": path,
+        "pathResolution": path_resolution,
+        "configExists": path.exists(),
+        "tokenInstructions": CLOUD_TOKEN_URL,
+        "dcPatInstructions": pat_url,
+        "recommendedPermissions": permission_advice,
+        "example": example,
+    });
+    if let (true, Some(input), Some(normalized)) = (detect_site, host, normalized) {
+        result["site"] = detect_site_json(input, normalized).await;
+    }
+
+    out.print_data(&serde_json::to_string_pretty(&result).expect("failed to serialize JSON"));
+}
+
+/// What `init --json --host` learned about the site: its deployment, and the
+/// one page where its token is created. Fields detection could not establish
+/// are null, with `error` saying why, rather than a guess at Cloud.
+async fn detect_site_json(
+    input: &str,
+    normalized: Result<site::Site, String>,
+) -> serde_json::Value {
+    let site = match normalized {
+        Ok(site) => site,
+        Err(error) => {
+            return serde_json::json!({
+                "input": input, "host": null, "deployment": null, "version": null,
+                "tokenUrl": null, "error": error,
+            });
+        }
+    };
+    match site::detect(&site).await {
+        Ok(detected) => {
+            let (deployment, token_url) = match detected.deployment {
+                site::Deployment::Cloud => ("cloud", CLOUD_TOKEN_URL.to_owned()),
+                site::Deployment::DataCenter => ("data_center", dc_pat_url(Some(&detected.site))),
+            };
+            serde_json::json!({
+                "input": input, "host": detected.site, "deployment": deployment,
+                "version": detected.version, "tokenUrl": token_url, "error": null,
+            })
+        }
+        Err(error) => serde_json::json!({
+            "input": input, "host": site.host, "deployment": null, "version": null,
+            "tokenUrl": null, "error": error,
+        }),
+    }
 }
 
 async fn init_interactive(
@@ -738,7 +784,6 @@ async fn init_interactive(
         Option<String>,
         String,
     ) = if is_cloud {
-        const CLOUD_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
         let default_email = existing.as_ref().and_then(|p| p.email.clone());
         let email = prompt_required("Email", "", default_email.as_deref())?;
         let default_kind = existing
@@ -761,9 +806,9 @@ async fn init_interactive(
             None
         };
         if prior_token.is_none() {
-            offer_to_open(CLOUD_URL)?;
+            offer_to_open(CLOUD_TOKEN_URL)?;
         }
-        eprintln!("  {}", sym_dim(&format!("→ {CLOUD_URL}")));
+        eprintln!("  {}", sym_dim(&format!("→ {CLOUD_TOKEN_URL}")));
         if token_kind == "scoped" {
             eprintln!(
                 "  {}",
@@ -1687,6 +1732,9 @@ fn print_dc_pat_link(url: &str) {
     eprintln!("  {}", sym_dim(PAT_NAVIGATION));
 }
 
+/// Where a Jira Cloud user creates an API token, scoped or classic.
+const CLOUD_TOKEN_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
+
 /// Mask a token for display, showing only the last 4 characters.
 ///
 /// Atlassian tokens begin with a predictable prefix, so showing the
@@ -2477,8 +2525,9 @@ token = "supersecrettoken"
     #[tokio::test]
     async fn init_json_output_includes_example_and_paths() {
         let out = crate::output::OutputConfig::new(true, false, true);
-        // No env or config needed - init() never loads credentials in JSON mode
-        init(&out, Some("jira.corp.com"), None).await.unwrap();
+        // No env or config needed - init() never loads credentials in JSON mode.
+        // No host either: with one, init() asks that site what it runs.
+        init(&out, None, false, None).await.unwrap();
     }
 
     // The text path of init() requires an interactive TTY; in test context stdin is
@@ -2490,7 +2539,7 @@ token = "supersecrettoken"
             quiet: false,
         };
         // stdin is not a TTY in tests - must return immediately, not hang
-        let error = init(&out, None, None).await.unwrap_err();
+        let error = init(&out, None, false, None).await.unwrap_err();
         assert!(matches!(error, ApiError::InvalidInput(_)));
         assert!(error.to_string().contains("JIRA_TOKEN"));
     }

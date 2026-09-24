@@ -5,7 +5,7 @@ use jira_cli::commands;
 use jira_cli::config::Config;
 use jira_cli::output::{OutputConfig, exit_codes, machine_readable_errors};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use std::io::IsTerminal;
 mod schema_args;
@@ -59,6 +59,10 @@ struct Cli {
     /// Atlassian domain (e.g. mycompany.atlassian.net) [env: JIRA_HOST]
     #[arg(long, env = "JIRA_HOST", global = true)]
     host: Option<String>,
+
+    /// Whether `host` was typed as `--host` rather than read from JIRA_HOST.
+    #[arg(skip)]
+    host_on_command_line: bool,
 
     /// Account email [env: JIRA_EMAIL]
     #[arg(long, env = "JIRA_EMAIL", global = true)]
@@ -719,7 +723,7 @@ fn restore_default_sigpipe() {}
 #[tokio::main]
 async fn main() {
     restore_default_sigpipe();
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli() {
         Ok(cli) => cli,
         Err(e) => {
             // Clap handles usage errors (unrecognized subcommands, bad flags, etc.)
@@ -768,6 +772,25 @@ async fn main() {
     }
 }
 
+/// Parse the command line, recording where `--host` came from: `init --json`
+/// contacts a site only when the user named it on this command line, so a
+/// JIRA_HOST left in the environment keeps the setup instructions offline.
+fn parse_cli() -> Result<Cli, clap::Error> {
+    let matches = Cli::command().try_get_matches()?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    cli.host_on_command_line = host_on_command_line(&matches);
+    Ok(cli)
+}
+
+fn host_on_command_line(matches: &clap::ArgMatches) -> bool {
+    if matches.value_source("host") == Some(clap::parser::ValueSource::CommandLine) {
+        return true;
+    }
+    matches
+        .subcommand()
+        .is_some_and(|(_, sub)| host_on_command_line(sub))
+}
+
 async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Schema { command } => {
@@ -800,15 +823,26 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         }
 
         Command::Init => {
-            jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref()).await?;
+            jira_cli::config::init(
+                &out,
+                cli.host.as_deref(),
+                cli.host_on_command_line,
+                cli.profile.as_deref(),
+            )
+            .await?;
             return Ok(());
         }
 
         Command::Auth(cmd) => {
             match cmd {
                 AuthCommand::Login => {
-                    jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref())
-                        .await?;
+                    jira_cli::config::init(
+                        &out,
+                        cli.host.as_deref(),
+                        cli.host_on_command_line,
+                        cli.profile.as_deref(),
+                    )
+                    .await?;
                 }
                 AuthCommand::Status { offline } => {
                     jira_cli::config::auth_status(&out, cli.host, cli.email, cli.profile, offline)
@@ -833,8 +867,13 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     jira_cli::config::print_config_path(&out)?;
                 }
                 ConfigCommand::Init => {
-                    jira_cli::config::init(&out, cli.host.as_deref(), cli.profile.as_deref())
-                        .await?;
+                    jira_cli::config::init(
+                        &out,
+                        cli.host.as_deref(),
+                        cli.host_on_command_line,
+                        cli.profile.as_deref(),
+                    )
+                    .await?;
                 }
                 ConfigCommand::Remove { name } => {
                     jira_cli::config::remove_profile(&out, &name)?;
@@ -1326,6 +1365,14 @@ fn schema_json() -> serde_json::Value {
         "dcPatInstructions": dc_pat_instructions,
         "configExists": false,
         "recommendedPermissions": permission_advice,
+        "site": {
+            "input": "https://jira.mycompany.com/browse/PROJ-1",
+            "host": "jira.mycompany.com",
+            "deployment": "data_center",
+            "version": "10.3.25",
+            "tokenUrl": "https://jira.mycompany.com/secure/ViewProfile.jspa",
+            "error": null
+        },
         "example": jira_cli::config::schema_example_config()
     });
 
@@ -1336,6 +1383,14 @@ fn schema_json() -> serde_json::Value {
         {"name": "tokenInstructions", "type": "string", "description": "Where to create a Jira Cloud API token"},
         {"name": "dcPatInstructions", "type": "string", "description": "Where to create a Personal Access Token on Jira Data Center/Server"},
         {"name": "recommendedPermissions", "type": "string"},
+        {"name": "site", "type": "object", "optional": true, "description": "Present when --host is given: what the site reports about itself", "fields": [
+            {"name": "input", "type": "string", "description": "The --host value as given"},
+            {"name": "host", "type": "string", "description": "The host a profile for this site stores; null when the input is not an address"},
+            {"name": "deployment", "type": "string", "description": "`cloud` or `data_center`; null when detection failed"},
+            {"name": "version", "type": "string", "description": "Data Center version the site reports; null for Cloud or when unreported"},
+            {"name": "tokenUrl", "type": "string", "description": "Where to create this site's token; null when detection failed"},
+            {"name": "error", "type": "string", "description": "Why detection failed; null on success"}
+        ]},
         {"name": "example", "type": "object", "description": "A complete example config file", "fields": [
             {"name": "default", "type": "object", "description": "The profile used when none is named", "fields": [
                 {"name": "host", "type": "string"},

@@ -56,7 +56,9 @@ fallback rather than silently weakening storage.
 For Jira Data Center, setup can create a dedicated PAT through Jira's official
 API using a one-time password or existing PAT. That bootstrap credential is
 never saved. When no terminal is available, `jira init --json` returns setup
-instructions; CI can use the environment variables below directly.
+instructions, and `jira init --json --host <site>` also asks the site whether it
+runs Cloud or Data Center and returns the one page where its token is created.
+CI can use the environment variables below directly.
 
 **Default locations:**
 

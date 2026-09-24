@@ -3413,6 +3413,143 @@ async fn auth_status_reports_the_remedy_for_a_rejected_token() {
     );
 }
 
+fn init_json_for_host(host: &str) -> serde_json::Value {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir)
+        .args(["--host", host, "init", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_keys_match_schema("init", &json, &[]);
+    json
+}
+
+/// `init --json --host` asks the site what it runs, so an agent gets the one
+/// token page that applies instead of choosing between two.
+#[tokio::test]
+async fn init_json_with_host_reports_a_data_center_site_and_its_token_page() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/serverInfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "baseUrl": server.uri(), "version": "10.3.25", "deploymentType": "Server"
+        })))
+        .mount(&server)
+        .await;
+    let link = format!("{}/browse/ABC-1", server.uri());
+
+    let json = init_json_for_host(&link);
+
+    let site = &json["site"];
+    assert_eq!(site["input"], link);
+    assert_eq!(site["host"], server.uri());
+    assert_eq!(site["deployment"], "data_center");
+    assert_eq!(site["version"], "10.3.25");
+    assert_eq!(
+        site["tokenUrl"],
+        format!("{}/secure/ViewProfile.jspa", server.uri())
+    );
+    assert!(site["error"].is_null());
+    // The pasted issue link is reduced to the site before building the page.
+    assert_eq!(
+        json["dcPatInstructions"],
+        format!("{}/secure/ViewProfile.jspa", server.uri())
+    );
+}
+
+/// A JIRA_HOST left in the environment is not a request to contact that site:
+/// `init --json` stays offline unless `--host` is on the command line.
+#[tokio::test]
+async fn init_json_does_not_contact_a_host_taken_from_the_environment() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/serverInfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "baseUrl": server.uri(), "version": "10.3.25", "deploymentType": "Server"
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .env("JIRA_HOST", server.uri())
+        .args(["init", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json.get("site").is_none(), "{json}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn init_json_with_host_reports_a_cloud_site_and_the_api_token_page() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/serverInfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "baseUrl": "https://acme.atlassian.net", "version": "1001.0.0-SNAPSHOT",
+            "deploymentType": "Cloud"
+        })))
+        .mount(&server)
+        .await;
+
+    let site = init_json_for_host(&server.uri())["site"].clone();
+
+    assert_eq!(site["deployment"], "cloud");
+    assert_eq!(site["host"], "acme.atlassian.net");
+    assert!(site["version"].is_null());
+    assert_eq!(
+        site["tokenUrl"],
+        "https://id.atlassian.com/manage-profile/security/api-tokens"
+    );
+    assert!(site["error"].is_null());
+}
+
+/// A site that is not Jira yields no deployment and no token page, with the
+/// reason, rather than a guess that it is Cloud.
+#[tokio::test]
+async fn init_json_with_host_reports_why_detection_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("<html>nope</html>"))
+        .mount(&server)
+        .await;
+
+    let site = init_json_for_host(&server.uri())["site"].clone();
+
+    assert_eq!(site["host"], server.uri());
+    assert!(site["deployment"].is_null());
+    assert!(site["tokenUrl"].is_null());
+    assert!(
+        site["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{site}"
+    );
+}
+
+#[test]
+fn init_json_with_an_unusable_host_reports_the_reason() {
+    let site = init_json_for_host("not a host")["site"].clone();
+
+    assert!(site["host"].is_null());
+    assert!(site["deployment"].is_null());
+    assert!(
+        site["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{site}"
+    );
+}
+
+#[test]
+fn init_json_without_host_does_not_contact_any_site() {
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir).args(["init", "--json"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json.get("site").is_none(), "{json}");
+}
+
 /// A bulk run records each item's error in its stdout summary, so a 401 there
 /// carries the same remedy as a top-level failure.
 #[tokio::test]
@@ -3453,6 +3590,7 @@ async fn bulk_item_rejected_by_401_carries_the_remedy() {
         "{error}"
     );
 }
+
 /// `doctor` checks projects after authentication; a 401 there is reported with
 /// the remedy too.
 #[tokio::test]
