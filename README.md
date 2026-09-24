@@ -73,6 +73,21 @@ instructions, and `jira init --json --host <site>` also asks the site whether it
 runs Cloud or Data Center and returns the one page where its token is created.
 CI can use the environment variables below directly.
 
+To save a profile without prompts, pipe the token to `jira auth login --with-token`:
+
+```bash
+jira auth login --with-token --host acme --email me@example.com < token.txt
+jira --profile dc auth login --with-token --host jira.example.com --read-only < pat.txt
+jira --profile work auth login --with-token < new-token.txt   # rotate: only the token changes
+```
+
+It identifies the site's deployment the same way, verifies the token and project
+access, and saves nothing if a check fails. Settings you leave out come from the
+profile being replaced; its email and token kind only while the site stays the
+same, since they belong to that site's account. A new Cloud profile expects a scoped token; pass
+`--token-kind classic` for one created without scopes. `--credential-store file`
+keeps the token in the protected config file where no OS keychain is available.
+
 **Default locations:**
 
 | Platform | Path |

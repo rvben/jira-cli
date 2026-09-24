@@ -627,7 +627,23 @@ enum ConfigCommand {
 #[derive(Subcommand)]
 enum AuthCommand {
     /// Configure or replace a profile credential
-    Login,
+    Login {
+        /// Read the token from standard input instead of prompting, for scripts and agents
+        #[arg(long)]
+        with_token: bool,
+        /// Kind of Jira Cloud API token (default: the profile's, else scoped)
+        #[arg(long, value_parser = ["scoped", "classic"], requires = "with_token")]
+        token_kind: Option<String>,
+        /// Block write commands for this profile (default: the profile's setting, else writes allowed)
+        #[arg(long, requires = "with_token", conflicts_with = "read_write")]
+        read_only: bool,
+        /// Allow write commands for this profile, clearing a read-only setting
+        #[arg(long, requires = "with_token")]
+        read_write: bool,
+        /// Where to keep the token (default: the profile's, else the OS keychain)
+        #[arg(long, value_parser = ["keyring", "file"], requires = "with_token")]
+        credential_store: Option<String>,
+    },
     /// Verify the active credential and show its storage source
     Status {
         /// Inspect local credential state without contacting Jira
@@ -775,6 +791,44 @@ async fn main() {
 /// Parse the command line, recording where `--host` came from: `init --json`
 /// contacts a site only when the user named it on this command line, so a
 /// JIRA_HOST left in the environment keeps the setup instructions offline.
+/// Read a token piped to `auth login --with-token`. A terminal on stdin means
+/// nothing was piped, and waiting for input there would look like a hang.
+fn read_token_from_stdin() -> Result<String, ApiError> {
+    use std::io::Read;
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(ApiError::InvalidInput(
+            "--with-token reads the token from standard input; pipe it in, for example `jira auth login --with-token < token.txt`, or run `jira auth login` to be prompted"
+                .into(),
+        ));
+    }
+    let mut token = String::new();
+    stdin.read_to_string(&mut token).map_err(|error| {
+        ApiError::InvalidInput(format!(
+            "could not read the token from standard input: {error}"
+        ))
+    })?;
+    Ok(token)
+}
+
+/// What `jira auth login --with-token` prints once the profile is saved.
+fn login_with_token_fields() -> serde_json::Value {
+    serde_json::json!([
+        {"name": "profile", "type": "string"},
+        {"name": "host", "type": "string", "description": "Site address as stored in the profile"},
+        {"name": "deployment", "type": "string", "enum": ["cloud", "data_center"]},
+        {"name": "version", "type": "string", "nullable": true, "description": "Data Center version; null on Cloud"},
+        {"name": "user", "type": "string", "description": "Display name the token authenticated as"},
+        {"name": "authType", "type": "string", "enum": ["basic", "pat"]},
+        {"name": "apiVersion", "type": "integer"},
+        {"name": "tokenKind", "type": "string", "enum": ["scoped", "classic"]},
+        {"name": "readOnly", "type": "boolean"},
+        {"name": "credentialStore", "type": "string", "enum": ["keyring", "file"]},
+        {"name": "configPath", "type": "string"},
+        {"name": "projects", "type": "string", "description": "Project access found by the check"}
+    ])
+}
+
 fn parse_cli() -> Result<Cli, clap::Error> {
     let matches = Cli::command().try_get_matches()?;
     let mut cli = Cli::from_arg_matches(&matches)?;
@@ -835,7 +889,33 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
 
         Command::Auth(cmd) => {
             match cmd {
-                AuthCommand::Login => {
+                AuthCommand::Login {
+                    with_token: true,
+                    token_kind,
+                    read_only,
+                    read_write,
+                    credential_store,
+                } => {
+                    let token = read_token_from_stdin()?;
+                    jira_cli::config::login_with_token(
+                        &out,
+                        jira_cli::config::TokenLogin {
+                            host: cli.host.as_deref(),
+                            email: cli.email.as_deref(),
+                            profile: cli.profile.as_deref(),
+                            token_kind: token_kind.as_deref(),
+                            read_only: match (read_only, read_write) {
+                                (true, _) => Some(true),
+                                (_, true) => Some(false),
+                                _ => None,
+                            },
+                            credential_store: credential_store.as_deref(),
+                        },
+                        &token,
+                    )
+                    .await?;
+                }
+                AuthCommand::Login { .. } => {
                     jira_cli::config::init(
                         &out,
                         cli.host.as_deref(),
@@ -2355,6 +2435,17 @@ fn walk_commands(
         ) {
             entry.insert("x-dry-run".into(), serde_json::json!({"arg":"--dry-run", "effects":"read_only", "output_fields":output_fields[base_path.as_str()]}));
             entry.insert("x-output-on-error".into(), serde_json::json!({"kind":"bulk_failure", "exit_code":9, "stream":"stdout", "description":"Parse the full summary even on failure. Never blindly replay the entire bulk write."}));
+        }
+        if base_path == "auth login" {
+            entry.insert(
+                "x-with-token".into(),
+                serde_json::json!({
+                    "arg": "--with-token",
+                    "stdin": "the API token (Cloud) or personal access token (Data Center)",
+                    "description": "Identifies the site's deployment, verifies the token and project access, then saves the profile. Nothing is saved when a check fails. Omitted settings fall back to the profile being replaced; its email and token kind only when the site is unchanged.",
+                    "output_fields": login_with_token_fields(),
+                }),
+            );
         }
 
         if matches!(

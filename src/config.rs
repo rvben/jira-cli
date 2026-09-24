@@ -1059,18 +1059,7 @@ async fn init_interactive(
     };
 
     let file_storage = choose_credential_storage()?;
-    let previous_keyring = if file_storage {
-        None
-    } else {
-        crate::credentials::load_optional(&profile_name)?
-    };
-    if !file_storage {
-        crate::credentials::store(&profile_name, &token)?;
-    }
-
-    // Write config only after the credential is durable. Roll back a keychain
-    // change if the atomic config replacement fails.
-    let write_result = write_profile_to_config(
+    save_profile(
         &path,
         &profile_name,
         ProfileWrite {
@@ -1084,29 +1073,7 @@ async fn init_interactive(
             api_version,
             read_only,
         },
-    );
-    if let Err(error) = write_result {
-        if !file_storage {
-            match previous_keyring {
-                Some(previous) => {
-                    let _ = crate::credentials::store(&profile_name, &previous);
-                }
-                None => {
-                    let _ = crate::credentials::delete(&profile_name);
-                }
-            }
-        }
-        return Err(error);
-    }
-    if file_storage {
-        let _ = crate::credentials::delete(&profile_name);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    )?;
 
     eprintln!();
     eprintln!("  {} Config written to {}", sym_ok(), path.display());
@@ -1125,6 +1092,246 @@ async fn init_interactive(
     }
     eprintln!();
 
+    Ok(())
+}
+
+/// Settings for `jira auth login --with-token`. Anything not given falls back
+/// to the profile being replaced, so rotating a token needs only the token.
+pub struct TokenLogin<'a> {
+    pub host: Option<&'a str>,
+    pub email: Option<&'a str>,
+    pub profile: Option<&'a str>,
+    pub token_kind: Option<&'a str>,
+    pub read_only: Option<bool>,
+    pub credential_store: Option<&'a str>,
+}
+
+/// Save a profile for a token supplied without prompting, as scripts and
+/// agents do: identify the site, verify the token and project access, then
+/// store it. Nothing is written unless every check passes.
+pub async fn login_with_token(
+    out: &OutputConfig,
+    login: TokenLogin<'_>,
+    token: &str,
+) -> Result<(), ApiError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "no token on standard input; pipe it in, for example `jira auth login --with-token < token.txt`"
+                .into(),
+        ));
+    }
+
+    let (profile_name, existing) = match load_file_profile(login.profile) {
+        Ok(found) => found,
+        Err(ApiError::NotFound(_)) => (
+            requested_profile_name(login.profile),
+            ProfileConfig::default(),
+        ),
+        Err(error) => return Err(error),
+    };
+    let requested_host = normalize_str(login.host)
+        .map(str::to_owned)
+        .or_else(|| existing.host.clone())
+        .ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "profile `{profile_name}` has no Jira site yet; pass --host with the site address"
+            ))
+        })?;
+
+    let entered = site::normalize_site(&requested_host).map_err(ApiError::InvalidInput)?;
+    let detected = site::detect(&entered).await.map_err(|reason| {
+        ApiError::InvalidInput(format!(
+            "could not tell whether {} runs Jira Cloud or Data Center ({reason}); check the address, or run `jira init` to choose interactively",
+            entered.host
+        ))
+    })?;
+    let host = detected.site.clone();
+    let is_cloud = detected.deployment == site::Deployment::Cloud;
+    // The account belongs to the site: pointing the profile at another site
+    // is a new setup, so only preferences carry over from the old profile.
+    let saved_host = existing
+        .host
+        .as_deref()
+        .and_then(|saved| site::normalize_site(saved).ok())
+        .map(|saved| saved.host);
+    let account = match saved_host {
+        Some(saved) if saved == host || saved == entered.host => existing.clone(),
+        _ => ProfileConfig::default(),
+    };
+
+    let (email, auth_type, api_version, token_kind, cloud_id) = if is_cloud {
+        let email = normalize_str(login.email)
+            .map(str::to_owned)
+            .or_else(|| account.email.clone())
+            .ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "{host} runs Jira Cloud, whose API tokens belong to an account; pass --email with that account's address"
+                ))
+            })?;
+        // A saved profile without `token_kind` holds a classic token; a new
+        // profile defaults to scoped, as interactive setup does.
+        let saved_kind = account
+            .host
+            .is_some()
+            .then(|| account.token_kind.as_deref().unwrap_or("classic"));
+        let token_kind = login
+            .token_kind
+            .or(saved_kind)
+            .unwrap_or("scoped")
+            .to_owned();
+        let cloud_id = if token_kind == "scoped" {
+            Some(discover_cloud_id(&host).await.map_err(|error| {
+                ApiError::Other(format!(
+                    "could not read the Cloud ID of {host}, which a scoped token needs: {error}"
+                ))
+            })?)
+        } else {
+            None
+        };
+        (Some(email), "basic", 3, token_kind, cloud_id)
+    } else {
+        // A version set by hand on an existing Data Center profile is kept.
+        let api_version = Some(&account)
+            .filter(|p| p.auth_type.as_deref() == Some("pat"))
+            .and_then(|p| p.api_version)
+            .unwrap_or(2);
+        (None, "pat", api_version, "classic".to_owned(), None)
+    };
+    let read_only = login.read_only.or(existing.read_only).unwrap_or(false);
+
+    let rejected = match (email.as_deref(), token_kind.as_str()) {
+        (Some(email), "scoped") => format!(
+            "Check that the token belongs to {email}. A classic API token, created without scopes, needs --token-kind classic."
+        ),
+        (Some(email), _) => format!(
+            "Check that the token belongs to {email}. A token created with scopes needs --token-kind scoped."
+        ),
+        (None, _) => {
+            "Check that the token is a personal access token that has not been revoked.".to_owned()
+        }
+    };
+    let client = crate::api::client::JiraClient::new_with_cloud(
+        &host,
+        email.as_deref().unwrap_or(""),
+        token,
+        if auth_type == "pat" {
+            AuthType::Pat
+        } else {
+            AuthType::Basic
+        },
+        api_version,
+        cloud_id.as_deref(),
+        &token_kind,
+    )?
+    .with_auth_remedy(crate::api::AuthRemedy {
+        rejected,
+        missing_scope: "The token lacks a scope this CLI needs. Create it again with the scopes `jira init --json` lists under cloudTokenScopes.".to_owned(),
+    });
+    let me = client.get_myself().await?;
+    let projects = check_project_access(&client).await?;
+
+    let credential_store = match login
+        .credential_store
+        .or(existing.credential_store.as_deref())
+    {
+        Some("file") => "file",
+        _ => {
+            crate::credentials::available().map_err(|error| {
+                ApiError::InvalidInput(format!(
+                    "{error}; pass --credential-store file to keep the token in the protected config file instead"
+                ))
+            })?;
+            "keyring"
+        }
+    };
+    let path = config_path();
+    save_profile(
+        &path,
+        &profile_name,
+        ProfileWrite {
+            host: &host,
+            email: email.as_deref(),
+            token,
+            credential_store,
+            cloud_id: cloud_id.as_deref(),
+            token_kind: &token_kind,
+            auth_type,
+            api_version,
+            read_only,
+        },
+    )
+    .map_err(|error| {
+        ApiError::Other(format!("could not save profile `{profile_name}`: {error}"))
+    })?;
+
+    out.print_result(
+        &serde_json::json!({
+            "profile": profile_name,
+            "host": host,
+            "deployment": if is_cloud { "cloud" } else { "data_center" },
+            "version": detected.version,
+            "user": me.display_name,
+            "authType": auth_type,
+            "apiVersion": api_version,
+            "tokenKind": token_kind,
+            "readOnly": read_only,
+            "credentialStore": credential_store,
+            "configPath": path,
+            "projects": projects,
+        }),
+        &format!(
+            "{} Logged in to {host} ({}) as {} and saved profile `{profile_name}`\n  {} {projects}",
+            sym_ok(),
+            detected.describe(),
+            me.display_name,
+            sym_ok(),
+        ),
+    );
+    Ok(())
+}
+
+/// Store the credential, then write the profile that refers to it.
+///
+/// The config is written only after the credential is durable, and a keychain
+/// change is rolled back if the atomic config replacement fails, so a profile
+/// never points at a credential that is not there.
+fn save_profile(
+    path: &std::path::Path,
+    profile_name: &str,
+    profile: ProfileWrite<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file_storage = profile.credential_store == "file";
+    let previous_keyring = if file_storage {
+        None
+    } else {
+        crate::credentials::load_optional(profile_name)?
+    };
+    if !file_storage {
+        crate::credentials::store(profile_name, profile.token)?;
+    }
+    if let Err(error) = write_profile_to_config(path, profile_name, profile) {
+        if !file_storage {
+            match previous_keyring {
+                Some(previous) => {
+                    let _ = crate::credentials::store(profile_name, &previous);
+                }
+                None => {
+                    let _ = crate::credentials::delete(profile_name);
+                }
+            }
+        }
+        return Err(error);
+    }
+    if file_storage {
+        let _ = crate::credentials::delete(profile_name);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

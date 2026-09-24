@@ -4,7 +4,7 @@ use assert_cmd::prelude::*;
 use jira_cli::output::exit_codes;
 use jira_cli::test_support::{config_dir_env_name, write_config};
 use tempfile::TempDir;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config_fixture() -> &'static str {
@@ -3960,6 +3960,334 @@ fn suggested_login_command_accepts_profile_after_the_subcommand() {
         );
     }
 }
+
+/// Run a command with `input` on its standard input, as a pipe delivers it.
+trait OutputWithStdin {
+    fn output_with_stdin(&mut self, input: &str) -> std::process::Output;
+}
+
+impl OutputWithStdin for Command {
+    fn output_with_stdin(&mut self, input: &str) -> std::process::Output {
+        use std::io::Write;
+        let mut child = self
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+}
+
+/// `auth login --with-token` declares its output under `x-with-token`, because
+/// without the flag the same command prints setup instructions instead.
+fn assert_login_with_token_matches_schema(actual: &serde_json::Value) {
+    let schema = schema_command("auth login");
+    let fields = schema["x-with-token"]["output_fields"]
+        .as_array()
+        .expect("auth login must declare x-with-token output_fields");
+    assert_fields_match("auth login --with-token", fields, actual, &[]);
+}
+
+fn basic_auth(credentials: &str) -> String {
+    use base64::Engine;
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(credentials)
+    )
+}
+
+fn read_config(dir: &TempDir) -> toml::Table {
+    let body = std::fs::read_to_string(dir.path().join("jira").join("config.toml")).unwrap();
+    toml::from_str(&body).unwrap()
+}
+
+async fn mount_one_project_v3(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "values": [{ "id": "10000", "key": "PROJ", "name": "Project", "projectTypeKey": "software" }],
+            "startAt": 0, "maxResults": 50, "total": 1, "isLast": true
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn auth_login_with_token_saves_a_verified_cloud_profile() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .and(header(
+            "authorization",
+            basic_auth("me@example.com:cloud-token").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "abc", "displayName": "Cloud User"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_one_project_v3(&server).await;
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .args([
+            "auth",
+            "login",
+            "--with-token",
+            "--host",
+            &server.uri(),
+            "--email",
+            "me@example.com",
+            "--token-kind",
+            "classic",
+            "--credential-store",
+            "file",
+        ])
+        .output_with_stdin("cloud-token\n");
+
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["profile"], "default");
+    assert_eq!(result["deployment"], "cloud");
+    assert_eq!(result["version"], serde_json::Value::Null);
+    assert_eq!(result["user"], "Cloud User");
+    assert_eq!(result["apiVersion"], 3);
+    assert_eq!(result["tokenKind"], "classic");
+    assert_eq!(result["projects"], "1 project accessible");
+    assert_login_with_token_matches_schema(&result);
+
+    let config = read_config(&dir);
+    assert_eq!(config["active_profile"].as_str(), Some("default"));
+    let profile = config["default"].as_table().unwrap();
+    assert_eq!(profile["host"].as_str(), Some(server.uri().as_str()));
+    assert_eq!(profile["email"].as_str(), Some("me@example.com"));
+    // The newline a shell adds when echoing or reading a file is not part of the token.
+    assert_eq!(profile["token"].as_str(), Some("cloud-token"));
+    assert_eq!(profile["credential_store"].as_str(), Some("file"));
+}
+
+#[tokio::test]
+async fn auth_login_with_token_saves_a_data_center_profile_with_its_api_version() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "version": "10.3.25", "deploymentType": "DataCenter"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/myself"))
+        .and(header("authorization", "Bearer dc-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "me", "displayName": "Data Center User"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/project"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "1", "key": "A", "name": "A" },
+            { "id": "2", "key": "B", "name": "B" }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .args([
+            "--profile",
+            "dc",
+            "auth",
+            "login",
+            "--with-token",
+            "--host",
+            &server.uri(),
+            "--read-only",
+            "--credential-store",
+            "file",
+        ])
+        .output_with_stdin("dc-token");
+
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["deployment"], "data_center");
+    assert_eq!(result["version"], "10.3.25");
+    assert_eq!(result["authType"], "pat");
+    assert_eq!(result["apiVersion"], 2);
+    assert_eq!(result["readOnly"], true);
+    assert_eq!(result["projects"], "2 projects accessible");
+    assert_login_with_token_matches_schema(&result);
+
+    let config = read_config(&dir);
+    let profile = config["profiles"]["dc"].as_table().unwrap();
+    assert_eq!(profile["auth_type"].as_str(), Some("pat"));
+    assert_eq!(profile["api_version"].as_integer(), Some(2));
+    assert_eq!(profile["read_only"].as_bool(), Some(true));
+    assert!(!profile.contains_key("email"), "{profile:?}");
+}
+
+/// Rotating a token needs only the token: the site, account and settings of
+/// the profile being replaced carry over, the read-only guard included.
+#[tokio::test]
+async fn auth_login_with_token_rotates_the_token_of_an_existing_profile() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .and(header(
+            "authorization",
+            basic_auth("me@example.com:new-token").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "abc", "displayName": "Cloud User"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_one_project_v3(&server).await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "active_profile = \"other\"\n[profiles.other]\nhost = \"other.example.com\"\n[profiles.work]\nhost = \"{}\"\nemail = \"me@example.com\"\ntoken = \"old-token\"\ncredential_store = \"file\"\nread_only = true\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["--profile", "work", "auth", "login", "--with-token"])
+        .output_with_stdin("new-token\n");
+
+    assert!(output.status.success(), "{output:?}");
+    let config = read_config(&dir);
+    let profile = config["profiles"]["work"].as_table().unwrap();
+    assert_eq!(profile["token"].as_str(), Some("new-token"));
+    assert_eq!(profile["email"].as_str(), Some("me@example.com"));
+    assert_eq!(profile["read_only"].as_bool(), Some(true));
+    assert_eq!(
+        config["profiles"]["other"]["host"].as_str(),
+        Some("other.example.com")
+    );
+}
+
+#[tokio::test]
+async fn auth_login_with_a_rejected_token_saves_nothing() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .args([
+            "auth",
+            "login",
+            "--with-token",
+            "--host",
+            &server.uri(),
+            "--email",
+            "me@example.com",
+            "--token-kind",
+            "classic",
+            "--credential-store",
+            "file",
+        ])
+        .output_with_stdin("wrong-token");
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("A token created with scopes needs --token-kind scoped"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("jira").join("config.toml").exists());
+}
+
+#[tokio::test]
+async fn auth_login_with_token_on_cloud_requires_the_account_email() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["auth", "login", "--with-token", "--host", &server.uri()])
+        .output_with_stdin("token");
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pass --email"), "{stderr}");
+}
+
+#[test]
+fn auth_login_with_token_refuses_an_empty_token() {
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .args([
+            "auth",
+            "login",
+            "--with-token",
+            "--host",
+            "jira.example.com",
+        ])
+        .output_with_stdin("\n");
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no token on standard input"), "{stderr}");
+}
+
+#[test]
+fn token_login_settings_require_with_token() {
+    let dir = TempDir::new().unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["auth", "login", "--token-kind", "classic"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--with-token"));
+}
+
 /// CI often keeps settings in a committed profile and injects only the secret
 /// through JIRA_TOKEN. The mismatched setting is then the profile's, so the fix
 /// is setup, not a variable nobody set.
@@ -3997,4 +4325,46 @@ async fn doctor_blames_the_profile_when_only_the_token_comes_from_the_environmen
         "{detail}"
     );
     assert!(!detail.contains("JIRA_API_VERSION"), "{detail}");
+}
+
+/// Pointing a profile at a different site is a new setup: the old site's
+/// account is not assumed, while preferences such as read-only carry over.
+#[tokio::test]
+async fn auth_login_with_token_does_not_reuse_the_account_of_another_site() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        "[profiles.work]\nhost = \"old.atlassian.net\"\nemail = \"old@example.com\"\ntoken = \"old\"\ncredential_store = \"file\"\nread_only = true\n",
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args([
+            "--profile",
+            "work",
+            "auth",
+            "login",
+            "--with-token",
+            "--host",
+            &server.uri(),
+        ])
+        .output_with_stdin("new-token");
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pass --email"), "{stderr}");
+    let config = read_config(&dir);
+    assert_eq!(config["profiles"]["work"]["token"].as_str(), Some("old"));
 }
