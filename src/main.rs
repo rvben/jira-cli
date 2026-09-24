@@ -1337,7 +1337,6 @@ fn schema_json() -> serde_json::Value {
                 {"name": "credential_store", "type": "string", "description": "`keyring` by default; `file` only for an explicitly accepted fallback"},
                 {"name": "cloud_id", "type": "string", "description": "Required for scoped Jira Cloud tokens"},
                 {"name": "token_kind", "type": "string", "description": "`scoped` or `classic`"},
-                {"name": "expires_at", "type": "string", "description": "Recorded token expiry date (YYYY-MM-DD)"},
                 {"name": "auth_type", "type": "string", "description": "\"basic\" for Jira Cloud, \"pat\" for a Data Center personal access token"},
                 {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"},
                 {"name": "read_only", "type": "boolean", "description": "Block commands that write to Jira"}
@@ -1820,9 +1819,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "profile", "type": "string"},
                 {"name": "credentialStore", "type": "string"},
                 {"name": "tokenKind", "type": "string"},
-                {"name": "cloudId", "type": "string", "nullable": true},
-                {"name": "expiresAt", "type": "string", "nullable": true}
-                ,{"name": "expirationStatus", "type": "string"}
+                {"name": "cloudId", "type": "string", "nullable": true}
             ]),
         ),
         ("auth login", init_fields.clone()),
@@ -1835,9 +1832,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "identity", "type": "string", "optional": true},
                 {"name": "credentialStore", "type": "string"},
                 {"name": "tokenKind", "type": "string"},
-                {"name": "cloudId", "type": "string", "nullable": true},
-                {"name": "expiresAt", "type": "string", "nullable": true}
-                ,{"name": "expirationStatus", "type": "string"}
+                {"name": "cloudId", "type": "string", "nullable": true}
             ]),
         ),
         (

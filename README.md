@@ -71,7 +71,6 @@ email = "me@example.com"
 credential_store = "keyring"
 cloud_id = "your-atlassian-cloud-id"
 token_kind = "scoped"
-expires_at = "2026-11-24"
 read_only = true
 ```
 

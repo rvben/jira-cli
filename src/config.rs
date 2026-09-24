@@ -17,7 +17,6 @@ pub struct ProfileConfig {
     pub credential_store: Option<String>,
     pub cloud_id: Option<String>,
     pub token_kind: Option<String>,
-    pub expires_at: Option<String>,
     pub auth_type: Option<String>,
     pub api_version: Option<u8>,
     pub read_only: Option<bool>,
@@ -37,7 +36,6 @@ struct RawConfig {
     credential_store: Option<String>,
     cloud_id: Option<String>,
     token_kind: Option<String>,
-    expires_at: Option<String>,
     auth_type: Option<String>,
     api_version: Option<u8>,
     read_only: Option<bool>,
@@ -64,11 +62,6 @@ impl RawConfig {
                 .token_kind
                 .clone()
                 .or_else(|| self.token_kind.clone()),
-            expires_at: self
-                .default
-                .expires_at
-                .clone()
-                .or_else(|| self.expires_at.clone()),
             auth_type: self
                 .default
                 .auth_type
@@ -93,7 +86,6 @@ pub struct Config {
     pub credential_store: String,
     pub cloud_id: Option<String>,
     pub token_kind: String,
-    pub expires_at: Option<String>,
 }
 
 impl Config {
@@ -198,13 +190,6 @@ impl Config {
                 "scoped Cloud token requires cloud_id; run `jira auth login` again".into(),
             ));
         }
-        let expires_at = file_profile.expires_at;
-        if let Some(value) = expires_at.as_deref() {
-            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
-                ApiError::InvalidInput(format!("invalid expires_at `{value}`; expected YYYY-MM-DD"))
-            })?;
-        }
-
         Ok(Self {
             profile,
             host,
@@ -216,7 +201,6 @@ impl Config {
             credential_store,
             cloud_id,
             token_kind,
-            expires_at,
         })
     }
 }
@@ -371,24 +355,14 @@ pub fn show(
                 "credentialStore": cfg.credential_store,
                 "tokenKind": cfg.token_kind,
                 "cloudId": cfg.cloud_id,
-                "expiresAt": cfg.expires_at,
-                "expirationStatus": expiration_status(cfg.expires_at.as_deref()),
             }))
             .expect("failed to serialize JSON"),
         );
     } else {
         out.print_message(&format!("Config file: {}", path.display()));
         out.print_data(&format!(
-            "profile: {}\nhost:  {}\nemail: {}\ntoken: {masked}\ncredential store: {}\ntoken kind: {}{}",
-            cfg.profile,
-            cfg.host,
-            cfg.email,
-            cfg.credential_store,
-            cfg.token_kind,
-            cfg.expires_at
-                .as_deref()
-                .map(|date| format!("\nexpires: {date}"))
-                .unwrap_or_default()
+            "profile: {}\nhost:  {}\nemail: {}\ntoken: {masked}\ncredential store: {}\ntoken kind: {}",
+            cfg.profile, cfg.host, cfg.email, cfg.credential_store, cfg.token_kind,
         ));
     }
     Ok(())
@@ -411,8 +385,6 @@ pub async fn auth_status(
                 "credentialStore": cfg.credential_store,
                 "tokenKind": cfg.token_kind,
                 "cloudId": cfg.cloud_id,
-                "expiresAt": cfg.expires_at,
-                "expirationStatus": expiration_status(cfg.expires_at.as_deref()),
             }),
             &format!(
                 "{} Profile '{}' is configured ({}, {}; network not checked)",
@@ -443,38 +415,16 @@ pub async fn auth_status(
             "credentialStore": cfg.credential_store,
             "tokenKind": cfg.token_kind,
             "cloudId": cfg.cloud_id,
-            "expiresAt": cfg.expires_at,
-            "expirationStatus": expiration_status(cfg.expires_at.as_deref()),
         }),
         &format!(
-            "{} Authenticated as {} ({}, {}; token {})",
+            "{} Authenticated as {} ({}, {})",
             sym_ok(),
             myself.display_name,
             cfg.credential_store,
             cfg.token_kind,
-            expiration_status(cfg.expires_at.as_deref())
         ),
     );
     Ok(())
-}
-
-fn expiration_status(expires_at: Option<&str>) -> &'static str {
-    let Some(expires_at) = expires_at else {
-        return "unknown";
-    };
-    let Ok(date) = chrono::NaiveDate::parse_from_str(expires_at, "%Y-%m-%d") else {
-        return "invalid";
-    };
-    let days = date
-        .signed_duration_since(chrono::Utc::now().date_naive())
-        .num_days();
-    if days < 0 {
-        "expired"
-    } else if days <= 30 {
-        "expiring-soon"
-    } else {
-        "valid"
-    }
 }
 
 pub async fn migrate_credential(
@@ -588,7 +538,6 @@ pub fn schema_example_config() -> serde_json::Value {
             "credential_store": "keyring",
             "cloud_id": "your-atlassian-cloud-id",
             "token_kind": "scoped",
-            "expires_at": "2026-11-24",
             "auth_type": "basic",
             "api_version": 3,
             "read_only": true,
@@ -604,8 +553,7 @@ pub fn schema_example_config() -> serde_json::Value {
             "datacenter": {
                 "host": "jira.mycompany.com",
                 "credential_store": "keyring",
-                "expires_at": "2026-11-24",
-                "auth_type": "pat",
+                    "auth_type": "pat",
                 "api_version": 2,
             }
         }
@@ -743,14 +691,13 @@ async fn init_interactive(
     };
 
     // Credentials
-    let (email, token, auth_type, api_version, cloud_id, token_kind, expires_at): (
+    let (email, token, auth_type, api_version, cloud_id, token_kind): (
         Option<String>,
         String,
         &str,
         u8,
         Option<String>,
         String,
-        Option<String>,
     ) = if is_cloud {
         const CLOUD_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
         let default_email = existing.as_ref().and_then(|p| p.email.clone());
@@ -790,44 +737,23 @@ async fn init_interactive(
             ""
         };
         let raw = prompt_secret("Token", token_hint)?;
-        let kept_existing = raw.trim().is_empty();
-        let token = if kept_existing {
+        let token = if raw.trim().is_empty() {
             prior_token
                 .clone()
                 .ok_or("No existing token. Please enter a token.")?
         } else {
             raw
         };
-        let expires_at = if kept_existing {
-            existing
-                .as_ref()
-                .and_then(|profile| profile.expires_at.clone())
-        } else {
-            Some(prompt_expiration_date(90)?)
-        };
-        (
-            Some(email),
-            token,
-            "basic",
-            3,
-            cloud_id,
-            token_kind,
-            expires_at,
-        )
+        (Some(email), token, "basic", 3, cloud_id, token_kind)
     } else {
         let pat_url = dc_pat_url(Some(&host));
-        let (token, expires_at) = if let Some(existing_token) = prior_token.clone() {
+        let token = if let Some(existing_token) = prior_token.clone() {
             print_dc_pat_link(&pat_url);
             let raw = prompt_secret("Personal access token", "(Enter to keep)")?;
             if raw.trim().is_empty() {
-                (
-                    existing_token,
-                    existing
-                        .as_ref()
-                        .and_then(|profile| profile.expires_at.clone()),
-                )
+                existing_token
             } else {
-                (raw, Some(prompt_expiration_date(90)?))
+                raw
             }
         } else if prompt_bool("Create a dedicated PAT automatically?", true)? {
             let method = prompt("Bootstrap with", "[password/pat]", Some("password"))?;
@@ -845,7 +771,6 @@ async fn init_interactive(
                 },
                 "used once and never saved",
             )?;
-            let expiration_days = prompt_expiration_days(90)?;
             eprint!("  Creating personal access token...");
             std::io::stderr().flush().ok();
             match create_data_center_pat(
@@ -853,32 +778,25 @@ async fn init_interactive(
                 username.as_deref(),
                 &secret,
                 target_name.as_deref().unwrap_or("jira-cli"),
-                expiration_days,
             )
             .await
             {
                 Ok(token) => {
                     eprintln!(" {}", sym_ok());
-                    (token, Some(expiration_date(expiration_days)))
+                    token
                 }
                 Err(error) => {
                     eprintln!(" {} {error}", sym_fail());
                     eprintln!("  Falling back to creating the token in the browser.");
                     offer_to_open(&pat_url)?;
                     print_dc_pat_link(&pat_url);
-                    (
-                        prompt_secret("Personal access token", "")?,
-                        Some(prompt_expiration_date(90)?),
-                    )
+                    prompt_secret("Personal access token", "")?
                 }
             }
         } else {
             offer_to_open(&pat_url)?;
             print_dc_pat_link(&pat_url);
-            (
-                prompt_secret("Personal access token", "")?,
-                Some(prompt_expiration_date(90)?),
-            )
+            prompt_secret("Personal access token", "")?
         };
         // Data Center serves REST API v2. A version set by hand on an existing
         // Data Center profile is kept.
@@ -887,15 +805,7 @@ async fn init_interactive(
             .filter(|p| p.auth_type.as_deref() == Some("pat"))
             .and_then(|p| p.api_version)
             .unwrap_or(2);
-        (
-            None,
-            token,
-            "pat",
-            api_version,
-            None,
-            "classic".to_owned(),
-            expires_at,
-        )
+        (None, token, "pat", api_version, None, "classic".to_owned())
     };
 
     let default_read_only = existing
@@ -984,7 +894,6 @@ async fn init_interactive(
             credential_store: if file_storage { "file" } else { "keyring" },
             cloud_id: cloud_id.as_deref(),
             token_kind: &token_kind,
-            expires_at: expires_at.as_deref(),
             auth_type,
             api_version,
             read_only,
@@ -1129,30 +1038,6 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool, std::io::Error> {
         "n" | "no" | "false" | "0" => false,
         _ => default,
     })
-}
-
-fn prompt_expiration_days(default: u64) -> Result<u64, Box<dyn std::error::Error>> {
-    loop {
-        let value = prompt(
-            "Token expiry in days",
-            "[1-365]",
-            Some(&default.to_string()),
-        )?;
-        match value.parse::<u64>() {
-            Ok(days @ 1..=365) => return Ok(days),
-            _ => eprintln!("  {} Expiry must be between 1 and 365 days.", sym_fail()),
-        }
-    }
-}
-
-fn expiration_date(days: u64) -> String {
-    (chrono::Utc::now() + chrono::Duration::days(days as i64))
-        .date_naive()
-        .to_string()
-}
-
-fn prompt_expiration_date(default: u64) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(expiration_date(prompt_expiration_days(default)?))
 }
 
 fn choose_credential_storage() -> Result<bool, Box<dyn std::error::Error>> {
@@ -1300,7 +1185,6 @@ async fn create_data_center_pat(
     username: Option<&str>,
     bootstrap_secret: &str,
     profile_name: &str,
-    expiration_days: u64,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let site = if host.starts_with("http://") || host.starts_with("https://") {
         host.trim_end_matches('/').to_owned()
@@ -1311,7 +1195,6 @@ async fn create_data_center_pat(
         .post(format!("{site}/rest/pat/latest/tokens"))
         .json(&serde_json::json!({
             "name": format!("jira-cli / {profile_name}"),
-            "expirationDuration": expiration_days,
         }));
     let request = match username {
         Some(username) => request.basic_auth(username, Some(bootstrap_secret)),
@@ -1380,7 +1263,6 @@ struct ProfileWrite<'a> {
     credential_store: &'a str,
     cloud_id: Option<&'a str>,
     token_kind: &'a str,
-    expires_at: Option<&'a str>,
     auth_type: &'a str,
     api_version: u8,
     read_only: bool,
@@ -1437,12 +1319,6 @@ fn write_profile_to_config(
         section.insert(
             "token_kind".to_owned(),
             toml::Value::String(profile.token_kind.to_owned()),
-        );
-    }
-    if let Some(expires_at) = profile.expires_at {
-        section.insert(
-            "expires_at".to_owned(),
-            toml::Value::String(expires_at.to_owned()),
         );
     }
     if profile.auth_type != "basic" {
@@ -1960,6 +1836,85 @@ mod tests {
 
         let config = Config::load(None, None, None).unwrap();
         assert_eq!(config.auth_type, AuthType::Basic);
+    }
+
+    /// Profiles written by earlier releases carry an `expires_at` date, including
+    /// ones in a format no longer checked. They keep loading.
+    #[test]
+    fn load_ignores_a_recorded_expiry_from_earlier_releases() {
+        let _lock = ProcessEnvLock::acquire();
+        let dir = TempDir::new().unwrap();
+        write_config(
+            dir.path(),
+            "[default]\nhost = \"x.atlassian.net\"\nemail = \"me@example.com\"\n\
+             token = \"t\"\nexpires_at = \"not a date\"\n",
+        )
+        .unwrap();
+        let _config_dir = set_config_dir_env(dir.path());
+        let _token = EnvVarGuard::unset("JIRA_TOKEN");
+
+        let config = Config::load(None, None, None).unwrap();
+        assert_eq!(config.host, "x.atlassian.net");
+    }
+
+    #[test]
+    fn rewriting_a_profile_drops_its_recorded_expiry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[default]\nhost = \"old.atlassian.net\"\nexpires_at = \"2026-11-24\"\n",
+        )
+        .unwrap();
+
+        write_profile_to_config(
+            &path,
+            "default",
+            ProfileWrite {
+                host: "acme.atlassian.net",
+                email: Some("me@acme.com"),
+                token: "secret",
+                credential_store: "file",
+                cloud_id: None,
+                token_kind: "classic",
+                auth_type: "basic",
+                api_version: 3,
+                read_only: false,
+            },
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("acme.atlassian.net"));
+        assert!(!content.contains("expires_at"), "{content}");
+    }
+
+    /// Jira creates a PAT without expiry unless asked for one, and setup has no
+    /// reason to impose a lifetime the instance does not require.
+    #[tokio::test]
+    async fn data_center_pat_is_created_without_an_expiry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/pat/latest/tokens"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(serde_json::json!({"rawToken": "new-pat"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let token = create_data_center_pat(&server.uri(), Some("me"), "pw", "work")
+            .await
+            .unwrap();
+        assert_eq!(token, "new-pat");
+
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body, serde_json::json!({"name": "jira-cli / work"}));
     }
 
     #[test]
@@ -2495,7 +2450,6 @@ token = "supersecrettoken"
                 credential_store: "file",
                 cloud_id: None,
                 token_kind: "classic",
-                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
@@ -2526,7 +2480,6 @@ token = "supersecrettoken"
                 credential_store: "file",
                 cloud_id: None,
                 token_kind: "classic",
-                expires_at: None,
                 auth_type: "pat",
                 api_version: 2,
                 read_only: true,
@@ -2560,7 +2513,6 @@ token = "supersecrettoken"
                 credential_store: "file",
                 cloud_id: None,
                 token_kind: "classic",
-                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
@@ -2591,7 +2543,6 @@ token = "supersecrettoken"
                 credential_store: "file",
                 cloud_id: None,
                 token_kind: "classic",
-                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
@@ -2625,7 +2576,6 @@ token = "supersecrettoken"
                 credential_store: "file",
                 cloud_id: None,
                 token_kind: "classic",
-                expires_at: None,
                 auth_type: "basic",
                 api_version: 3,
                 read_only: false,
