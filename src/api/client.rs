@@ -13,6 +13,73 @@ mod hierarchy;
 mod metadata;
 mod sprints;
 
+fn parse_issue_sprints(
+    extra: &serde_json::Map<String, serde_json::Value>,
+    field_ids: &[String],
+) -> Vec<IssueSprint> {
+    let mut found = BTreeMap::new();
+    for field_id in field_ids {
+        let Some(values) = extra.get(field_id) else {
+            continue;
+        };
+        let values = values
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| std::slice::from_ref(values));
+        for value in values {
+            let parsed = if let Some(object) = value.as_object() {
+                let id = object
+                    .get("id")
+                    .and_then(|id| id.as_u64().or_else(|| id.as_str()?.parse().ok()));
+                let name = object.get("name").and_then(|s| s.as_str());
+                let state = object.get("state").and_then(|s| s.as_str());
+                id.zip(name)
+                    .zip(state)
+                    .map(|((id, name), state)| IssueSprint {
+                        id,
+                        name: name.to_owned(),
+                        state: state.to_ascii_lowercase(),
+                    })
+            } else if let Some(raw) = value.as_str() {
+                let id = legacy_sprint_property(raw, "id=").and_then(|s| s.parse().ok());
+                let name = raw.split_once("name=").map(|(_, tail)| {
+                    [
+                        ",goal=",
+                        ",startDate=",
+                        ",endDate=",
+                        ",completeDate=",
+                        ",sequence=",
+                        "]",
+                    ]
+                    .iter()
+                    .filter_map(|marker| tail.find(marker))
+                    .min()
+                    .map_or(tail, |end| &tail[..end])
+                });
+                let state = legacy_sprint_property(raw, "state=");
+                id.zip(name)
+                    .zip(state)
+                    .map(|((id, name), state)| IssueSprint {
+                        id,
+                        name: name.to_owned(),
+                        state: state.to_ascii_lowercase(),
+                    })
+            } else {
+                None
+            };
+            if let Some(sprint) = parsed {
+                found.insert(sprint.id, sprint);
+            }
+        }
+    }
+    found.into_values().collect()
+}
+
+fn legacy_sprint_property<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+    raw.split_once(key)
+        .map(|(_, tail)| tail.split([',', ']']).next().unwrap_or(tail).trim())
+}
+
 pub struct JiraClient {
     http: reqwest::Client,
     base_url: String,
@@ -512,11 +579,41 @@ impl JiraClient {
     /// the embedded page is incomplete, additional requests are made to fetch
     /// the remaining comments.
     pub async fn get_issue(&self, key: &str) -> Result<Issue, ApiError> {
+        self.get_issue_with_sprint_fields(key, &[]).await
+    }
+
+    /// Read sprint values for `issues show` without adding a field lookup to
+    /// every issue read. Jira assigns the Sprint custom field a site-specific ID.
+    pub async fn get_issue_with_sprints(&self, key: &str) -> Result<Issue, ApiError> {
         validate_issue_key(key)?;
-        let fields = self.issue_fields(&ISSUE_DETAIL_FIELDS).await?.join(",");
+        const SPRINT_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
+        let ids: Vec<String> = self
+            .list_fields()
+            .await?
+            .into_iter()
+            .filter(|f| {
+                f.schema
+                    .as_ref()
+                    .is_some_and(|s| s.custom.as_deref() == Some(SPRINT_SCHEMA))
+            })
+            .map(|f| f.id)
+            .collect();
+        self.get_issue_with_sprint_fields(key, &ids).await
+    }
+
+    async fn get_issue_with_sprint_fields(
+        &self,
+        key: &str,
+        sprint_fields: &[String],
+    ) -> Result<Issue, ApiError> {
+        validate_issue_key(key)?;
+        let mut fields = self.issue_fields(&ISSUE_DETAIL_FIELDS).await?;
+        fields.extend(sprint_fields.iter().cloned());
+        let fields = fields.join(",");
         let path = format!("issue/{key}?fields={fields}");
         let mut issue: Issue = self.get(&path).await?;
         self.fill_epics(std::slice::from_mut(&mut issue)).await?;
+        issue.sprints = parse_issue_sprints(&issue.fields.extra, sprint_fields);
 
         // Fetch remaining comment pages if the embedded page is incomplete
         if let Some(ref mut comment_list) = issue.fields.comment
@@ -1016,9 +1113,12 @@ impl JiraClient {
             Err(ApiError::Api {
                 status: 400,
                 ref message,
-            }) if message
-                .to_ascii_lowercase()
-                .contains("does not support sprints") =>
+            }) if {
+                let message = message.to_ascii_lowercase();
+                message.contains("does not support sprints")
+                    || message.contains("doesn't support sprints")
+                    || message.contains("doesn’t support sprints")
+            } =>
             {
                 Ok(None)
             }

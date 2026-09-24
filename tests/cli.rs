@@ -1085,6 +1085,15 @@ fn version_is_success_output_with_a_silent_stderr() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("jira "));
+
+    let alias = Command::cargo_bin("jira")
+        .unwrap()
+        .arg("version")
+        .output()
+        .unwrap();
+    assert!(alias.status.success());
+    assert!(alias.stderr.is_empty());
+    assert_eq!(alias.stdout, output.stdout);
 }
 
 /// The whole of stderr is the envelope in machine mode. Emitting a prose line
@@ -1870,6 +1879,12 @@ async fn issues_show_emits_exactly_the_fields_it_declares() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
+        .and(path("/rest/api/3/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
         .and(path("/rest/api/3/issue/PROJ-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(full_issue()))
         .mount(&server)
@@ -1883,6 +1898,95 @@ async fn issues_show_emits_exactly_the_fields_it_declares() {
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_json_keys_match_schema("issues show", &json, &[]);
+}
+
+#[tokio::test]
+async fn issues_show_reads_current_and_historical_sprints_by_schema() {
+    for legacy in [false, true] {
+        let server = MockServer::start().await;
+        let api = if legacy { 2 } else { 3 };
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/{api}/field")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id":"customfield_10007","name":"Renamed iteration","schema":{"type":"array","custom":"com.pyxis.greenhopper.jira:gh-sprint"}},
+                {"id":"customfield_10008","name":"Sprint","schema":{"type":"string","custom":"unrelated"}}
+            ])))
+            .mount(&server).await;
+        let mut issue = full_issue();
+        issue["fields"]["customfield_10007"] = if legacy {
+            serde_json::json!([
+                "com.atlassian.greenhopper.service.sprint.Sprint@abc[id=5,rapidViewId=1,state=CLOSED,name=Old sprint,goal=,startDate=<null>]",
+                "com.atlassian.greenhopper.service.sprint.Sprint@def[id=8,rapidViewId=1,state=ACTIVE,name=Current sprint,goal=,startDate=<null>]"
+            ])
+        } else {
+            serde_json::json!([
+                {"id":5,"name":"Old sprint","state":"closed"},
+                {"id":8,"name":"Current sprint","state":"active"}
+            ])
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/{api}/issue/PROJ-1")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(issue))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let mut cmd = jira_cmd(&dir);
+        cmd.args(["issues", "show", "PROJ-1", "--json"])
+            .env("JIRA_HOST", server.uri())
+            .env("JIRA_EMAIL", "test@example.com")
+            .env("JIRA_TOKEN", "test-token")
+            .env("JIRA_API_VERSION", api.to_string());
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            json["sprint"],
+            serde_json::json!({"id":8,"name":"Current sprint","state":"active"})
+        );
+        assert_eq!(json["sprints"].as_array().unwrap().len(), 2);
+        assert_json_keys_match_schema("issues show", &json, &[]);
+        let mut text_cmd = jira_cmd(&dir);
+        text_cmd
+            .args(["issues", "show", "PROJ-1", "--output", "text"])
+            .env("JIRA_HOST", server.uri())
+            .env("JIRA_EMAIL", "test@example.com")
+            .env("JIRA_TOKEN", "test-token")
+            .env("JIRA_API_VERSION", api.to_string());
+        let text_output = text_cmd.output().unwrap();
+        assert!(text_output.status.success());
+        let display = String::from_utf8_lossy(&text_output.stdout);
+        assert!(
+            display.contains("Sprint:     Current sprint (8, active)"),
+            "{display}"
+        );
+        assert!(
+            display.contains("Past Sprints: Old sprint (5)"),
+            "{display}"
+        );
+        let requests = server.received_requests().await.unwrap();
+        let issue_request = requests
+            .iter()
+            .find(|r| r.url.path().ends_with("/issue/PROJ-1"))
+            .unwrap();
+        assert!(
+            issue_request
+                .url
+                .query()
+                .unwrap()
+                .contains("customfield_10007")
+        );
+        assert!(
+            !issue_request
+                .url
+                .query()
+                .unwrap()
+                .contains("customfield_10008")
+        );
+    }
 }
 
 #[tokio::test]
@@ -2124,6 +2228,12 @@ async fn issues_assign_emits_the_same_keys_whether_it_assigns_or_unassigns() {
 #[tokio::test]
 async fn absent_issue_fields_are_null_in_json_and_dashes_only_in_the_table() {
     let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
 
     Mock::given(method("POST"))
         .and(path("/rest/api/3/search/jql"))

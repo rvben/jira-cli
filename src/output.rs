@@ -121,11 +121,12 @@ pub fn error_envelope_for(err: &(dyn std::error::Error + 'static)) -> serde_json
         key,
         url,
         sprint_id,
+        created,
         ..
     }) = err.downcast_ref::<crate::api::ApiError>()
     {
         envelope["error"]["details"] = serde_json::json!({
-            "key": key, "url": url, "created": true, "sprintId": sprint_id,
+            "key": key, "url": url, "created": created, "updated": !created, "sprintId": sprint_id,
             "sprintMoved": false,
             "recoveryCommand": format!("jira issues move {key} --sprint {sprint_id}")
         });
@@ -239,7 +240,7 @@ pub static PARTIAL_SUCCESS: ErrorContract = ErrorContract {
     kind: "partial_success",
     exit_code: exit_codes::PARTIAL_SUCCESS,
     retryable: false,
-    description: "Issue created but sprint move failed. error.details contains key, url, created, sprintId, sprintMoved, and recoveryCommand. Retry only the move, not the create.",
+    description: "Issue created or updated but sprint move failed. error.details contains key, url, created, updated, sprintId, sprintMoved, and recoveryCommand. Retry only the move, not the original command.",
 };
 
 pub static BULK_FAILURE: ErrorContract = ErrorContract {
@@ -479,6 +480,7 @@ mod tests {
                 key: "PROJ-1".into(),
                 url: "https://example.invalid/browse/PROJ-1".into(),
                 sprint_id: 8,
+                created: true,
                 source: Box::new(ApiError::RateLimit),
             }),
             details: serde_json::json!({"context":"additional", "key":"do not override"}),
@@ -517,6 +519,7 @@ mod tests {
                 key: "PROJ-1".into(),
                 url: "https://example.invalid/browse/PROJ-1".into(),
                 sprint_id: 5,
+                created: true,
                 source: Box::new(ApiError::RateLimit),
             },
         ]

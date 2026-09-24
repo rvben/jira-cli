@@ -43,11 +43,12 @@ pub enum ApiError {
     /// overwrite. Retrying unchanged reproduces the conflict, so the caller has
     /// to resolve it first.
     Conflict(String),
-    /// An issue was created, but a subsequent sprint move failed.
+    /// An issue was created or updated, but a subsequent sprint move failed.
     PartialSuccess {
         key: String,
         url: String,
         sprint_id: u64,
+        created: bool,
         source: Box<ApiError>,
     },
     /// A bulk command completed with one or more failed items. Its complete
@@ -117,11 +118,21 @@ impl fmt::Display for ApiError {
                 key,
                 url,
                 sprint_id,
+                created,
                 source,
-            } => write!(
-                f,
-                "Created {key} ({url}), but adding it to sprint {sprint_id} failed: {source}. Retry only `jira issues move {key} --sprint {sprint_id}`; do not rerun issues create."
-            ),
+            } => {
+                if *created {
+                    write!(
+                        f,
+                        "Created {key} ({url}), but adding it to sprint {sprint_id} failed: {source}. Retry only `jira issues move {key} --sprint {sprint_id}`; do not rerun issues create."
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Updated {key} ({url}), but adding it to sprint {sprint_id} failed: {source}. Retry only `jira issues move {key} --sprint {sprint_id}`; do not rerun issues update."
+                    )
+                }
+            }
             ApiError::Api { status, message } => write!(f, "API error {status}: {message}"),
             ApiError::BulkFailure {
                 total,

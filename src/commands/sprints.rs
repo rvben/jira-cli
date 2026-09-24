@@ -46,12 +46,21 @@ pub async fn list(
     let mut warnings = Vec::new();
     let mut supported = 0;
     if board.is_some() && target_boards.iter().all(|b| !b.may_support_sprints()) {
-        return Err(ApiError::InvalidInput(
-            "Matched only Kanban boards, which do not support sprints; choose a Scrum board".into(),
-        ));
+        let details = target_boards
+            .iter()
+            .map(|b| format!("board {} {:?} ({})", b.id, b.name, b.board_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiError::InvalidInput(format!(
+            "{details} does not support sprints; choose a Scrum board"
+        )));
     }
     for board_info in target_boards {
         if !board_info.may_support_sprints() {
+            warnings.push(format!(
+                "Board {} {:?} ({}) does not support sprints and was skipped",
+                board_info.id, board_info.name, board_info.board_type
+            ));
             continue;
         }
         let Some(sprints) = client
@@ -59,8 +68,8 @@ pub async fn list(
             .await?
         else {
             warnings.push(format!(
-                "Board {} ({:?}) does not support sprints and was skipped",
-                board_info.id, board_info.name
+                "Board {} {:?} ({}) does not support sprints and was skipped",
+                board_info.id, board_info.name, board_info.board_type
             ));
             continue;
         };
@@ -73,9 +82,10 @@ pub async fn list(
         }
     }
     if board.is_some() && supported == 0 {
-        return Err(ApiError::InvalidInput(
-            "The matched boards do not support sprints; choose a Scrum board".into(),
-        ));
+        return Err(ApiError::InvalidInput(format!(
+            "{}; choose a Scrum board",
+            warnings.join("; ")
+        )));
     }
     let results: Vec<_> = all.values().map(|(sprint, boards)| {
         let primary = sprint.origin_board_id.and_then(|id| boards.get_key_value(&id))

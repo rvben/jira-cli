@@ -281,7 +281,7 @@ pub async fn show(
     open: bool,
 ) -> Result<(), ApiError> {
     client.enable_epic_lookup();
-    let issue = client.get_issue(key).await?;
+    let issue = client.get_issue_with_sprints(key).await?;
 
     if open {
         open_in_browser(&client.browse_url(&issue.key));
@@ -328,7 +328,14 @@ pub async fn create(
     };
     if dry_run {
         let prepared = client.preview_create_issue(draft, custom_fields).await?;
-        print_write_preview(out, "create", None, prepared, resolved_sprint.as_ref());
+        print_write_preview(
+            out,
+            "create",
+            None,
+            prepared,
+            resolved_sprint.as_ref(),
+            true,
+        );
         return Ok(());
     }
     let resp = client.create_issue(draft, custom_fields).await?;
@@ -349,6 +356,7 @@ pub async fn create(
                 key: resp.key.clone(),
                 url: url.clone(),
                 sprint_id: resolved.id,
+                created: true,
                 source: Box::new(source),
             })?;
         result["sprintId"] = serde_json::json!(resolved.id);
@@ -363,21 +371,79 @@ pub async fn update(
     out: &OutputConfig,
     key: &str,
     update: &IssueUpdate<'_>,
+    sprint: Option<(&str, Option<u64>)>,
     custom_fields: &[(String, serde_json::Value)],
     dry_run: bool,
 ) -> Result<(), ApiError> {
+    let has_fields = update.summary.is_some()
+        || update.description.is_some()
+        || update.priority.is_some()
+        || update.issue_type.is_some()
+        || update.epic.is_some()
+        || update.clear_epic
+        || update.components.is_some()
+        || update.fix_versions.is_some()
+        || update.labels.is_some()
+        || update.assignee.is_some()
+        || !custom_fields.is_empty();
+    if !has_fields && sprint.is_none() {
+        return Err(ApiError::InvalidInput(
+            "At least one field or --sprint is required".into(),
+        ));
+    }
+    let resolved_sprint = match sprint {
+        Some((specifier, board)) => {
+            Some(resolve_issue_sprint(client, key, specifier, board).await?)
+        }
+        None => None,
+    };
     if dry_run {
-        let prepared = client
-            .preview_update_issue(key, update, custom_fields)
-            .await?;
-        print_write_preview(out, "update", Some(key), prepared, None);
+        if !has_fields && resolved_sprint.is_some() {
+            client.issue_project(key).await?;
+        }
+        let prepared = if has_fields {
+            client
+                .preview_update_issue(key, update, custom_fields)
+                .await?
+        } else {
+            serde_json::json!({"fields":null,"metadata":{"issueTypes":null,"fields":null},"warnings":[]})
+        };
+        print_write_preview(
+            out,
+            "update",
+            Some(key),
+            prepared,
+            resolved_sprint.as_ref(),
+            has_fields,
+        );
         return Ok(());
     }
-    client.update_issue(key, update, custom_fields).await?;
-    out.print_result(
-        &serde_json::json!({ "key": key, "updated": true }),
-        &format!("Updated {key}"),
-    );
+    if has_fields {
+        client.update_issue(key, update, custom_fields).await?;
+    }
+    if let Some(resolved) = resolved_sprint {
+        let result = client.move_issue_to_sprint(key, resolved.id).await;
+        if has_fields {
+            result.map_err(|source| ApiError::PartialSuccess {
+                key: key.to_owned(),
+                url: client.browse_url(key),
+                sprint_id: resolved.id,
+                created: false,
+                source: Box::new(source),
+            })?;
+        } else {
+            result?;
+        }
+        out.print_result(
+            &serde_json::json!({"key":key,"updated":true,"sprintId":resolved.id,"sprintName":resolved.name}),
+            &format!("Moved {key} to {} ({})", resolved.name, resolved.id),
+        );
+    } else {
+        out.print_result(
+            &serde_json::json!({ "key": key, "updated": true }),
+            &format!("Updated {key}"),
+        );
+    }
     Ok(())
 }
 
@@ -390,24 +456,14 @@ pub async fn move_to_sprint(
     board: Option<u64>,
     dry_run: bool,
 ) -> Result<(), ApiError> {
-    // Also confirms that a preview targets an existing issue when the sprint
-    // is supplied by ID or explicitly scoped to a board.
-    let project = if board.is_none() && sprint.trim().parse::<u64>().is_err() {
-        Some(client.issue_project(key).await?)
-    } else {
-        None
-    };
-    let resolved = client
-        .resolve_sprint_scoped(sprint, project.as_deref(), board)
-        .await?;
-    validate_writable_sprint(&resolved)?;
+    let resolved = resolve_issue_sprint(client, key, sprint, board).await?;
     if dry_run {
-        if project.is_none() {
+        if board.is_some() || sprint.trim().parse::<u64>().is_ok() {
             client.issue_project(key).await?;
         }
         let prepared = serde_json::json!({"fields":null, "metadata":{"issueTypes":null,"fields":null},
             "warnings":["Jira may apply additional permission or workflow validators when the move is submitted."]});
-        print_write_preview(out, "move", Some(key), prepared, Some(&resolved));
+        print_write_preview(out, "move", Some(key), prepared, Some(&resolved), false);
         return Ok(());
     }
     client.move_issue_to_sprint(key, resolved.id).await?;
@@ -422,12 +478,33 @@ pub async fn move_to_sprint(
     Ok(())
 }
 
+async fn resolve_issue_sprint(
+    client: &JiraClient,
+    key: &str,
+    sprint: &str,
+    board: Option<u64>,
+) -> Result<crate::api::Sprint, ApiError> {
+    // Also confirms that a preview targets an existing issue when the sprint
+    // is supplied by ID or explicitly scoped to a board.
+    let project = if board.is_none() && sprint.trim().parse::<u64>().is_err() {
+        Some(client.issue_project(key).await?)
+    } else {
+        None
+    };
+    let resolved = client
+        .resolve_sprint_scoped(sprint, project.as_deref(), board)
+        .await?;
+    validate_writable_sprint(&resolved)?;
+    Ok(resolved)
+}
+
 fn print_write_preview(
     out: &OutputConfig,
     operation: &str,
     key: Option<&str>,
     mut prepared: serde_json::Value,
     sprint: Option<&crate::api::Sprint>,
+    field_write: bool,
 ) {
     prepared["dryRun"] = serde_json::json!(true);
     prepared["operation"] = serde_json::json!(operation);
@@ -437,7 +514,7 @@ fn print_write_preview(
     );
     let mut steps = match operation {
         "create" => vec!["create_issue"],
-        "update" => vec!["update_issue"],
+        "update" if field_write => vec!["update_issue"],
         _ => vec![],
     };
     if sprint.is_some() {
@@ -895,6 +972,37 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
     if let Some(ref epic) = issue.epic {
         writeln!(out, "  Epic:       {epic}")?;
     }
+    let current: Vec<_> = issue
+        .sprints
+        .iter()
+        .filter(|s| s.state == "active" || s.state == "future")
+        .collect();
+    if !current.is_empty() {
+        writeln!(
+            out,
+            "  Sprint:     {}",
+            current
+                .iter()
+                .map(|s| format!("{} ({}, {})", s.name, s.id, s.state))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+    }
+    let past: Vec<_> = issue
+        .sprints
+        .iter()
+        .filter(|s| s.state == "closed")
+        .collect();
+    if !past.is_empty() {
+        writeln!(
+            out,
+            "  Past Sprints: {}",
+            past.iter()
+                .map(|s| format!("{} ({})", s.name, s.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+    }
     if let Some(ref reporter) = issue.fields.reporter {
         writeln!(out, "  Reporter:   {}", reporter.display_name)?;
     }
@@ -1070,6 +1178,11 @@ fn version_to_json(v: &Version) -> serde_json::Value {
 }
 
 pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::Value {
+    let current: Vec<_> = issue
+        .sprints
+        .iter()
+        .filter(|s| s.state == "active" || s.state == "future")
+        .collect();
     let comments: Vec<serde_json::Value> = issue
         .fields
         .comment
@@ -1147,6 +1260,8 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         }),
         "parent": parent_to_json(issue),
         "epic": issue.epic,
+        "sprint": if current.len() == 1 { serde_json::json!(current[0]) } else { serde_json::Value::Null },
+        "sprints": issue.sprints,
         // Null when the issue has no description at all, so that state stays
         // distinguishable from a description that is present but empty.
         "description": issue.fields.description.as_ref().map(|_| issue.description_text()),
@@ -1390,6 +1505,7 @@ mod tests {
                 extra: serde_json::Map::new(),
             },
             epic: None,
+            sprints: Vec::new(),
         }
     }
 

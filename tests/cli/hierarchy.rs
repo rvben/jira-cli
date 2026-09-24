@@ -132,7 +132,7 @@ async fn cloud_reports_parent_and_derives_epic_from_the_parent_level() {
     Mock::given(method("GET"))
         .and(path("/rest/api/3/field"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .expect(0)
+        .expect(2)
         .mount(&server)
         .await;
 

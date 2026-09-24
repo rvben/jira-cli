@@ -27,31 +27,34 @@ impl JiraClient {
                 return Err(ApiError::InvalidInput("Sprint IDs must be positive".into()));
             }
             let sprint = self.get_sprint(id).await?;
-            if let Some(board_id) = board
-                && !self
-                    .list_sprints(board_id, None)
-                    .await?
-                    .iter()
-                    .any(|s| s.id == id)
-            {
-                return Err(ApiError::InvalidInput(format!(
-                    "Sprint {id} is not on board {board_id}"
-                )));
+            if let Some(board_id) = board {
+                let sprints = self.list_sprints_for_discovery(board_id, None).await?;
+                let Some(sprints) = sprints else {
+                    let board = self.get_board(board_id).await?;
+                    return Err(ApiError::InvalidInput(format!(
+                        "Board {} {:?} ({}) does not support sprints; choose a Scrum board",
+                        board.id, board.name, board.board_type
+                    )));
+                };
+                if !sprints.iter().any(|s| s.id == id) {
+                    return Err(ApiError::InvalidInput(format!(
+                        "Sprint {id} is not on board {board_id}"
+                    )));
+                }
             }
             return Ok(sprint);
         }
 
-        let board_ids = match board {
-            Some(id) => vec![id],
+        let board_infos = match board {
+            Some(id) => vec![self.get_board(id).await?],
             None => self
                 .list_boards_for_project(project)
                 .await?
                 .into_iter()
                 .filter(|b| b.may_support_sprints())
-                .map(|b| b.id)
                 .collect::<Vec<_>>(),
         };
-        if board_ids.is_empty() {
+        if board_infos.is_empty() {
             let scope = project
                 .map(|p| format!(" for project {p}"))
                 .unwrap_or_default();
@@ -62,14 +65,26 @@ impl JiraClient {
         let active = specifier.eq_ignore_ascii_case("active");
         let query = specifier.to_lowercase();
         let mut candidates: BTreeMap<u64, (Sprint, BTreeSet<u64>)> = BTreeMap::new();
-        for board_id in board_ids {
+        for board_info in &board_infos {
+            let board_id = board_info.id;
+            if !board_info.may_support_sprints() {
+                return Err(ApiError::InvalidInput(format!(
+                    "Board {board_id} {:?} ({}) does not support sprints; choose a Scrum board",
+                    board_info.name, board_info.board_type
+                )));
+            }
             let state = if active { Some("active") } else { None };
             let sprints = if board.is_none() {
                 self.list_sprints_for_discovery(board_id, state)
                     .await?
                     .unwrap_or_default()
             } else {
-                self.list_sprints(board_id, state).await?
+                self.list_sprints_for_discovery(board_id, state).await?.ok_or_else(|| {
+                    ApiError::InvalidInput(format!(
+                        "Board {board_id} {:?} ({}) does not support sprints; choose a Scrum board",
+                        board_info.name, board_info.board_type
+                    ))
+                })?
             };
             for sprint in sprints {
                 let matches = if active {
@@ -117,7 +132,13 @@ impl JiraClient {
                     s.name,
                     boards
                         .iter()
-                        .map(u64::to_string)
+                        .map(|id| {
+                            let info = board_infos.iter().find(|b| b.id == *id);
+                            info.map_or_else(
+                                || id.to_string(),
+                                |b| format!("{} {:?} ({})", b.id, b.name, b.board_type),
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 )

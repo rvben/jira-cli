@@ -94,6 +94,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print the CLI version
+    Version,
+
     /// Manage issues
     #[command(subcommand, visible_alias = "issue")]
     Issues(Box<IssuesCommand>),
@@ -367,12 +370,20 @@ enum IssuesCommand {
         key: String,
 
         /// New summary text
-        #[arg(long)]
+        #[arg(short, long)]
         summary: Option<String>,
 
         /// New description (plain text)
-        #[arg(long)]
+        #[arg(short, long)]
         description: Option<String>,
+
+        /// Add to a sprint (sprint ID, name substring, or "active"); also available through `issues move`
+        #[arg(long)]
+        sprint: Option<String>,
+
+        /// Sprint board ID (overrides automatic project scoping)
+        #[arg(long, requires = "sprint")]
+        board: Option<u64>,
 
         /// New priority name or ID (also accepts unique labels/prefixes, e.g. Medium)
         #[arg(long)]
@@ -847,6 +858,10 @@ fn host_on_command_line(matches: &clap::ArgMatches) -> bool {
 
 async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Command::Version => {
+            println!("jira {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Command::Schema { command } => {
             print_schema(command.as_deref())?;
             return Ok(());
@@ -1166,6 +1181,8 @@ async fn dispatch(
                 key,
                 summary,
                 description,
+                sprint,
+                board,
                 priority,
                 issue_type,
                 epic,
@@ -1197,7 +1214,16 @@ async fn dispatch(
                     labels: parsed_labels.as_deref(),
                     assignee: assignee_ref,
                 };
-                commands::issues::update(client, out, &key, &update, &field, dry_run).await?
+                commands::issues::update(
+                    client,
+                    out,
+                    &key,
+                    &update,
+                    sprint.as_deref().map(|s| (s, board)),
+                    &field,
+                    dry_run,
+                )
+                .await?
             }
             IssuesCommand::Move {
                 key,
@@ -1367,7 +1393,8 @@ async fn dispatch(
         },
 
         // Already handled above
-        Command::Schema { .. }
+        Command::Version
+        | Command::Schema { .. }
         | Command::Capabilities
         | Command::Completions { .. }
         | Command::Config(_)
@@ -1549,6 +1576,7 @@ fn schema_json() -> serde_json::Value {
         ("profile use", true),
         ("profile remove", true),
         ("init", true),
+        ("version", false),
         ("schema", false),
         ("capabilities", false),
         ("completions", false),
@@ -1660,6 +1688,12 @@ fn schema_json() -> serde_json::Value {
                 {"name": "affectedVersions", "type": "object[]", "nullable": true, "fields": version_fields},
                 parent_field,
                 epic_field,
+                {"name": "sprint", "type": "object", "nullable": true, "description": "The sole active or future sprint; null when none or more than one", "fields": [
+                    {"name":"id","type":"integer"},{"name":"name","type":"string"},{"name":"state","type":"string"}
+                ]},
+                {"name": "sprints", "type": "object[]", "description": "All discovered current and past sprints, ordered by ID", "fields": [
+                    {"name":"id","type":"integer"},{"name":"name","type":"string"},{"name":"state","type":"string"}
+                ]},
                 {"name": "comments", "type": "object[]", "fields": comment_fields, "description": "Already included here - no separate `issues comments` call is needed"},
                 {"name": "issueLinks", "type": "object[]", "description": "Already included here - no separate call is needed", "fields": [
                     {"name": "id", "type": "string"},
@@ -1689,7 +1723,9 @@ fn schema_json() -> serde_json::Value {
             "issues update",
             serde_json::json!([
                 {"name": "key", "type": "string"},
-                {"name": "updated", "type": "boolean"}
+                {"name": "updated", "type": "boolean"},
+                {"name": "sprintId", "type": "integer", "optional": true},
+                {"name": "sprintName", "type": "string", "optional": true}
             ]),
         ),
         (

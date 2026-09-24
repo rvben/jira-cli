@@ -13,6 +13,16 @@ pub struct Issue {
     /// Data Center / Server.
     #[serde(skip)]
     pub epic: Option<String>,
+    /// Sprint values discovered from Jira Software's instance-specific field.
+    #[serde(skip)]
+    pub sprints: Vec<IssueSprint>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct IssueSprint {
+    pub id: u64,
+    pub name: String,
+    pub state: String,
 }
 
 impl Issue {

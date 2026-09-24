@@ -147,6 +147,12 @@ async fn project_scope_is_sent_to_jira_and_explicit_board_overrides_it() {
         .expect(1).mount(&server).await;
     sprints(&server, 2, vec![sprint(20, "Project sprint")]).await;
     sprints(&server, 1, vec![sprint(10, "Explicit board sprint")]).await;
+    get(
+        &server,
+        "/rest/agile/1.0/board/1",
+        json!({"id":1,"name":"Explicit board","type":"scrum"}),
+    )
+    .await;
     assert_eq!(
         client(&server)
             .resolve_sprint_scoped("active", Some("PROJ"), None)
@@ -372,6 +378,12 @@ async fn board_flag_is_parsed_and_requires_a_sprint_on_create() {
     assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
     assert!(server.received_requests().await.unwrap().is_empty());
     sprints(&server, 2, vec![sprint(20, "Alpha")]).await;
+    get(
+        &server,
+        "/rest/agile/1.0/board/2",
+        json!({"id":2,"name":"Team Scrum","type":"scrum"}),
+    )
+    .await;
     Mock::given(method("POST"))
         .and(path("/rest/agile/1.0/sprint/20/issue"))
         .respond_with(ResponseTemplate::new(204))

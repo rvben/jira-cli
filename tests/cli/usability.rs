@@ -380,7 +380,7 @@ async fn kanban_unknown_board_and_unknown_project_get_actionable_errors() {
                 error["error"]["message"]
                     .as_str()
                     .unwrap()
-                    .contains("Kanban")
+                    .contains("kanban")
             );
         } else {
             assert_eq!(error["error"]["kind"], "not_found");
@@ -618,6 +618,132 @@ async fn update_and_move_previews_are_read_only_and_match_real_write_inputs() {
         .await;
     parse_success(run_jira_against(&server, &update_args));
     parse_success(run_jira_against(&server, &move_args));
+}
+
+#[tokio::test]
+async fn update_sprint_only_and_combined_partial_success_keep_the_issue_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/sprint/8"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":8,"name":"Iteration","state":"active"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"fields":{"project":{"key":"PROJ"}}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1/editmeta"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"fields":{"summary":{},"description":{}}})),
+        )
+        .mount(&server)
+        .await;
+    let preview = parse_success(run_jira_against(
+        &server,
+        &["issues", "update", "PROJ-1", "--sprint", "8", "--dry-run"],
+    ));
+    assert_eq!(preview["steps"], json!(["move_to_sprint"]));
+    assert_preview_schema("issues update", &preview);
+    let preview = parse_success(run_jira_against(
+        &server,
+        &[
+            "issues",
+            "update",
+            "PROJ-1",
+            "-s",
+            "New title",
+            "-d",
+            "Body",
+            "--sprint",
+            "8",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(preview["steps"], json!(["update_issue", "move_to_sprint"]));
+    assert_eq!(preview["fields"]["summary"], "New title");
+    assert_preview_schema("issues update", &preview);
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/agile/1.0/sprint/8/issue"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"errorMessages":["Move rejected"]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "update",
+            "PROJ-1",
+            "-s",
+            "New title",
+            "-d",
+            "Body",
+            "--sprint",
+            "8",
+            "--json",
+        ],
+    );
+    assert_eq!(result.status.code(), Some(8));
+    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "partial_success");
+    assert_eq!(error["error"]["details"]["key"], "PROJ-1");
+    assert_eq!(error["error"]["details"]["updated"], true);
+    assert_eq!(error["error"]["details"]["created"], false);
+    assert_eq!(
+        error["error"]["details"]["recoveryCommand"],
+        "jira issues move PROJ-1 --sprint 8"
+    );
+}
+
+#[tokio::test]
+async fn sprint_only_update_moves_without_a_field_write() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/sprint/8"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":8,"name":"Iteration","state":"active"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/agile/1.0/sprint/8/issue"))
+        .and(body_json(json!({"issues":["PROJ-1"]})))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = parse_success(run_jira_against(
+        &server,
+        &["issues", "update", "PROJ-1", "--sprint", "8"],
+    ));
+    assert_eq!(result["updated"], true);
+    assert_eq!(result["sprintId"], 8);
+    assert_json_keys_match_schema("issues update", &result, &[]);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method != "PUT")
+    );
 }
 
 #[tokio::test]
@@ -1085,7 +1211,7 @@ async fn discovery_and_move_agree_on_mixed_board_types_and_skip_only_unsupported
         &["sprints", "list", "-p", "PROJ", "--board", "Team"],
     ));
     assert_eq!(listed["total"], 2);
-    assert_eq!(listed["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["warnings"].as_array().unwrap().len(), 2);
     assert!(listed["warnings"][0].as_str().unwrap().contains("Board 1"));
     Mock::given(method("GET"))
         .and(path("/rest/api/3/issue/PROJ-1"))
@@ -1132,6 +1258,79 @@ async fn unrelated_board_api_failures_are_not_hidden_as_unsupported() {
     assert_eq!(
         error_envelope(&String::from_utf8_lossy(&result.stderr))["error"]["kind"],
         "api_error"
+    );
+}
+
+#[tokio::test]
+async fn server_contraction_is_skipped_but_explicit_board_names_the_problem() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"isLast":true,"values":[
+                {"id":1,"name":"Flow","type":"simple"},
+                {"id":2,"name":"Delivery","type":"scrum"}
+            ]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board/1/sprint"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"errorMessages":["The board doesn't support sprints."]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board/1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id":1,"name":"Flow","type":"simple"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/agile/1.0/board/2/sprint"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"isLast":true,"values":[{"id":8,"name":"Current","state":"active"}]}),
+        ))
+        .mount(&server)
+        .await;
+    let listed = parse_success(run_jira_against(&server, &["sprints", "list"]));
+    assert_eq!(listed["sprints"][0]["id"], 8);
+    assert!(listed["warnings"][0].as_str().unwrap().contains("Flow"));
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"fields":{"project":{"key":"PROJ"}}})),
+        )
+        .mount(&server)
+        .await;
+    let preview = parse_success(run_jira_against(
+        &server,
+        &[
+            "issues",
+            "move",
+            "PROJ-1",
+            "--sprint",
+            "active",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(preview["sprint"]["id"], 8);
+    let explicit = run_jira_against(&server, &["sprints", "list", "--board", "1"]);
+    let message = String::from_utf8_lossy(&explicit.stderr);
+    assert!(
+        message.contains("1") && message.contains("Flow") && message.contains("simple"),
+        "{message}"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET")
     );
 }
 

@@ -1909,6 +1909,11 @@ async fn unlink_issues_sends_delete() {
 async fn show_issue_includes_issue_links_in_json() {
     let server = MockServer::start().await;
     let client = test_client(&server);
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
 
     let mut fixture = issue_fixture("PROJ-1", "Issue with links", "Open");
     fixture["fields"]["issuelinks"] = serde_json::json!([
@@ -2591,6 +2596,11 @@ async fn issues_list_type_filter_adds_issuetype_to_jql() {
 async fn show_issue_link_json_includes_plain_english_sentence() {
     let server = MockServer::start().await;
     let client = test_client(&server);
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
 
     let mut fixture = issue_fixture("PROJ-1", "Issue with links", "Open");
     fixture["fields"]["issuelinks"] = serde_json::json!([

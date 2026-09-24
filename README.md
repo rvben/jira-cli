@@ -187,6 +187,7 @@ jira issues list --fields key,summary,parent,epic
 
 # Show
 jira issues show MYAPP-123
+jira version                              # also available as jira --version
 
 # Discover the create screen before choosing fields
 jira issues create-meta -p MYAPP             # available issue types
@@ -208,6 +209,8 @@ jira issues move MYAPP-123 --sprint active --dry-run
 
 # Update
 jira issues update MYAPP-123 --summary "Updated title"
+jira issues update MYAPP-123 -s "Updated title" -d "New description"
+jira issues update MYAPP-123 --sprint active  # same sprint move as `issues move`
 jira issues update MYAPP-123 --priority Low --assignee me
 jira issues update MYAPP-123 --field customfield_10016=5
 jira issues update MYAPP-123 --epic MYAPP-10
@@ -309,18 +312,20 @@ behavior; authentication and server failures are still reported.
 or clear an existing assignee. Omitting the flag preserves Jira's create default
 or the existing assignee. These aliases also work with `issues assign`.
 
-On `issues create` and `issues move`, sprint names and `active` are scoped to the
+On `issues create`, `issues update`, and `issues move`, sprint names and `active` are scoped to the
 issue project's Scrum boards. `--board ID` overrides this scope. Exact names
 win over substring matches; multiple matches list sprint and board IDs instead
 of picking one. Numeric sprint IDs identify a sprint directly; if `--board` is
 also supplied, membership on that board is checked.
 
-Creation resolves the sprint and checks that it is active or future before
-creating the issue. If the subsequent move fails, the CLI exits with code `8`
+Creation and updates resolve the sprint and check that it is active or future before
+writing issue fields. If a sprint move after a create or field update fails, the CLI exits with code `8`
 and error kind `partial_success`. JSON stderr includes `error.details.key`,
-`url`, `created`, `sprintId`, `sprintMoved`, and `recoveryCommand`. The error is
+`url`, `created`, `updated`, `sprintId`, `sprintMoved`, and `recoveryCommand`. The error is
 not retryable as a whole: use the returned `jira issues move KEY --sprint ID`
 command to finish the operation. Rerunning `issues create` would create a duplicate.
+`issues show` reports the sole current sprint in `sprint` and all current and
+historical sprint values in `sprints`; the text view labels current and past sprints.
 
 ### Projects
 
