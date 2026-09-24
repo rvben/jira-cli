@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.15](https://github.com/rvben/jira-cli/compare/v0.4.14...v0.4.15) - 2026-09-24
+
+### Fixed
+
+- **sprints**: make issue sprint workflows safe and discoverable ([a064612](https://github.com/rvben/jira-cli/commit/a0646129dd6e26a9cceb830ed88bd37163056f2b))
+
 ## [0.4.14](https://github.com/rvben/jira-cli/compare/v0.4.13...v0.4.14) - 2026-09-24
 
 ### Added
