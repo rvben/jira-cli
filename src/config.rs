@@ -88,6 +88,72 @@ pub struct Config {
     pub token_kind: String,
 }
 
+/// What a profile's site reports about its deployment, held against the REST
+/// API version and authentication the profile is set up for.
+#[derive(Debug)]
+pub(crate) enum DeploymentCheck {
+    /// The site runs what the profile expects; carries its description.
+    Matches(String),
+    /// The site runs something the profile cannot talk to; carries the
+    /// explanation and the fix.
+    Mismatch(String),
+    /// The site could not be identified; carries why. Later checks still run.
+    Unknown(String),
+}
+
+/// Ask the profile's site which deployment it runs and compare it with the
+/// profile. Cloud needs REST API v3 and an email with an API token; Data Center
+/// serves REST API v2.
+pub(crate) async fn check_deployment(config: &Config) -> DeploymentCheck {
+    let site = match site::normalize_site(&config.host) {
+        Ok(site) => site,
+        Err(error) => return DeploymentCheck::Unknown(error),
+    };
+    let detected = match site::detect(&site).await {
+        Ok(detected) => detected,
+        Err(error) => return DeploymentCheck::Unknown(error),
+    };
+    let runs = detected.describe();
+    // Each mismatch with the environment setting that corrects it.
+    let (problem, setting) = match detected.deployment {
+        site::Deployment::Cloud if config.auth_type == AuthType::Pat => (
+            format!(
+                "{} runs {runs}, which takes an email and API token, but this profile sends a personal access token",
+                config.host
+            ),
+            ("JIRA_AUTH_TYPE", "basic"),
+        ),
+        site::Deployment::Cloud if config.api_version != 3 => (
+            format!(
+                "{} runs {runs}, which needs REST API v3, but this profile uses v{}",
+                config.host, config.api_version
+            ),
+            ("JIRA_API_VERSION", "3"),
+        ),
+        site::Deployment::DataCenter if config.api_version != 2 => (
+            format!(
+                "{} runs {runs}, which serves REST API v2, but this profile uses v{}",
+                config.host, config.api_version
+            ),
+            ("JIRA_API_VERSION", "2"),
+        ),
+        _ => return DeploymentCheck::Matches(runs),
+    };
+    let (variable, value) = setting;
+    // The environment overrides the config file, so when the variable is set,
+    // or no saved profile exists for setup to correct, the variable is the fix.
+    let saved_profile = load_file_profile(Some(&config.profile))
+        .map(|(_, profile)| profile.host.is_some())
+        .unwrap_or(false);
+    if std::env::var_os(variable).is_some() || !saved_profile {
+        return DeploymentCheck::Mismatch(format!("{problem}. Set {variable}={value}."));
+    }
+    DeploymentCheck::Mismatch(format!(
+        "{problem}. Run `jira init --profile {}` to set the profile up for this site.",
+        shell_word(&config.profile)
+    ))
+}
+
 /// Render `word` as one shell argument, quoting it only when it needs it, so a
 /// suggested command can be pasted as written even for a profile named `work team`.
 fn shell_word(word: &str) -> std::borrow::Cow<'_, str> {

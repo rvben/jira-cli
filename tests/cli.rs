@@ -509,9 +509,222 @@ async fn doctor_verifies_authentication_project_access_and_write_safety() {
     assert_eq!(result["ok"], true);
     assert_eq!(result["user"]["displayName"], "Test User");
     assert_eq!(result["projectCount"], 1);
-    assert_eq!(result["checks"][1]["name"], "authentication");
-    assert_eq!(result["checks"][2]["name"], "projects");
+    let names: Vec<&str> = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "configuration",
+            "deployment",
+            "authentication",
+            "projects",
+            "write_safety"
+        ]
+    );
     assert_json_keys_match_schema("doctor", &result, &[]);
+}
+
+async fn mount_server_info(server: &MockServer, info: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/serverInfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(info))
+        .mount(server)
+        .await;
+}
+
+/// A Data Center site does not serve REST API v3, so a v3 profile would fail on
+/// every request with a bare 404. Doctor names the mismatch before trying.
+#[tokio::test]
+async fn doctor_reports_a_data_center_site_configured_for_api_v3() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "version": "10.3.25", "deploymentType": "DataCenter"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["doctor", "--json"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    let check = doctor_check(&result, "deployment");
+    assert_eq!(check["ok"], false);
+    let detail = check["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(
+            "runs Jira Data Center 10.3.25, which serves REST API v2, but this profile uses v3"
+        ),
+        "{detail}"
+    );
+    // The credentials come from the environment, which a new profile would not override.
+    assert!(detail.contains("Set JIRA_API_VERSION=2."), "{detail}");
+    assert_eq!(doctor_check(&result, "authentication")["detail"], "not run");
+    assert_json_keys_match_schema("doctor", &result, &[]);
+}
+
+/// Jira Cloud has retired REST API v2 search, so a v2 profile authenticates and
+/// then fails on search. Doctor catches it, and a stored profile is fixed by setup.
+#[tokio::test]
+async fn doctor_reports_a_cloud_site_configured_for_api_v2() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[profiles.\"work team\"]\nhost = \"{}\"\nemail = \"me@example.com\"\napi_version = 2\ntoken = \"t\"\ncredential_store = \"file\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["--profile", "work team", "doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let detail = doctor_check(&result, "deployment")["detail"]
+        .as_str()
+        .unwrap();
+    assert!(
+        detail.contains("runs Jira Cloud, which needs REST API v3, but this profile uses v2"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("Run `jira init --profile 'work team'`"),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_reports_a_personal_access_token_sent_to_cloud() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[profiles.work]\nhost = \"{}\"\nauth_type = \"pat\"\napi_version = 3\ntoken = \"t\"\ncredential_store = \"file\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["--profile", "work", "doctor", "--json"])
+        .env("JIRA_AUTH_TYPE", "pat")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let detail = doctor_check(&result, "deployment")["detail"]
+        .as_str()
+        .unwrap();
+    assert!(
+        detail.contains(
+            "which takes an email and API token, but this profile sends a personal access token"
+        ),
+        "{detail}"
+    );
+    // The variable overrides the stored profile, so it is the setting to change.
+    assert!(detail.contains("Set JIRA_AUTH_TYPE=basic."), "{detail}");
+}
+
+/// A profile that fits its site reports what the site runs and carries on.
+#[tokio::test]
+async fn doctor_reports_what_a_matching_site_runs() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "version": "9.12.4", "deploymentType": "Server"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "me", "displayName": "Data Center User"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/project"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[default]\nhost = \"{}\"\nauth_type = \"pat\"\napi_version = 2\ntoken = \"t\"\ncredential_store = \"file\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir).args(["doctor", "--json"]).output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let check = doctor_check(&result, "deployment");
+    assert_eq!(check["ok"], true);
+    assert_eq!(check["detail"], "Jira Data Center 9.12.4");
+}
+
+/// A site that cannot be identified, such as one behind single sign-on that
+/// hides `serverInfo`, is no reason to stop: the checks that follow still run.
+#[tokio::test]
+async fn doctor_continues_when_the_site_cannot_be_identified() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["doctor", "--json"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let detail = doctor_check(&result, "deployment")["detail"]
+        .as_str()
+        .unwrap();
+    assert!(detail.starts_with("not identified ("), "{detail}");
+    assert_eq!(doctor_check(&result, "authentication")["ok"], false);
+}
+
+/// The doctor check with this name, failing the test when it is absent.
+fn doctor_check<'a>(result: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == name)
+        .unwrap_or_else(|| panic!("no `{name}` check in {result}"))
 }
 
 #[tokio::test]
@@ -530,9 +743,8 @@ async fn doctor_turns_an_auth_endpoint_404_into_actionable_diagnostics() {
 
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["ok"], false);
-    assert_eq!(result["checks"][1]["name"], "authentication");
     assert!(
-        result["checks"][1]["detail"]
+        doctor_check(&result, "authentication")["detail"]
             .as_str()
             .unwrap()
             .contains("Confirm the site is active")
@@ -3420,7 +3632,9 @@ async fn doctor_reports_the_remedy_for_a_rejected_token() {
 
     assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let detail = result["checks"][1]["detail"].as_str().unwrap();
+    let detail = doctor_check(&result, "authentication")["detail"]
+        .as_str()
+        .unwrap();
     assert!(
         detail.contains("The token in JIRA_TOKEN was rejected"),
         "{detail}"
@@ -3675,8 +3889,9 @@ async fn doctor_project_check_rejected_by_401_carries_the_remedy() {
 
     assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["checks"][2]["name"], "projects");
-    let detail = result["checks"][2]["detail"].as_str().unwrap();
+    let detail = doctor_check(&result, "projects")["detail"]
+        .as_str()
+        .unwrap();
     assert!(
         detail.contains("The token in JIRA_TOKEN was rejected"),
         "{detail}"
@@ -3744,4 +3959,42 @@ fn suggested_login_command_accepts_profile_after_the_subcommand() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+/// CI often keeps settings in a committed profile and injects only the secret
+/// through JIRA_TOKEN. The mismatched setting is then the profile's, so the fix
+/// is setup, not a variable nobody set.
+#[tokio::test]
+async fn doctor_blames_the_profile_when_only_the_token_comes_from_the_environment() {
+    let server = MockServer::start().await;
+    mount_server_info(
+        &server,
+        serde_json::json!({"baseUrl": server.uri(), "deploymentType": "Cloud"}),
+    )
+    .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[default]\nhost = \"{}\"\nemail = \"me@example.com\"\napi_version = 2\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["doctor", "--json"])
+        .env("JIRA_TOKEN", "t")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::INPUT_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let detail = doctor_check(&result, "deployment")["detail"]
+        .as_str()
+        .unwrap();
+    assert!(
+        detail.contains("Run `jira init --profile default`"),
+        "{detail}"
+    );
+    assert!(!detail.contains("JIRA_API_VERSION"), "{detail}");
 }

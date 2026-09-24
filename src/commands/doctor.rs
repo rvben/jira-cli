@@ -1,5 +1,5 @@
 use crate::api::{ApiError, JiraClient};
-use crate::config::Config;
+use crate::config::{Config, DeploymentCheck};
 use crate::output::OutputConfig;
 
 /// Verify the complete read-only path from resolved configuration to Jira.
@@ -23,6 +23,7 @@ pub async fn run(
     if offline {
         let checks = serde_json::json!([
             {"name": "configuration", "ok": true, "detail": configuration},
+            {"name": "deployment", "ok": true, "detail": "network check skipped"},
             {"name": "authentication", "ok": true, "detail": format!("credential available from {}; network not checked", config.credential_store)},
             {"name": "projects", "ok": true, "detail": "network check skipped"},
             {"name": "write_safety", "ok": true, "detail": safety}
@@ -47,30 +48,44 @@ pub async fn run(
         return Ok(());
     }
 
+    let mut checks = Checks::new(safety);
+    checks.pass("configuration", configuration);
+
+    match crate::config::check_deployment(config).await {
+        DeploymentCheck::Matches(runs) => checks.pass("deployment", runs),
+        DeploymentCheck::Unknown(reason) => checks.pass(
+            "deployment",
+            format!("not identified ({reason}); checks continue"),
+        ),
+        DeploymentCheck::Mismatch(problem) => {
+            let error = ApiError::InvalidInput(problem);
+            checks.fail("deployment", &error, &["authentication", "projects"]);
+            render_failed_checks(out, checks.finish());
+            return Err(error);
+        }
+    }
+
     let me = match client.get_myself().await {
         Ok(me) => me,
         Err(error) => {
             let error = contextualize_auth_error(error, config);
-            render_failure(out, &configuration, safety, "authentication", &error);
+            checks.fail("authentication", &error, &["projects"]);
+            render_failed_checks(out, checks.finish());
             return Err(error);
         }
     };
+    checks.pass("authentication", me.display_name.clone());
 
     let projects = match client.list_projects().await {
         Ok(projects) => projects,
         Err(error) => {
-            render_project_failure(out, &configuration, &me.display_name, safety, &error);
+            checks.fail("projects", &error, &[]);
+            render_failed_checks(out, checks.finish());
             return Err(error);
         }
     };
-
-    let project_detail = project_access_detail(projects.len());
-    let checks = serde_json::json!([
-        {"name": "configuration", "ok": true, "detail": configuration},
-        {"name": "authentication", "ok": true, "detail": me.display_name},
-        {"name": "projects", "ok": true, "detail": project_detail},
-        {"name": "write_safety", "ok": true, "detail": safety}
-    ]);
+    checks.pass("projects", project_access_detail(projects.len()));
+    let checks = checks.finish();
 
     if out.json {
         out.print_data(
@@ -112,22 +127,6 @@ fn contextualize_auth_error(error: ApiError, config: &Config) -> ApiError {
     }
 }
 
-fn render_failure(
-    out: &OutputConfig,
-    configuration: &str,
-    safety: &str,
-    failed_check: &str,
-    error: &ApiError,
-) {
-    let checks = serde_json::json!([
-        {"name": "configuration", "ok": true, "detail": configuration},
-        {"name": failed_check, "ok": false, "detail": error.to_string()},
-        {"name": "projects", "ok": false, "detail": "not run"},
-        {"name": "write_safety", "ok": true, "detail": safety}
-    ]);
-    render_failed_checks(out, checks);
-}
-
 /// Describe how many projects the account can see, as `doctor` and `init` report it.
 pub(crate) fn project_access_detail(count: usize) -> String {
     match count {
@@ -137,20 +136,39 @@ pub(crate) fn project_access_detail(count: usize) -> String {
     }
 }
 
-fn render_project_failure(
-    out: &OutputConfig,
-    configuration: &str,
-    user: &str,
-    safety: &str,
-    error: &ApiError,
-) {
-    let checks = serde_json::json!([
-        {"name": "configuration", "ok": true, "detail": configuration},
-        {"name": "authentication", "ok": true, "detail": user},
-        {"name": "projects", "ok": false, "detail": error.to_string()},
-        {"name": "write_safety", "ok": true, "detail": safety}
-    ]);
-    render_failed_checks(out, checks);
+/// Doctor's checklist in the order the checks run. A failed check marks the
+/// checks it prevented as not run, so the list always has the same entries.
+struct Checks {
+    entries: Vec<serde_json::Value>,
+    safety: &'static str,
+}
+
+impl Checks {
+    fn new(safety: &'static str) -> Self {
+        Self {
+            entries: Vec::new(),
+            safety,
+        }
+    }
+
+    fn pass(&mut self, name: &str, detail: String) {
+        self.entries
+            .push(serde_json::json!({"name": name, "ok": true, "detail": detail}));
+    }
+
+    fn fail(&mut self, name: &str, error: &ApiError, not_run: &[&str]) {
+        self.entries
+            .push(serde_json::json!({"name": name, "ok": false, "detail": error.to_string()}));
+        for skipped in not_run {
+            self.entries
+                .push(serde_json::json!({"name": skipped, "ok": false, "detail": "not run"}));
+        }
+    }
+
+    fn finish(mut self) -> serde_json::Value {
+        self.pass("write_safety", self.safety.to_owned());
+        serde_json::Value::Array(self.entries)
+    }
 }
 
 fn render_failed_checks(out: &OutputConfig, checks: serde_json::Value) {

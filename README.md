@@ -7,7 +7,7 @@ A fast, friendly Jira CLI for Jira Cloud and Jira Data Center / Server, built
 to feel natural for people and predictable for agents.
 
 - **Auto-JSON** when stdout is not a TTY, so you can pipe it anywhere and get structured data
-- **`jira doctor`** verifies configuration, identity, project access, and write safety in one command
+- **`jira doctor`** verifies configuration, the site's deployment (Cloud or Data Center, with the matching auth and API version), identity, project access, and write safety in one command
 - **Command-scoped schema** gives agents one complete command contract without loading the full tree
 - **Structured exit codes**, so agents can branch on auth failures, rate limits, not-found, and input errors without parsing text
 - **Clean stdout/stderr split**: data on stdout, messages on stderr, `--quiet` suppresses all non-data output
@@ -404,7 +404,7 @@ jira completions zsh > ~/.zsh/completions/_jira
 
 ```sh
 jira init                    # guided setup that verifies credentials before saving
-jira doctor                  # verify config, auth, projects, and write safety
+jira doctor                  # verify config, deployment, auth, projects, and write safety
 jira doctor --offline        # inspect configuration without contacting Jira
 jira auth status             # verify the selected credential
 jira auth status --offline   # inspect local credential state only

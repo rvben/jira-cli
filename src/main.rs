@@ -139,7 +139,7 @@ enum Command {
     /// Show the currently authenticated user
     Myself,
 
-    /// Verify configuration, authentication, project access, and write safety
+    /// Verify configuration, deployment, authentication, project access, and write safety
     Doctor {
         /// Check local configuration without contacting Jira
         #[arg(long)]
