@@ -183,7 +183,10 @@ pub async fn bulk_assign(
 fn aborts_run(error: &ApiError) -> bool {
     match error {
         ApiError::WithDetails { source, .. } => aborts_run(source),
-        ApiError::Auth(_) | ApiError::RateLimit | ApiError::Http(_) => true,
+        ApiError::Auth { .. }
+        | ApiError::Forbidden(_)
+        | ApiError::RateLimit
+        | ApiError::Http(_) => true,
         ApiError::Api { status, .. } => *status >= 500,
         _ => false,
     }

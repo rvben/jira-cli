@@ -88,7 +88,44 @@ pub struct Config {
     pub token_kind: String,
 }
 
+/// Render `word` as one shell argument, quoting it only when it needs it, so a
+/// suggested command can be pasted as written even for a profile named `work team`.
+fn shell_word(word: &str) -> std::borrow::Cow<'_, str> {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@'));
+    if plain {
+        std::borrow::Cow::Borrowed(word)
+    } else {
+        std::borrow::Cow::Owned(format!("'{}'", word.replace('\'', r"'\''")))
+    }
+}
+
 impl Config {
+    /// How to replace this profile's token when Jira rejects it: the variable to
+    /// change, or the exact command to rerun, rather than a generic checklist.
+    pub fn auth_remedy(&self) -> String {
+        let causes = match self.auth_type {
+            AuthType::Basic => format!(
+                "it may have expired or been revoked, or belong to an account other than {}",
+                self.email
+            ),
+            AuthType::Pat => "it may have expired or been revoked".to_string(),
+        };
+        if self.credential_store == "environment" {
+            format!(
+                "The token in JIRA_TOKEN was rejected: {causes}. Replace JIRA_TOKEN with a current token."
+            )
+        } else {
+            format!(
+                "The token stored for profile `{profile}` was rejected: {causes}. Run `jira auth login --profile {argument}` to store a new one.",
+                profile = self.profile,
+                argument = shell_word(&self.profile)
+            )
+        }
+    }
+
     /// Load config with priority: CLI args > env vars > config file.
     ///
     /// The API token must be supplied via the `JIRA_TOKEN` environment variable
@@ -404,7 +441,8 @@ pub async fn auth_status(
         cfg.api_version,
         cfg.cloud_id.as_deref(),
         &cfg.token_kind,
-    )?;
+    )?
+    .with_auth_remedy(cfg.auth_remedy());
     let myself = client.get_myself().await?;
     out.print_result(
         &serde_json::json!({
@@ -447,6 +485,7 @@ pub async fn migrate_credential(
         cfg.cloud_id.as_deref(),
         &cfg.token_kind,
     )?
+    .with_auth_remedy(cfg.auth_remedy())
     .get_myself()
     .await?;
 
@@ -826,6 +865,15 @@ async fn init_interactive(
         AuthType::Basic
     };
 
+    // The token was pasted a moment ago, so nothing stored is to blame.
+    let remedy = match email.as_deref() {
+        Some(email) => {
+            format!("Check that the whole token was pasted and that it belongs to {email}.")
+        }
+        None => {
+            "Check that the whole token was pasted and that it has not been revoked.".to_owned()
+        }
+    };
     let verified = match crate::api::client::JiraClient::new_with_cloud(
         &host,
         email.as_deref().unwrap_or(""),
@@ -834,7 +882,9 @@ async fn init_interactive(
         api_version,
         cloud_id.as_deref(),
         &token_kind,
-    ) {
+    )
+    .map(|client| client.with_auth_remedy(remedy))
+    {
         Err(e) => {
             eprintln!(" {} {e}", sym_fail());
             return Err(e.into());
@@ -1915,6 +1965,16 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body, serde_json::json!({"name": "jira-cli / work"}));
+    }
+
+    #[test]
+    fn shell_word_quotes_only_what_the_shell_would_split() {
+        assert_eq!(shell_word("work"), "work");
+        assert_eq!(shell_word("team.eu-1"), "team.eu-1");
+        assert_eq!(shell_word("work team"), "'work team'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("$HOME"), "'$HOME'");
+        assert_eq!(shell_word(""), "''");
     }
 
     #[test]

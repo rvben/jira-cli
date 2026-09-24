@@ -21,6 +21,9 @@ pub struct JiraClient {
     host: String,
     api_version: u8,
     read_only: bool,
+    /// How to replace a rejected token, attached to every 401; see
+    /// `with_auth_remedy`.
+    auth_remedy: Option<String>,
     /// Whether issue reads fill in `Issue::epic`; see `enable_epic_lookup`.
     epic_lookup: std::sync::atomic::AtomicBool,
     /// Data Center Epic Link field IDs, resolved at most once per client.
@@ -156,9 +159,18 @@ impl JiraClient {
             host: domain.to_string(),
             api_version,
             read_only: false,
+            auth_remedy: None,
             epic_lookup: std::sync::atomic::AtomicBool::new(false),
             epic_link_fields: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Advice every 401 from this client carries, naming where the token came
+    /// from and how to replace it. Set once here so each reporting path, per-item
+    /// bulk results included, publishes the same guidance.
+    pub fn with_auth_remedy(mut self, remedy: String) -> Self {
+        self.auth_remedy = Some(remedy);
+        self
     }
 
     /// Enforce the CLI's read-only policy at every HTTP write boundary.
@@ -193,10 +205,14 @@ impl JiraClient {
         format!("{}/browse/{issue_key}", self.browse_base_url())
     }
 
-    fn map_status(status: u16, body: String) -> ApiError {
+    fn map_status(&self, status: u16, body: String) -> ApiError {
         let message = summarize_error_body(status, &body);
         match status {
-            401 | 403 => ApiError::Auth(message),
+            401 => ApiError::Auth {
+                message,
+                remedy: self.auth_remedy.clone(),
+            },
+            403 => ApiError::Forbidden(message),
             404 => ApiError::NotFound(message),
             409 => ApiError::Conflict(message),
             429 => ApiError::RateLimit,
@@ -274,7 +290,7 @@ impl JiraClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(status.as_u16(), body));
+            return Err(self.map_status(status.as_u16(), body));
         }
         Ok(resp)
     }
@@ -1274,7 +1290,8 @@ fn truncate_message(msg: &str) -> String {
 
 fn default_status_message(status: u16) -> String {
     match status {
-        401 | 403 => "request unauthorized".into(),
+        401 => "credentials rejected".into(),
+        403 => "request forbidden".into(),
         404 => "resource not found".into(),
         409 => "conflicts with the current state of the resource".into(),
         429 => "rate limited by Jira".into(),

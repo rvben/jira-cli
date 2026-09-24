@@ -19,8 +19,14 @@ pub enum AuthType {
 
 #[derive(Debug)]
 pub enum ApiError {
-    /// Bad credentials or forbidden.
-    Auth(String),
+    /// Jira rejected the credentials (HTTP 401). `remedy` names where the
+    /// token came from and how to replace it, when the caller knows.
+    Auth {
+        message: String,
+        remedy: Option<String>,
+    },
+    /// Jira accepted the credentials but refused the request (HTTP 403).
+    Forbidden(String),
     /// Resource not found.
     NotFound(String),
     /// Invalid user input (bad key format, missing required value, etc.).
@@ -64,12 +70,30 @@ pub enum ApiError {
     Other(String),
 }
 
+/// Advice for a rejected token when the credential source is unknown.
+const DEFAULT_AUTH_REMEDY: &str = "The token may have expired or been revoked. Check JIRA_TOKEN, or run `jira auth login` to store a new one.";
+
+impl ApiError {
+    /// A rejected-credentials error carrying only Jira's message.
+    pub fn auth(message: impl Into<String>) -> Self {
+        ApiError::Auth {
+            message: message.into(),
+            remedy: None,
+        }
+    }
+}
+
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApiError::Auth(msg) => write!(
+            ApiError::Auth { message, remedy } => write!(
                 f,
-                "Authentication failed: {msg}\nCheck JIRA_TOKEN or run `jira config show` to verify credentials."
+                "Authentication failed: {message}\n{}",
+                remedy.as_deref().unwrap_or(DEFAULT_AUTH_REMEDY)
+            ),
+            ApiError::Forbidden(msg) => write!(
+                f,
+                "Permission denied: {msg}\nJira accepted the credentials but refused this request, so the account lacks permission for it."
             ),
             ApiError::NotFound(msg) => write!(f, "Not found: {msg}"),
             ApiError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
@@ -126,7 +150,7 @@ mod tests {
 
     #[test]
     fn auth_error_display_includes_check_guidance() {
-        let err = ApiError::Auth("invalid credentials".into());
+        let err = ApiError::auth("invalid credentials");
         let msg = err.to_string();
         assert!(msg.contains("Authentication failed"));
         assert!(msg.contains("invalid credentials"));
@@ -193,7 +217,7 @@ mod tests {
 
     #[test]
     fn non_http_variants_have_no_error_source() {
-        assert!(ApiError::Auth("x".into()).source().is_none());
+        assert!(ApiError::auth("x").source().is_none());
         assert!(ApiError::NotFound("x".into()).source().is_none());
         assert!(ApiError::InvalidInput("x".into()).source().is_none());
         assert!(

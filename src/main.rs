@@ -902,9 +902,19 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         cfg.cloud_id.as_deref(),
         &cfg.token_kind,
     )?
-    .with_read_only(cfg.read_only);
+    .with_read_only(cfg.read_only)
+    .with_auth_remedy(cfg.auth_remedy());
 
-    match cli.command {
+    dispatch(cli.command, &client, &cfg, &out).await
+}
+
+async fn dispatch(
+    command: Command,
+    client: &JiraClient,
+    cfg: &Config,
+    out: &OutputConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
         Command::Issues(cmd) => match *cmd {
             IssuesCommand::List {
                 project,
@@ -940,8 +950,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     .map(commands::issues::parse_fields_arg)
                     .transpose()?;
                 commands::issues::list(
-                    &client,
-                    &out,
+                    client,
+                    out,
                     filters,
                     limit,
                     offset,
@@ -970,21 +980,20 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     .as_deref()
                     .map(commands::issues::parse_fields_arg)
                     .transpose()?;
-                commands::issues::mine(&client, &out, filters, limit, all, field_filter.as_deref())
+                commands::issues::mine(client, out, filters, limit, all, field_filter.as_deref())
                     .await?
             }
             IssuesCommand::Comments { key } => {
-                commands::issues::comments(&client, &out, &key).await?
+                commands::issues::comments(client, out, &key).await?
             }
             IssuesCommand::Show { key, open } => {
-                commands::issues::show(&client, &out, &key, open).await?
+                commands::issues::show(client, out, &key, open).await?
             }
             IssuesCommand::CreateMeta {
                 project,
                 issue_type,
             } => {
-                commands::issues::create_meta(&client, &out, &project, issue_type.as_deref())
-                    .await?
+                commands::issues::create_meta(client, out, &project, issue_type.as_deref()).await?
             }
             IssuesCommand::Create {
                 dry_run,
@@ -1007,7 +1016,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 let parsed_components = vec_to_opt_refs(&components);
                 let parsed_fix_versions = vec_to_opt_refs(&fix_versions);
                 let resolved_assignee =
-                    commands::issues::resolve_assignee_arg(&client, assignee.as_deref()).await?;
+                    commands::issues::resolve_assignee_arg(client, assignee.as_deref()).await?;
                 let assignee_ref = resolved_assignee.as_ref().map(|inner| inner.as_deref());
                 let draft = IssueDraft {
                     project_key: &project,
@@ -1023,8 +1032,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     epic: epic.as_deref(),
                 };
                 commands::issues::create(
-                    &client,
-                    &out,
+                    client,
+                    out,
                     &draft,
                     sprint.as_deref(),
                     board,
@@ -1053,7 +1062,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 let parsed_labels = parse_vec_update_arg(&labels);
 
                 let resolved_assignee =
-                    commands::issues::resolve_assignee_arg(&client, assignee.as_deref()).await?;
+                    commands::issues::resolve_assignee_arg(client, assignee.as_deref()).await?;
                 let assignee_ref: Option<Option<&str>> =
                     resolved_assignee.as_ref().map(|inner| inner.as_deref());
 
@@ -1069,7 +1078,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     labels: parsed_labels.as_deref(),
                     assignee: assignee_ref,
                 };
-                commands::issues::update(&client, &out, &key, &update, &field, dry_run).await?
+                commands::issues::update(client, out, &key, &update, &field, dry_run).await?
             }
             IssuesCommand::Move {
                 key,
@@ -1077,27 +1086,26 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 board,
                 dry_run,
             } => {
-                commands::issues::move_to_sprint(&client, &out, &key, &sprint, board, dry_run)
-                    .await?
+                commands::issues::move_to_sprint(client, out, &key, &sprint, board, dry_run).await?
             }
             IssuesCommand::Comment { key, body } => {
-                commands::issues::comment(&client, &out, &key, &body).await?
+                commands::issues::comment(client, out, &key, &body).await?
             }
             IssuesCommand::Transition { key, to } => {
-                commands::issues::transition(&client, &out, &key, &to).await?
+                commands::issues::transition(client, out, &key, &to).await?
             }
             IssuesCommand::ListTransitions { key } => {
-                commands::issues::list_transitions(&client, &out, &key).await?
+                commands::issues::list_transitions(client, out, &key).await?
             }
             IssuesCommand::Assign { key, assignee } => {
-                commands::issues::assign(&client, &out, &key, &assignee).await?
+                commands::issues::assign(client, out, &key, &assignee).await?
             }
-            IssuesCommand::LinkTypes => commands::issues::link_types(&client, &out).await?,
+            IssuesCommand::LinkTypes => commands::issues::link_types(client, out).await?,
             IssuesCommand::Link { key, to, link_type } => {
-                commands::issues::link(&client, &out, &key, &to, &link_type).await?
+                commands::issues::link(client, out, &key, &to, &link_type).await?
             }
             IssuesCommand::Unlink { link_id } => {
-                commands::issues::unlink(&client, &out, &link_id).await?
+                commands::issues::unlink(client, out, &link_id).await?
             }
             IssuesCommand::LogWork {
                 key,
@@ -1106,8 +1114,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 started,
             } => {
                 commands::issues::log_work(
-                    &client,
-                    &out,
+                    client,
+                    out,
                     &key,
                     &time,
                     comment.as_deref(),
@@ -1116,16 +1124,16 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 .await?
             }
             IssuesCommand::Attachments { key } => {
-                commands::issues::attachments(&client, &out, &key).await?
+                commands::issues::attachments(client, out, &key).await?
             }
             IssuesCommand::Attach { key, file } => {
-                commands::issues::attach(&client, &out, &key, &file).await?
+                commands::issues::attach(client, out, &key, &file).await?
             }
             IssuesCommand::DownloadAttachment { id, dir, force } => {
-                commands::issues::download_attachment(&client, &out, &id, &dir, force).await?
+                commands::issues::download_attachment(client, out, &id, &dir, force).await?
             }
             IssuesCommand::DeleteAttachment { id } => {
-                commands::issues::delete_attachment(&client, &out, &id).await?
+                commands::issues::delete_attachment(client, out, &id).await?
             }
             IssuesCommand::BulkTransition {
                 jql,
@@ -1139,7 +1147,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     )
                     .into());
                 }
-                commands::issues::bulk_transition(&client, &out, &jql, &to, dry_run).await?
+                commands::issues::bulk_transition(client, out, &jql, &to, dry_run).await?
             }
             IssuesCommand::BulkAssign {
                 jql,
@@ -1153,37 +1161,35 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     )
                     .into());
                 }
-                commands::issues::bulk_assign(&client, &out, &jql, &assignee, dry_run).await?
+                commands::issues::bulk_assign(client, out, &jql, &assignee, dry_run).await?
             }
             IssuesCommand::External(args) => {
                 let key = args
                     .first()
                     .ok_or_else(|| ApiError::InvalidInput("missing issue key".into()))?;
                 let open = args.iter().any(|a| a == "--open");
-                commands::issues::show(&client, &out, key, open).await?
+                commands::issues::show(client, out, key, open).await?
             }
         },
 
         Command::Projects(cmd) => match cmd {
-            ProjectsCommand::List => commands::projects::list(&client, &out).await?,
-            ProjectsCommand::Show { key } => commands::projects::show(&client, &out, &key).await?,
+            ProjectsCommand::List => commands::projects::list(client, out).await?,
+            ProjectsCommand::Show { key } => commands::projects::show(client, out, &key).await?,
             ProjectsCommand::Components { key } => {
-                commands::projects::components(&client, &out, &key).await?
+                commands::projects::components(client, out, &key).await?
             }
             ProjectsCommand::Versions { key } => {
-                commands::projects::versions(&client, &out, &key).await?
+                commands::projects::versions(client, out, &key).await?
             }
         },
 
         Command::Users(cmd) => match cmd {
-            UsersCommand::Search { query } => {
-                commands::users::search(&client, &out, &query).await?
-            }
+            UsersCommand::Search { query } => commands::users::search(client, out, &query).await?,
         },
 
         Command::Boards(cmd) => match cmd {
             BoardsCommand::List { project } => {
-                commands::boards::list(&client, &out, project.as_deref()).await?
+                commands::boards::list(client, out, project.as_deref()).await?
             }
         },
 
@@ -1200,8 +1206,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     Some(joined.as_str())
                 };
                 commands::sprints::list(
-                    &client,
-                    &out,
+                    client,
+                    out,
                     board.as_deref(),
                     state_filter,
                     project.as_deref(),
@@ -1222,8 +1228,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 .map(commands::issues::parse_fields_arg)
                 .transpose()?;
             commands::search::run(
-                &client,
-                &out,
+                client,
+                out,
                 &jql,
                 limit,
                 offset,
@@ -1233,12 +1239,12 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
             .await?
         }
 
-        Command::Myself => commands::myself::show(&client, &out).await?,
+        Command::Myself => commands::myself::show(client, out).await?,
 
-        Command::Doctor { offline } => commands::doctor::run(&client, &cfg, &out, offline).await?,
+        Command::Doctor { offline } => commands::doctor::run(client, cfg, out, offline).await?,
 
         Command::Fields(cmd) => match cmd {
-            FieldsCommand::List { custom } => commands::fields::list(&client, &out, custom).await?,
+            FieldsCommand::List { custom } => commands::fields::list(client, out, custom).await?,
         },
 
         // Already handled above

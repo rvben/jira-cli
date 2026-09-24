@@ -190,7 +190,7 @@ pub static AUTH: ErrorContract = ErrorContract {
     kind: "auth",
     exit_code: exit_codes::AUTH_ERROR,
     retryable: false,
-    description: "Authentication failed - bad or missing credentials",
+    description: "Jira rejected the credentials (HTTP 401) or refused the request for this account (HTTP 403)",
 };
 pub static NOT_FOUND: ErrorContract = ErrorContract {
     kind: "not_found",
@@ -270,7 +270,7 @@ pub static ALL_ERRORS: &[&ErrorContract] = &[
 pub fn contract_for(err: &crate::api::ApiError) -> &'static ErrorContract {
     use crate::api::ApiError;
     match err {
-        ApiError::Auth(_) => &AUTH,
+        ApiError::Auth { .. } | ApiError::Forbidden(_) => &AUTH,
         ApiError::NotFound(_) => &NOT_FOUND,
         ApiError::InvalidInput(_) => &INVALID_INPUT,
         ApiError::ConfirmationRequired(_) => &CONFIRMATION_REQUIRED,
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn exit_code_for_auth_error() {
-        let err = ApiError::Auth("bad token".into());
+        let err = ApiError::auth("bad token");
         assert_eq!(exit_code_for_error(&err), exit_codes::AUTH_ERROR);
     }
 
@@ -495,7 +495,8 @@ mod tests {
 
     fn witnesses() -> Vec<ApiError> {
         vec![
-            ApiError::Auth("x".into()),
+            ApiError::auth("x"),
+            ApiError::Forbidden("x".into()),
             ApiError::NotFound("x".into()),
             ApiError::InvalidInput("x".into()),
             ApiError::ConfirmationRequired("x".into()),

@@ -619,7 +619,8 @@ async fn metadata_auth_rate_limit_and_server_errors_are_never_ignored() {
             .unwrap_err();
         assert!(matches!(
             (status, err),
-            (401 | 403, ApiError::Auth(_))
+            (401, ApiError::Auth { .. })
+                | (403, ApiError::Forbidden(_))
                 | (429, ApiError::RateLimit)
                 | (500, ApiError::Api { status: 500, .. })
         ));

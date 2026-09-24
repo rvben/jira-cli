@@ -3233,3 +3233,252 @@ mod fields;
 
 #[path = "cli/hierarchy.rs"]
 mod hierarchy;
+
+/// A 401 on a stored credential names the profile and the exact command that
+/// replaces its token, because that is the one fix that works.
+#[tokio::test]
+async fn rejected_stored_token_names_the_profile_and_the_login_command() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[profiles.work]\nhost = \"{}\"\nauth_type = \"pat\"\napi_version = 2\ntoken = \"stale\"\ncredential_store = \"file\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["--profile", "work", "myself", "--output", "text"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The token stored for profile `work` was rejected"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Run `jira auth login --profile work`"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("JIRA_TOKEN"), "{stderr}");
+}
+
+/// A profile name can hold a space, and the suggested command still has to
+/// reach the shell as one `--profile` argument.
+#[cfg(unix)]
+#[tokio::test]
+async fn suggested_login_command_quotes_a_profile_name_with_a_space() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &format!(
+            "[profiles.\"work team\"]\nhost = \"{}\"\nauth_type = \"pat\"\napi_version = 2\ntoken = \"stale\"\ncredential_store = \"file\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let output = jira_cmd(&dir)
+        .args(["--profile", "work team", "myself", "--output", "text"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let command = stderr
+        .split("Run `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("no suggested command in: {stderr}"));
+
+    let words = std::process::Command::new("sh")
+        .args(["-c", &format!("printf '%s\\n' {command}")])
+        .output()
+        .unwrap();
+    let words = String::from_utf8(words.stdout).unwrap();
+    assert_eq!(
+        words.lines().collect::<Vec<_>>(),
+        ["jira", "auth", "login", "--profile", "work team"],
+        "{command}"
+    );
+}
+
+/// A token from the environment wins over any stored one, so rerunning setup
+/// would not help: the advice is to replace the variable.
+#[tokio::test]
+async fn rejected_environment_token_points_at_jira_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["myself", "--json"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "auth");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("The token in JIRA_TOKEN was rejected"),
+        "{message}"
+    );
+    assert!(message.contains("other than test@example.com"), "{message}");
+    assert!(!message.contains("auth login"), "{message}");
+}
+
+/// `doctor` reports the same remedy in its failed authentication check.
+#[tokio::test]
+async fn doctor_reports_the_remedy_for_a_rejected_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["doctor", "--json"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let detail = result["checks"][1]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("The token in JIRA_TOKEN was rejected"),
+        "{detail}"
+    );
+}
+
+/// A 403 means Jira accepted the credentials, so the error must not send the
+/// user off to replace a token that works.
+#[tokio::test]
+async fn forbidden_request_does_not_blame_the_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "errorMessages": ["You do not have permission"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["myself", "--output", "text"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Permission denied: You do not have permission"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("was rejected"), "{stderr}");
+    assert!(!stderr.contains("JIRA_TOKEN"), "{stderr}");
+}
+
+/// `auth status` verifies the credential against Jira, so a rejection there
+/// carries the same remedy as any other command.
+#[tokio::test]
+async fn auth_status_reports_the_remedy_for_a_rejected_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["auth", "status", "--output", "text"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("The token in JIRA_TOKEN was rejected"),
+        "{stderr}"
+    );
+}
+
+/// A bulk run records each item's error in its stdout summary, so a 401 there
+/// carries the same remedy as a top-level failure.
+#[tokio::test]
+async fn bulk_item_rejected_by_401_carries_the_remedy() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/search/jql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_page(full_issue())))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1/assignee"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "bulk-assign",
+            "--jql",
+            "project = PROJ",
+            "--assignee",
+            "abc123",
+            "--yes",
+            "--json",
+        ],
+    );
+
+    assert!(!output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = json["issues"][0]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{json}"));
+    assert!(
+        error.contains("The token in JIRA_TOKEN was rejected"),
+        "{error}"
+    );
+}
+/// `doctor` checks projects after authentication; a 401 there is reported with
+/// the remedy too.
+#[tokio::test]
+async fn doctor_project_check_rejected_by_401_carries_the_remedy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/myself"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accountId": "abc", "displayName": "Test User"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/project/search"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let output = run_jira_against(&server, &["doctor", "--json"]);
+
+    assert_eq!(output.status.code(), Some(exit_codes::AUTH_ERROR));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["checks"][2]["name"], "projects");
+    let detail = result["checks"][2]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("The token in JIRA_TOKEN was rejected"),
+        "{detail}"
+    );
+}

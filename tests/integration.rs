@@ -1049,7 +1049,7 @@ async fn api_401_maps_to_auth_error() {
 
     let client = test_client(&server);
     let err = client.list_projects().await.unwrap_err();
-    assert!(matches!(err, ApiError::Auth(_)));
+    assert!(matches!(err, ApiError::Auth { .. }));
 }
 
 #[tokio::test]
@@ -3166,7 +3166,10 @@ async fn log_work_400_maps_to_api_error() {
         .unwrap_err();
     // 400 maps to ApiError (not NotFound or Auth)
     assert!(
-        !matches!(err, ApiError::NotFound(_) | ApiError::Auth(_)),
+        !matches!(
+            err,
+            ApiError::NotFound(_) | ApiError::Auth { .. } | ApiError::Forbidden(_)
+        ),
         "400 should not map to NotFound or Auth"
     );
 }
@@ -3900,7 +3903,7 @@ async fn get_issue_401_returns_auth_error() {
     let client = test_client(&server);
     let err = client.get_issue("PROJ-1").await.unwrap_err();
     assert!(
-        matches!(err, ApiError::Auth(_)),
+        matches!(err, ApiError::Auth { .. }),
         "401 must map to ApiError::Auth, got: {err}"
     );
     let msg = err.to_string();
@@ -3912,7 +3915,7 @@ async fn get_issue_401_returns_auth_error() {
 }
 
 #[tokio::test]
-async fn get_issue_403_returns_auth_error() {
+async fn get_issue_403_returns_forbidden_error_without_token_advice() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -3926,9 +3929,14 @@ async fn get_issue_403_returns_auth_error() {
     let client = test_client(&server);
     let err = client.get_issue("PROJ-2").await.unwrap_err();
     assert!(
-        matches!(err, ApiError::Auth(_)),
-        "403 must map to ApiError::Auth"
+        matches!(err, ApiError::Forbidden(_)),
+        "403 must map to ApiError::Forbidden, got: {err}"
     );
+    let msg = err.to_string();
+    assert!(msg.contains("Permission denied: Forbidden"), "{msg}");
+    // Jira accepted the credentials, so replacing the token fixes nothing.
+    assert!(!msg.contains("JIRA_TOKEN"), "{msg}");
+    assert!(!msg.contains("auth login"), "{msg}");
 }
 
 #[tokio::test]
@@ -4018,11 +4026,12 @@ async fn create_issue_422_returns_api_error_with_status() {
 #[tokio::test]
 async fn auth_error_message_includes_actionable_guidance() {
     // Verify the complete auth error message format without a real HTTP call
-    let err = ApiError::Auth("401 Unauthorized".into());
+    let err = ApiError::auth("401 Unauthorized");
     let msg = err.to_string();
     assert!(msg.contains("Authentication failed"));
     assert!(msg.contains("JIRA_TOKEN"));
-    assert!(msg.contains("config show") || msg.contains("config init"));
+    assert!(msg.contains("expired or been revoked"), "{msg}");
+    assert!(msg.contains("jira auth login"), "{msg}");
 }
 
 // ── commands::projects - text output paths ───────────────────────────────────
