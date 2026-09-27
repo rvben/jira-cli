@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.17](https://github.com/rvben/jira-cli/compare/v0.4.16...v0.4.17) - 2026-09-27
+
+### Fixed
+
+- **deps**: update rustls to 0.23.45 for RUSTSEC-2026-0285 ([8928ff0](https://github.com/rvben/jira-cli/commit/8928ff0831cd1c4d2d523231aebaa0b127eeee1c))
+
 ## [0.4.16](https://github.com/rvben/jira-cli/compare/v0.4.15...v0.4.16) - 2026-09-24
 
 ### Fixed
