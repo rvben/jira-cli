@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.18](https://github.com/rvben/jira-cli/compare/v0.4.17...v0.4.18) - 2026-09-29
+
+### Added
+
+- **tui**: add interactive Jira workbench ([d912b60](https://github.com/rvben/jira-cli/commit/d912b607d171f203ba5e637348687d4a32a0899a))
+
 ## [0.4.17](https://github.com/rvben/jira-cli/compare/v0.4.16...v0.4.17) - 2026-09-27
 
 ### Fixed
