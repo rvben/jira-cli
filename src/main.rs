@@ -97,6 +97,13 @@ enum Command {
     /// Print the CLI version
     Version,
 
+    /// Explore your work in an interactive terminal
+    Tui {
+        /// Start with issues from this project
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+
     /// Manage issues
     #[command(subcommand, visible_alias = "issue")]
     Issues(Box<IssuesCommand>),
@@ -873,7 +880,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 "version": env!("CARGO_PKG_VERSION"),
                 "clispec": "0.3",
                 "output": ["text", "json"],
-                "features": ["doctor", "command-scoped schema", "pagination", "field selection", "read-only guard", "create metadata", "write previews", "project sprint discovery", "bulk outcome reporting"]
+                "features": ["doctor", "command-scoped schema", "pagination", "field selection", "read-only guard", "create metadata", "write previews", "project sprint discovery", "bulk outcome reporting", "interactive TUI"]
             });
             if out.json {
                 println!("{}", serde_json::to_string_pretty(&capabilities)?);
@@ -1038,6 +1045,11 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
     )?
     .with_read_only(cfg.read_only)
     .with_auth_remedy(cfg.auth_remedy());
+
+    if let Command::Tui { project } = &cli.command {
+        jira_cli::tui::run(client, &cfg, project.as_deref(), !cli.no_color).await?;
+        return Ok(());
+    }
 
     dispatch(cli.command, &client, &cfg, &out).await
 }
@@ -1394,6 +1406,7 @@ async fn dispatch(
 
         // Already handled above
         Command::Version
+        | Command::Tui { .. }
         | Command::Schema { .. }
         | Command::Capabilities
         | Command::Completions { .. }
@@ -1558,6 +1571,7 @@ fn schema_json() -> serde_json::Value {
         ("projects components", false),
         ("projects versions", false),
         ("search", false),
+        ("tui", true),
         ("users search", false),
         ("boards list", false),
         ("sprints list", false),
@@ -2233,7 +2247,8 @@ fn enrich_v0_3(schema: &mut serde_json::Value) {
         let mutating = object["mutating"].as_bool().unwrap_or(false);
         let non_idempotent = matches!(
             name.as_str(),
-            "issues create"
+            "tui"
+                | "issues create"
                 | "issues comment"
                 | "issues link"
                 | "issues log-work"
@@ -2255,6 +2270,12 @@ fn enrich_v0_3(schema: &mut serde_json::Value) {
         if name == "completions" {
             object.insert("output_kind".into(), serde_json::json!("opaque"));
             object.insert("media_type".into(), serde_json::json!("text/plain"));
+            object.remove("output_fields");
+            continue;
+        }
+        if name == "tui" {
+            object.insert("output_kind".into(), serde_json::json!("opaque"));
+            object.insert("media_type".into(), serde_json::json!("text/x-terminal"));
             object.remove("output_fields");
             continue;
         }

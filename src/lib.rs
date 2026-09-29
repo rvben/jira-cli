@@ -5,3 +5,4 @@ pub mod credentials;
 pub mod output;
 #[doc(hidden)]
 pub mod test_support;
+pub mod tui;

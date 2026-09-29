@@ -32,6 +32,7 @@ terminal_size = "0.4"
 tempfile = "3"
 keyring = "4.2"
 open = "5.4"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

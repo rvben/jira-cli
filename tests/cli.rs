@@ -3262,6 +3262,13 @@ const MUTATING_WITHOUT_WRITING_TO_JIRA: &[(&str, &str)] = &[
     ),
 ];
 
+/// Interactive commands that permit reads in read-only mode and guard each
+/// write action inside the TUI. The TUI unit test exercises this distinction.
+const MUTATING_WITH_ACTION_GUARD: &[(&str, &str)] = &[(
+    "tui",
+    "comment and transition keys are unavailable under a read-only profile",
+)];
+
 /// `jira schema` tells an agent which commands read-only mode blocks, so every
 /// name on that list is run against a real subprocess rather than believed.
 ///
@@ -3386,10 +3393,14 @@ fn every_mutating_command_is_either_guarded_or_excused() {
         .iter()
         .map(|(name, _)| *name)
         .collect();
+    let action_guarded: std::collections::BTreeSet<&str> = MUTATING_WITH_ACTION_GUARD
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
 
     let unaccounted: Vec<&str> = mutating
         .iter()
-        .filter(|c| !guarded.contains(*c) && !excused.contains(*c))
+        .filter(|c| !guarded.contains(*c) && !excused.contains(*c) && !action_guarded.contains(*c))
         .copied()
         .collect();
     assert!(
@@ -3399,8 +3410,11 @@ fn every_mutating_command_is_either_guarded_or_excused() {
          and the guard in main.rs, or a reason to MUTATING_WITHOUT_WRITING_TO_JIRA)"
     );
 
-    let stale: Vec<&str> = guarded
-        .union(&excused)
+    let accounted: std::collections::BTreeSet<&str> = guarded.union(&excused).copied().collect();
+    let accounted: std::collections::BTreeSet<&str> =
+        accounted.union(&action_guarded).copied().collect();
+    let stale: Vec<&str> = accounted
+        .iter()
         .filter(|c| !mutating.contains(*c))
         .copied()
         .collect();

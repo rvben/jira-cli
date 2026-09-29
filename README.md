@@ -170,6 +170,33 @@ dedicated PAT automatically, or open the manual token page:
 
 ## Usage
 
+### Interactive workbench
+
+Run `jira tui` to browse your assigned issues in a terminal. Use `jira tui
+--project MYAPP` to start within one project, or press `p` to change the
+project while browsing. The workbench shows a live issue list and an inspector
+with the description and recent comments. It works with Jira Cloud and Data
+Center profiles. The current sprint view uses Jira's active sprint search;
+without a project, it includes issues from all active sprints you can access.
+
+| Key | Action |
+|-----|--------|
+| `1`, `2`, `3`, `4` | My work, current sprint, recent issues, JQL search |
+| `j` / `k`, arrows | Select an issue |
+| `/` | Enter a JQL query |
+| `p` | Change the project for the preset views |
+| `f`, `Esc` | Filter loaded issues, clear the filter |
+| `n`, `r` | Load the next page, refresh |
+| `PageUp` / `PageDown` | Scroll the issue inspector |
+| `t`, `c` | Transition an issue, write a comment (write-enabled profiles) |
+| `o`, `?`, `q` | Open in browser, show help, quit |
+
+In the comment editor, Enter starts a new line and Ctrl+S opens the review
+screen. Esc keeps the draft for this session. If Jira does not confirm a write,
+refresh the issue before trying again. Write actions are unavailable when the
+active profile is read-only. `jira tui` requires a terminal; scripts can use
+`jira issues mine` or `jira search` instead.
+
 ### Issues
 
 ```sh
