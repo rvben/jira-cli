@@ -1,5 +1,13 @@
+use super::story_points::fill_story_points;
 use super::{ApiError, JiraClient, Sprint, validate_issue_key};
+use crate::api::types::{
+    AgileIssuePage, Board, BoardConfiguration, BoardEstimation, EstimationSource, Issue,
+    PointFields, SprintEstimation,
+};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The fields a sprint's issue listing needs besides the estimate.
+const SPRINT_ISSUE_FIELDS: [&str; 5] = ["summary", "status", "issuetype", "assignee", "priority"];
 
 impl JiraClient {
     /// Resolve a globally unique sprint ID, exact name, substring, or "active".
@@ -159,5 +167,98 @@ impl JiraClient {
             .filter(|p| !p.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| ApiError::Other("Jira did not return the issue's project; supply --board <ID> or a numeric --sprint <ID>".into()))
+    }
+
+    /// The field a board's sprints are estimated with.
+    ///
+    /// The board's configuration names the field Jira's own sprint views sum,
+    /// so it settles which field counts even on a site with several. Only when
+    /// the board reports no estimation statistic does the profile pin or
+    /// field discovery stand in.
+    pub async fn board_estimation(&self, board: &Board) -> Result<SprintEstimation, ApiError> {
+        let config: BoardConfiguration = self
+            .agile_get(&format!("board/{}/configuration", board.id))
+            .await?;
+        let Some(BoardEstimation { kind, field }) = config.estimation else {
+            let fields = self.story_point_fields().await?;
+            let source = if self.story_points_pinned() {
+                EstimationSource::Profile
+            } else {
+                EstimationSource::FieldCatalog
+            };
+            let points = if fields.is_empty() {
+                PointFields::Unavailable(format!(
+                    "Board {} {:?} reports no estimation statistic and the site has no story points field",
+                    board.id, board.name
+                ))
+            } else {
+                PointFields::Read(fields)
+            };
+            return Ok(SprintEstimation {
+                source,
+                field_name: None,
+                points,
+            });
+        };
+        let field_name = field.as_ref().and_then(|f| f.display_name.clone());
+        let points = match field {
+            // Time tracking and the other system fields a board can estimate
+            // with are not story points; only a custom field carries them.
+            Some(field) if kind == "field" && field.field_id.starts_with("customfield_") => {
+                PointFields::Read(vec![field.field_id])
+            }
+            Some(field) => PointFields::Unavailable(format!(
+                "Board {} {:?} estimates with {}, not story points",
+                board.id,
+                board.name,
+                field.display_name.as_deref().unwrap_or(&field.field_id)
+            )),
+            None if kind.eq_ignore_ascii_case("none") => PointFields::Unavailable(format!(
+                "Board {} {:?} estimates by issue count, not story points",
+                board.id, board.name
+            )),
+            None => PointFields::Unavailable(format!(
+                "Board {} {:?} estimates with {kind:?}, not a story points field",
+                board.id, board.name
+            )),
+        };
+        Ok(SprintEstimation {
+            source: EstimationSource::Board,
+            field_name,
+            points,
+        })
+    }
+
+    /// Every issue in a sprint as the board shows it: the board's filter
+    /// scopes the listing, as it does in Jira's sprint views. Story points
+    /// are read from `points_fields`.
+    pub async fn sprint_issues(
+        &self,
+        board_id: u64,
+        sprint_id: u64,
+        points_fields: &[String],
+    ) -> Result<Vec<Issue>, ApiError> {
+        let fields = SPRINT_ISSUE_FIELDS
+            .iter()
+            .map(|f| (*f).to_owned())
+            .chain(points_fields.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(",");
+        const PAGE: usize = 100;
+        let mut issues = Vec::new();
+        loop {
+            let path = format!(
+                "board/{board_id}/sprint/{sprint_id}/issue?startAt={}&maxResults={PAGE}&fields={fields}",
+                issues.len()
+            );
+            let page: AgileIssuePage = self.agile_get(&path).await?;
+            let received = page.issues.len();
+            issues.extend(page.issues);
+            if received == 0 || page.total.is_some_and(|total| issues.len() >= total) {
+                break;
+            }
+        }
+        fill_story_points(&mut issues, points_fields)?;
+        Ok(issues)
     }
 }

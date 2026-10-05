@@ -724,6 +724,20 @@ enum SprintsCommand {
         #[arg(long, default_value = "active", value_delimiter = ',', value_parser = ["active", "closed", "future", "all"])]
         state: Vec<String>,
     },
+    /// Show a sprint with its story point and issue totals, as its board counts them
+    Show {
+        /// Sprint ID, name substring, or "active"
+        sprint: String,
+
+        /// Board ID: scopes name lookup and counts the sprint as this board shows it
+        /// (defaults to the sprint's origin board)
+        #[arg(long)]
+        board: Option<u64>,
+
+        /// Project key or ID that scopes sprint name lookup
+        #[arg(short, long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1372,6 +1386,11 @@ async fn dispatch(
                 )
                 .await?
             }
+            SprintsCommand::Show {
+                sprint,
+                board,
+                project,
+            } => commands::sprints::show(client, out, &sprint, board, project.as_deref()).await?,
         },
 
         Command::Search {
@@ -1577,6 +1596,7 @@ fn schema_json() -> serde_json::Value {
         ("users search", false),
         ("boards list", false),
         ("sprints list", false),
+        ("sprints show", false),
         ("myself", false),
         ("doctor", false),
         ("auth login", true),
@@ -1982,6 +2002,46 @@ fn schema_json() -> serde_json::Value {
                 {"name": "startDate", "type": "string", "nullable": true},
                 {"name": "endDate", "type": "string", "nullable": true},
                 {"name": "completeDate", "type": "string", "nullable": true, "description": "Set once the sprint is closed"}
+            ]),
+        ),
+        (
+            "sprints show",
+            serde_json::json!([
+                {"name": "id", "type": "integer"},
+                {"name": "name", "type": "string"},
+                {"name": "state", "type": "string"},
+                {"name": "goal", "type": "string", "nullable": true, "description": "Null when the sprint has no goal"},
+                {"name": "startDate", "type": "string", "nullable": true},
+                {"name": "endDate", "type": "string", "nullable": true},
+                {"name": "completeDate", "type": "string", "nullable": true, "description": "Set once the sprint is closed"},
+                {"name": "board", "type": "object", "description": "The board the sprint is counted on: --board, else the sprint's origin board. Its filter scopes the issues", "fields": [
+                    {"name": "id", "type": "integer"}, {"name": "name", "type": "string"}
+                ]},
+                {"name": "estimation", "type": "object", "description": "Where story points are read from", "fields": [
+                    {"name": "source", "type": "string", "description": "board: the board's estimation field, the one Jira's sprint views sum. profile or fieldCatalog: the board reports no estimation statistic, so the profile's story_points_field or the discovered story points fields stand in"},
+                    {"name": "fieldIds", "type": "string[]", "description": "Fields story points are read from. Empty when the board estimates with something other than story points (time, issue count) or the site has no story points field"},
+                    {"name": "fieldName", "type": "string", "nullable": true, "description": "The board's estimation field name, when Jira reports one"}
+                ]},
+                {"name": "totals", "type": "object", "description": "Counts over the sprint's issues excluding subtasks, from each issue's current status and estimate; not the commitment at sprint start", "fields": [
+                    {"name": "issues", "type": "object", "fields": sprint_breakdown_fields("integer")},
+                    {"name": "points", "type": "object", "nullable": true, "fields": sprint_breakdown_fields("number"), "description": "Null when story points are unavailable (see warnings); unestimated issues count as 0"},
+                    {"name": "estimated", "type": "integer", "nullable": true, "description": "Issues with an estimate; null when story points are unavailable"},
+                    {"name": "unestimated", "type": "integer", "nullable": true, "description": "Issues without an estimate; null when story points are unavailable"},
+                    {"name": "subtasksExcluded", "type": "integer", "description": "Subtasks listed in issues but left out of every total, as Jira's sprint views do"}
+                ]},
+                {"name": "issues", "type": "object[]", "description": "Every issue in the sprint on this board, subtasks included", "fields": [
+                    {"name": "key", "type": "string"},
+                    {"name": "url", "type": "string"},
+                    {"name": "summary", "type": "string"},
+                    {"name": "status", "type": "string"},
+                    {"name": "statusCategory", "type": "string", "nullable": true, "description": "new (to do), indeterminate (in progress) or done; null when Jira returns none"},
+                    {"name": "type", "type": "string"},
+                    {"name": "subtask", "type": "boolean", "nullable": true, "description": "Null when Jira does not say; such an issue is counted"},
+                    {"name": "assignee", "type": "object", "nullable": true, "fields": user_fields},
+                    {"name": "priority", "type": "string", "nullable": true},
+                    {"name": "storyPoints", "type": "number", "nullable": true, "optional": true, "description": "Null when unestimated. Absent when story points are unavailable"}
+                ]},
+                {"name": "warnings", "type": "string[]"}
             ]),
         ),
         (
@@ -2566,6 +2626,17 @@ fn walk_commands(
             })
             .collect()
     }
+}
+
+/// A `sprints show` total split by status category, in `kind` units.
+fn sprint_breakdown_fields(kind: &str) -> serde_json::Value {
+    serde_json::json!([
+        {"name": "total", "type": kind},
+        {"name": "toDo", "type": kind, "description": "Status category new"},
+        {"name": "inProgress", "type": kind, "description": "Status category indeterminate"},
+        {"name": "done", "type": kind, "description": "Status category done"},
+        {"name": "uncategorized", "type": kind, "description": "Statuses Jira returned without a known category"}
+    ])
 }
 
 fn write_preview_fields() -> serde_json::Value {

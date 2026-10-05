@@ -120,8 +120,12 @@ pub struct ParentIssueFields {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct StatusField {
     pub name: String,
+    /// The workflow category the status belongs to: to do, in progress or done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_category: Option<StatusCategory>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -146,6 +150,17 @@ pub struct IssueTypeField {
     /// Cloud only; `1` is the epic level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hierarchy_level: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtask: Option<bool>,
+}
+
+impl IssueTypeField {
+    /// Whether the type is a subtask type. Jira states it in `subtask`; the
+    /// Cloud hierarchy level, where subtasks sit below zero, is the fallback.
+    pub fn is_subtask(&self) -> Option<bool> {
+        self.subtask
+            .or_else(|| self.hierarchy_level.map(|level| level < 0))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -306,6 +321,85 @@ pub struct Sprint {
     pub end_date: Option<String>,
     pub complete_date: Option<String>,
     pub origin_board_id: Option<u64>,
+    #[serde(default)]
+    pub goal: Option<String>,
+}
+
+/// The parts of a board's configuration this client reads.
+#[derive(Debug, Deserialize)]
+pub struct BoardConfiguration {
+    /// The statistic the board estimates with. Absent when Jira does not
+    /// report one for the board.
+    #[serde(default)]
+    pub estimation: Option<BoardEstimation>,
+}
+
+/// A board's estimation statistic: `field` with the field it sums, or another
+/// type (Jira reports issue-count estimation as `none`).
+#[derive(Debug, Deserialize)]
+pub struct BoardEstimation {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub field: Option<EstimationField>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimationField {
+    pub field_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Where a sprint's story points are read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstimationSource {
+    /// The board's own estimation field, the one Jira's sprint views sum.
+    Board,
+    /// The profile's pinned story points field.
+    Profile,
+    /// The story points fields discovered in the site's field catalog.
+    FieldCatalog,
+}
+
+impl EstimationSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Board => "board",
+            Self::Profile => "profile",
+            Self::FieldCatalog => "fieldCatalog",
+        }
+    }
+}
+
+/// How a board's sprints are estimated, as far as story point totals go.
+#[derive(Debug, Clone)]
+pub struct SprintEstimation {
+    pub source: EstimationSource,
+    /// The estimation field's display name, when Jira reports one.
+    pub field_name: Option<String>,
+    pub points: PointFields,
+}
+
+/// The fields a sprint's story points are read from.
+#[derive(Debug, Clone)]
+pub enum PointFields {
+    /// One or more fields; several agree when every one that holds a value
+    /// holds the same value.
+    Read(Vec<String>),
+    /// The board estimates with something other than story points, or the
+    /// site has no story points field. Carries the reason.
+    Unavailable(String),
+}
+
+/// One page of the Agile API's issue listing for a sprint on a board.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgileIssuePage {
+    pub issues: Vec<Issue>,
+    #[serde(default)]
+    pub total: Option<usize>,
 }
 
 /// Paginated sprint response from the Agile API.

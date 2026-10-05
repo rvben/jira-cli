@@ -2919,6 +2919,7 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "profile use",
     "search",
     "sprints list",
+    "sprints show",
     "users search",
 ];
 
@@ -3638,6 +3639,9 @@ mod hierarchy;
 
 #[path = "cli/story_points.rs"]
 mod story_points;
+
+#[path = "cli/sprint_totals.rs"]
+mod sprint_totals;
 
 /// A 401 on a stored credential names the profile and the exact command that
 /// replaces its token, because that is the one fix that works.

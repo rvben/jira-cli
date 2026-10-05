@@ -59,7 +59,7 @@ A scoped Cloud token needs these scopes:
 |--------|--------|
 | Read-only | `read:jira-work`, `read:jira-user` |
 | Read-write | the read-only scopes plus `write:jira-work` |
-| Boards and sprints, added | `read:board-scope:jira-software`, `read:project:jira`, `read:issue-details:jira`, `read:sprint:jira-software`, plus `write:sprint:jira-software` to move issues into sprints |
+| Boards and sprints, added | `read:board-scope:jira-software`, `read:board-scope.admin:jira-software`, `read:project:jira`, `read:issue-details:jira`, `read:jql:jira`, `read:sprint:jira-software`, plus `write:sprint:jira-software` to move issues into sprints |
 
 Jira's board and sprint API accepts only the granular scopes in the last row, so
 a token with just the classic scopes works for every command except `boards` and
@@ -455,6 +455,33 @@ messages in the top-level `warnings` array. Other errors still fail the command.
 origin board when matched, otherwise the lowest matched ID. Results and board
 context are ordered by ID. Repeat `--state` or comma-separate its values;
 `all` disables the state filter.
+
+```sh
+jira sprints show active --project MYAPP    # the running sprint with its totals
+jira sprints show 87                         # by sprint ID
+jira sprints show "Sprint 12" --board 42     # counted as board 42 shows it
+```
+
+`sprints show` reports a sprint with its story point and issue totals, split
+into to do, in progress and done by each status's category, counted the way
+the board's sprint views count them:
+
+- The board is `--board`, else the sprint's origin board. Its filter scopes
+  which issues belong to the sprint.
+- Story points come from the board's own estimation field (from its
+  configuration), so the totals match the board even when the site has several
+  points fields or the profile pins a different one. Only when the board
+  reports no estimation statistic does `story_points_field` or field discovery
+  stand in, and a warning says so (`estimation.source`).
+- A board that estimates with time or issue count has no story points: the
+  point totals are `null` and a warning says why. They are never reported as 0.
+- Subtasks are listed but left out of every total; `totals.subtasksExcluded`
+  counts them. Unestimated issues count toward the issue totals and
+  `totals.unestimated`.
+
+Totals reflect each issue's current status and estimate. They are not the
+commitment at sprint start or the points completed during the sprint, which
+Jira's sprint report derives from issue history.
 
 ### Users and fields
 

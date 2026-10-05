@@ -1181,7 +1181,7 @@ fn write_issue_link<W: std::io::Write>(out: &mut W, link: &IssueLink) -> std::io
 /// placeholder for a column but a lie in JSON: it makes "nobody is assigned"
 /// indistinguishable from a user whose display name is literally `-`. JSON
 /// carries the absence itself.
-fn user_to_json(user: Option<&UserField>) -> serde_json::Value {
+pub(crate) fn user_to_json(user: Option<&UserField>) -> serde_json::Value {
     match user {
         Some(u) => serde_json::json!({
             "displayName": u.display_name,
@@ -1211,7 +1211,7 @@ pub(crate) const ISSUE_SUMMARY_KEYS: [&str; 13] = [
 /// Add `storyPoints` when the read looked them up and the site has a field to
 /// read them from. Absent otherwise: `null` would claim the issue is
 /// unestimated when nothing was known either way.
-fn insert_story_points(json: &mut serde_json::Value, issue: &Issue) {
+pub(crate) fn insert_story_points(json: &mut serde_json::Value, issue: &Issue) {
     if let (Some(points), Some(obj)) = (&issue.story_points, json.as_object_mut()) {
         obj.insert("storyPoints".into(), serde_json::json!(points));
     }
@@ -1587,6 +1587,7 @@ mod tests {
                 summary: "Test".into(),
                 status: StatusField {
                     name: "Open".into(),
+                    status_category: None,
                 },
                 assignee: None,
                 reporter: None,
@@ -1594,6 +1595,7 @@ mod tests {
                 issuetype: IssueTypeField {
                     name: "Bug".into(),
                     hierarchy_level: None,
+                    subtask: None,
                 },
                 description: None,
                 labels: None,

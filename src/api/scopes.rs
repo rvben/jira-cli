@@ -14,11 +14,15 @@ pub const READ: &[&str] = &["read:jira-work", "read:jira-user"];
 /// transitions, assignments and attachments.
 pub const WRITE: &[&str] = &["write:jira-work"];
 
-/// Board and sprint reads (`jira boards`, `jira sprints`).
+/// Board and sprint reads (`jira boards`, `jira sprints`). `sprints show`
+/// reads the board's configuration, which asks for the board admin read scope,
+/// and lists the sprint's issues, which asks for the JQL scope.
 pub const AGILE_READ: &[&str] = &[
     "read:board-scope:jira-software",
+    "read:board-scope.admin:jira-software",
     "read:project:jira",
     "read:issue-details:jira",
+    "read:jql:jira",
     "read:sprint:jira-software",
 ];
 
@@ -79,6 +83,13 @@ mod tests {
         );
         assert!(agile(false).contains(&"write:sprint:jira-software"));
         assert!(agile(false).contains(&"read:sprint:jira-software"));
+    }
+
+    #[test]
+    fn sprint_totals_reads_are_covered() {
+        let agile = agile(true);
+        assert!(agile.contains(&"read:board-scope.admin:jira-software"));
+        assert!(agile.contains(&"read:jql:jira"));
     }
 
     #[test]
