@@ -15,21 +15,13 @@ impl JiraClient {
         self.epic_lookup.store(true, Ordering::Relaxed);
     }
 
-    /// The fields to request for an issue read, plus the Data Center Epic Link
-    /// fields when the instance has any.
-    pub(super) async fn issue_fields(&self, base: &[&str]) -> Result<Vec<String>, ApiError> {
-        let mut fields: Vec<String> = base.iter().map(|f| (*f).to_owned()).collect();
-        fields.extend(self.epic_link_fields().await?.iter().cloned());
-        Ok(fields)
-    }
-
     /// Resolve the Data Center Epic Link fields once per client.
     ///
     /// Cloud expresses epic membership through `parent`, so no lookup happens
     /// there. Only the Jira Software schema identifies the field: a custom
     /// field that merely carries the name "Epic Link" is not epic membership.
     /// An instance without Jira Software has no such field, and so no epics.
-    async fn epic_link_fields(&self) -> Result<&[String], ApiError> {
+    pub(super) async fn epic_link_fields(&self) -> Result<&[String], ApiError> {
         if self.api_version >= 3 || !self.epic_lookup.load(Ordering::Relaxed) {
             return Ok(&[]);
         }
@@ -37,15 +29,15 @@ impl JiraClient {
             .epic_link_fields
             .get_or_try_init(|| async {
                 Ok::<_, ApiError>(
-                    self.list_fields()
+                    self.field_catalog()
                         .await?
-                        .into_iter()
+                        .iter()
                         .filter(|f| {
                             f.schema
                                 .as_ref()
                                 .is_some_and(|s| s.custom.as_deref() == Some(EPIC_LINK_SCHEMA))
                         })
-                        .map(|f| f.id)
+                        .map(|f| f.id.clone())
                         .collect(),
                 )
             })
@@ -53,8 +45,13 @@ impl JiraClient {
         Ok(fields)
     }
 
-    /// Set `Issue::epic` on each fetched issue.
-    pub(super) async fn fill_epics(&self, issues: &mut [Issue]) -> Result<(), ApiError> {
+    /// Set `Issue::epic` on each fetched issue, reading the Data Center Epic
+    /// Link from `fields`.
+    pub(super) fn fill_epics(
+        &self,
+        issues: &mut [Issue],
+        fields: &[String],
+    ) -> Result<(), ApiError> {
         if !self.epic_lookup.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -64,7 +61,6 @@ impl JiraClient {
             }
             return Ok(());
         }
-        let fields = self.epic_link_fields().await?;
         for issue in issues {
             issue.epic = data_center_epic(issue, fields)?;
         }

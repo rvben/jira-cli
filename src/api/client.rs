@@ -9,9 +9,11 @@ use super::ApiError;
 use super::AuthType;
 use super::types::*;
 
+mod derived;
 mod hierarchy;
 mod metadata;
 mod sprints;
+mod story_points;
 
 fn parse_issue_sprints(
     extra: &serde_json::Map<String, serde_json::Value>,
@@ -95,6 +97,15 @@ pub struct JiraClient {
     epic_lookup: std::sync::atomic::AtomicBool,
     /// Data Center Epic Link field IDs, resolved at most once per client.
     epic_link_fields: tokio::sync::OnceCell<Vec<String>>,
+    /// The site's field catalog; see `field_catalog`.
+    field_catalog: tokio::sync::OnceCell<Vec<Field>>,
+    /// Whether issue reads fill in `Issue::story_points`; see
+    /// `enable_story_points_lookup`.
+    story_points_lookup: std::sync::atomic::AtomicBool,
+    /// The profile's pinned story points field; see `with_story_points_field`.
+    story_points_field: Option<String>,
+    /// Discovered story points field IDs, resolved at most once per client.
+    story_point_field_ids: tokio::sync::OnceCell<Vec<String>>,
 }
 
 const SEARCH_FIELDS: [&str; 8] = [
@@ -229,6 +240,10 @@ impl JiraClient {
             auth_remedy: None,
             epic_lookup: std::sync::atomic::AtomicBool::new(false),
             epic_link_fields: tokio::sync::OnceCell::new(),
+            field_catalog: tokio::sync::OnceCell::new(),
+            story_points_lookup: std::sync::atomic::AtomicBool::new(false),
+            story_points_field: None,
+            story_point_field_ids: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -399,7 +414,8 @@ impl JiraClient {
         max_results: usize,
         start_at: usize,
     ) -> Result<SearchResponse, ApiError> {
-        let field_list = self.issue_fields(&SEARCH_FIELDS).await?;
+        let derived = self.derived_fields(true).await?;
+        let field_list = derived.request(&SEARCH_FIELDS);
         let fields = field_list.join(",");
         let encoded_jql = percent_encode(jql);
         // Every counter is optional because a response that omits one must stay
@@ -432,7 +448,7 @@ impl JiraClient {
             )
             .await?
         };
-        self.fill_epics(&mut raw.issues).await?;
+        self.fill_derived(&mut raw.issues, &derived)?;
         // An absent offset or page size is reported as what was asked for, which
         // is true of the request even when the server does not echo it back.
         let echoed_start_at = raw.start_at.unwrap_or(start_at);
@@ -459,13 +475,14 @@ impl JiraClient {
     async fn search_jql_page(
         &self,
         jql: &str,
+        fields: &[String],
         page_size: usize,
         next_token: Option<&str>,
     ) -> Result<SearchJqlPage, ApiError> {
         let mut body = serde_json::json!({
             "jql": jql,
             "maxResults": page_size,
-            "fields": SEARCH_FIELDS,
+            "fields": fields,
         });
         if let Some(t) = next_token {
             body["nextPageToken"] = serde_json::Value::String(t.to_string());
@@ -540,13 +557,15 @@ impl JiraClient {
 
         // Collect up to `max_results` issues, paging internally to honour
         // the server's per-page cap when fields are requested.
+        let derived = self.derived_fields(true).await?;
+        let fields = derived.request(&SEARCH_FIELDS);
         let mut collected: Vec<Issue> = Vec::new();
         let mut is_last = false;
         while collected.len() < max_results {
             let remaining = max_results - collected.len();
             let want = remaining.min(SEARCH_JQL_MAX_PAGE);
             let page = self
-                .search_jql_page(jql, want, next_token.as_deref())
+                .search_jql_page(jql, &fields, want, next_token.as_deref())
                 .await?;
             let got = page.issues.len();
             collected.extend(page.issues);
@@ -561,7 +580,7 @@ impl JiraClient {
             }
         }
 
-        self.fill_epics(&mut collected).await?;
+        self.fill_derived(&mut collected, &derived)?;
         let returned = collected.len();
         Ok(SearchResponse {
             issues: collected,
@@ -598,36 +617,32 @@ impl JiraClient {
     ) -> Result<(Issue, Option<String>), ApiError> {
         validate_issue_key(key)?;
         const SPRINT_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
-        let (ids, warning): (Vec<String>, Option<String>) = match self.list_fields().await {
+        let (ids, warning): (Vec<String>, Option<String>) = match self.field_catalog().await {
             Ok(fields) => (
                 fields
-                    .into_iter()
+                    .iter()
                     .filter(|f| {
                         f.schema
                             .as_ref()
                             .is_some_and(|s| s.custom.as_deref() == Some(SPRINT_SCHEMA))
                     })
-                    .map(|f| f.id)
+                    .map(|f| f.id.clone())
                     .collect(),
                 None,
             ),
             Err(error) => (
                 Vec::new(),
                 Some(format!(
-                    "Sprint{} data unavailable: field discovery failed: {error}",
-                    if self.api_version < 3 {
-                        " and epic"
-                    } else {
-                        ""
-                    }
+                    "{} data unavailable: field discovery failed: {error}",
+                    self.catalog_dependents()
                 )),
             ),
         };
-        // Data Center uses the same catalog for Epic Link. Skip that lookup
-        // for this read only when the catalog already failed.
-        let include_epic_lookup = warning.is_none() || self.api_version >= 3;
+        // The Data Center Epic Link and discovered story points come from the
+        // same catalog. When it already failed, skip those lookups for this
+        // read instead of requesting it again.
         let issue = self
-            .get_issue_with_sprint_fields(key, &ids, include_epic_lookup)
+            .get_issue_with_sprint_fields(key, &ids, warning.is_none())
             .await?;
         Ok((issue, warning))
     }
@@ -636,24 +651,16 @@ impl JiraClient {
         &self,
         key: &str,
         sprint_fields: &[String],
-        include_epic_lookup: bool,
+        catalog: bool,
     ) -> Result<Issue, ApiError> {
         validate_issue_key(key)?;
-        let mut fields = if include_epic_lookup {
-            self.issue_fields(&ISSUE_DETAIL_FIELDS).await?
-        } else {
-            ISSUE_DETAIL_FIELDS
-                .iter()
-                .map(|f| (*f).to_owned())
-                .collect()
-        };
+        let derived = self.derived_fields(catalog).await?;
+        let mut fields = derived.request(&ISSUE_DETAIL_FIELDS);
         fields.extend(sprint_fields.iter().cloned());
         let fields = fields.join(",");
         let path = format!("issue/{key}?fields={fields}");
         let mut issue: Issue = self.get(&path).await?;
-        if include_epic_lookup {
-            self.fill_epics(std::slice::from_mut(&mut issue)).await?;
-        }
+        self.fill_derived(std::slice::from_mut(&mut issue), &derived)?;
         issue.sprints = parse_issue_sprints(&issue.fields.extra, sprint_fields);
 
         // Fetch remaining comment pages if the embedded page is incomplete

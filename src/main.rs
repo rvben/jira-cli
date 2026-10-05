@@ -1044,7 +1044,8 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
         &cfg.token_kind,
     )?
     .with_read_only(cfg.read_only)
-    .with_auth_remedy(cfg.auth_remedy());
+    .with_auth_remedy(cfg.auth_remedy())
+    .with_story_points_field(cfg.story_points_field.clone());
 
     if let Command::Tui { project } = &cli.command {
         jira_cli::tui::run(client, &cfg, project.as_deref(), !cli.no_color).await?;
@@ -1532,7 +1533,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "token_kind", "type": "string", "description": "`scoped` or `classic`"},
                 {"name": "auth_type", "type": "string", "description": "\"basic\" for Jira Cloud, \"pat\" for a Data Center personal access token"},
                 {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"},
-                {"name": "read_only", "type": "boolean", "description": "Block commands that write to Jira"}
+                {"name": "read_only", "type": "boolean", "description": "Block commands that write to Jira"},
+                {"name": "story_points_field", "type": "string", "description": "Custom field ID (e.g. customfield_10016) to read story points from. Optional: by default the field is discovered, and pinning it settles a site that has more than one"}
             ]},
             {"name": "profiles", "type": "object", "description": "Keyed by profile name, so the keys are chosen by the user rather than fixed. Each value has the same shape as `default`"}
         ]}
@@ -1641,6 +1643,8 @@ fn schema_json() -> serde_json::Value {
         "description": "Direct parent as Jira reports it: a subtask's parent issue, or on Jira Cloud also the epic above a standard issue. Null when the issue has no parent"});
     let epic_field = serde_json::json!({"name": "epic", "type": "string", "nullable": true,
         "description": "Key of the epic the issue belongs to directly. Cloud: the parent when it is at the epic hierarchy level. Data Center/Server: the Epic Link value, so a subtask whose parent is an epic shows that epic under `parent` and null here. Null when not in an epic"});
+    let story_points_field = serde_json::json!({"name": "storyPoints", "type": "number", "nullable": true, "optional": true,
+        "description": "Story points as Jira stores them (integer or decimal). Null when the issue has no estimate. Absent when the site has no story points field (Jira Software's estimate field, or a number field named \"Story Points\"), or when story_points_field is unset and field discovery failed"});
     // Element shape shared by `issues list`, `issues mine` and `search`.
     let issue_summary_fields = serde_json::json!([
         {"name": "key", "type": "string", "description": "Issue key (e.g. PROJ-123)"},
@@ -1653,6 +1657,7 @@ fn schema_json() -> serde_json::Value {
         {"name": "type", "type": "string"},
         parent_field.clone(),
         epic_field.clone(),
+        story_points_field.clone(),
         {"name": "created", "type": "string", "nullable": true},
         {"name": "updated", "type": "string", "nullable": true}
     ]);
@@ -1702,13 +1707,14 @@ fn schema_json() -> serde_json::Value {
                 {"name": "affectedVersions", "type": "object[]", "nullable": true, "fields": version_fields},
                 parent_field,
                 epic_field,
+                story_points_field,
                 {"name": "sprint", "type": "object", "nullable": true, "description": "The sole active or future sprint; null when none or more than one", "fields": [
                     {"name":"id","type":"integer"},{"name":"name","type":"string"},{"name":"state","type":"string"}
                 ]},
                 {"name": "sprints", "type": "object[]", "description": "All discovered current and past sprints, ordered by ID", "fields": [
                     {"name":"id","type":"integer"},{"name":"name","type":"string"},{"name":"state","type":"string"}
                 ]},
-                {"name": "warnings", "type": "string[]", "description": "Field discovery failures that prevented sprint data, and on Data Center epic data, from being loaded"},
+                {"name": "warnings", "type": "string[]", "description": "Field discovery failures that prevented sprint data, on Data Center epic data, and unless story_points_field is set story points, from being loaded"},
                 {"name": "comments", "type": "object[]", "fields": comment_fields, "description": "Already included here - no separate `issues comments` call is needed"},
                 {"name": "issueLinks", "type": "object[]", "description": "Already included here - no separate call is needed", "fields": [
                     {"name": "id", "type": "string"},
@@ -2023,7 +2029,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "profile", "type": "string"},
                 {"name": "credentialStore", "type": "string"},
                 {"name": "tokenKind", "type": "string"},
-                {"name": "cloudId", "type": "string", "nullable": true}
+                {"name": "cloudId", "type": "string", "nullable": true},
+                {"name": "storyPointsField", "type": "string", "nullable": true, "description": "The pinned story points field; null when it is discovered"}
             ]),
         ),
         ("auth login", init_fields.clone()),
@@ -2192,7 +2199,8 @@ fn schema_json() -> serde_json::Value {
                 "auth_type": ["JIRA_AUTH_TYPE", "config profile/default auth_type"],
                 "api_version": ["JIRA_API_VERSION", "config profile/default api_version"],
                 "cloud_id": ["JIRA_CLOUD_ID", "config profile/default cloud_id"],
-                "token_kind": ["JIRA_TOKEN_KIND", "config profile/default token_kind"]
+                "token_kind": ["JIRA_TOKEN_KIND", "config profile/default token_kind"],
+                "story_points_field": ["JIRA_STORY_POINTS_FIELD", "config profile/default story_points_field", "discovered from the site's fields"]
             },
             "env": [
                 { "name": "JIRA_HOST", "description": "Atlassian domain override", "required": false },
@@ -2203,6 +2211,7 @@ fn schema_json() -> serde_json::Value {
                 { "name": "JIRA_API_VERSION", "description": "Jira REST API version: 3 (default, Cloud) or 2 (Data Center/Server)", "required": false }
                 ,{ "name": "JIRA_CLOUD_ID", "description": "Atlassian Cloud ID required by scoped tokens", "required": false }
                 ,{ "name": "JIRA_TOKEN_KIND", "description": "Cloud token type: scoped or classic", "required": false }
+                ,{ "name": "JIRA_STORY_POINTS_FIELD", "description": "Custom field ID to read story points from (e.g. customfield_10016), instead of discovering it", "required": false }
             ]
         },
         // The guard exists so a Jira account can be handed to an agent without

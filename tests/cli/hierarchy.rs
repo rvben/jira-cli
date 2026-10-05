@@ -128,11 +128,13 @@ async fn cloud_reports_parent_and_derives_epic_from_the_parent_level() {
         )
         .mount(&server)
         .await;
-    // Cloud has no Epic Link field to look up.
+    // Cloud has no Epic Link field to look up. Each run reads the catalog
+    // once: the two shows for Sprint and story points, the search for story
+    // points.
     Mock::given(method("GET"))
         .and(path("/rest/api/3/field"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .expect(2)
+        .expect(3)
         .mount(&server)
         .await;
 
@@ -386,14 +388,15 @@ async fn fields_filter_can_select_parent_and_epic() {
 }
 
 /// Commands that never report the epic neither look it up nor trip over
-/// conflicting Epic Link values.
+/// conflicting Epic Link values. Text listings still read the field catalog
+/// for story points, but request no Epic Link field.
 #[tokio::test]
 async fn data_center_commands_without_epic_output_skip_the_lookup() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/rest/api/2/field"))
         .respond_with(ResponseTemplate::new(200).set_body_json(dc_fields()))
-        .expect(0)
+        .expect(2)
         .mount(&server)
         .await;
     let mut body = issue("PROJ-1", json!({"name": "Story", "subtask": false}), None);

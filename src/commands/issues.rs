@@ -41,7 +41,7 @@ pub async fn list(
     fields: Option<&[String]>,
 ) -> Result<(), ApiError> {
     let jql = build_list_jql(&filters);
-    enable_epic_lookup_for(client, out, fields);
+    enable_lookups_for(client, out, fields).await?;
     if all {
         let issues = fetch_all_issues(client, &jql).await?;
         let n = issues.len();
@@ -220,14 +220,48 @@ fn render_results(
     }
 }
 
-/// Look epics up only when the output includes them: listing tables never do.
-pub(crate) fn enable_epic_lookup_for(
+/// Turn on the derived-value lookups a listing reports, and only those: the
+/// table shows story points but never the epic.
+///
+/// Story points that were asked for by name must be there: a site without a
+/// story points field, or a failed field discovery, is then an error, since
+/// every item would otherwise come back as an empty object that reads like the
+/// issues are unestimated. Otherwise they are an extra the listing does without,
+/// saying why on stderr when discovery failed.
+pub(crate) async fn enable_lookups_for(
     client: &JiraClient,
     out: &OutputConfig,
     fields: Option<&[String]>,
-) {
-    if out.json && fields.is_none_or(|names| names.iter().any(|n| n == "epic")) {
+) -> Result<(), ApiError> {
+    let requested = |name: &str| fields.is_none_or(|names| names.iter().any(|n| n == name));
+    if out.json && requested("epic") {
         client.enable_epic_lookup();
+    }
+    if out.json && !requested("storyPoints") {
+        return Ok(());
+    }
+    // `--fields` filters JSON only; reaching here with JSON output and a
+    // field list means that list names storyPoints.
+    let explicit = out.json && fields.is_some();
+    match client.story_point_fields().await {
+        Ok(found) if found.is_empty() && explicit => Err(ApiError::InvalidInput(
+            "--fields storyPoints: this site has no story points field (no Jira Software \
+             estimate field and no number field named \"Story Points\"). If it estimates \
+             with another field, set story_points_field in the profile or \
+             JIRA_STORY_POINTS_FIELD"
+                .into(),
+        )),
+        Ok(_) => {
+            client.enable_story_points_lookup();
+            Ok(())
+        }
+        Err(error) if explicit => Err(error),
+        Err(error) => {
+            out.print_message(&format!(
+                "Warning: story point data unavailable: field discovery failed: {error}"
+            ));
+            Ok(())
+        }
     }
 }
 
@@ -281,6 +315,7 @@ pub async fn show(
     open: bool,
 ) -> Result<(), ApiError> {
     client.enable_epic_lookup();
+    client.enable_story_points_lookup();
     let (issue, warning) = client.get_issue_with_sprints_diagnostic(key).await?;
 
     if open {
@@ -908,14 +943,36 @@ pub(crate) fn render_issue_table(issues: &[Issue], out: &OutputConfig) {
         .unwrap_or(4)
         .clamp(4, 12)
         + 2;
+    // The column appears only when the site has a story points field, so a
+    // site without one shows no column rather than a column of blanks.
+    let points: Vec<Option<String>> = issues.iter().map(story_points_cell).collect();
+    let points_w = points.iter().any(Option::is_some).then(|| {
+        points
+            .iter()
+            .flatten()
+            .map(String::len)
+            .max()
+            .unwrap_or(0)
+            .max("Points".len())
+    });
+    let points_col = |value: &str| match points_w {
+        Some(w) => format!("{value:>w$} "),
+        None => String::new(),
+    };
 
     // Give remaining width to summary, minimum 20
-    let fixed = key_w + 1 + status_w + 1 + assignee_w + 1 + type_w + 1;
+    let fixed =
+        key_w + 1 + status_w + 1 + assignee_w + 1 + type_w + 1 + points_w.map_or(0, |w| w + 1);
     let summary_w = term_width.saturating_sub(fixed).max(20);
 
     let header = format!(
-        "{:<key_w$} {:<status_w$} {:<assignee_w$} {:<type_w$} {}",
-        "Key", "Status", "Assignee", "Type", "Summary"
+        "{:<key_w$} {:<status_w$} {:<assignee_w$} {:<type_w$} {}{}",
+        "Key",
+        "Status",
+        "Assignee",
+        "Type",
+        points_col("Points"),
+        "Summary"
     );
     if color {
         println!("{}", header.bold());
@@ -923,7 +980,7 @@ pub(crate) fn render_issue_table(issues: &[Issue], out: &OutputConfig) {
         println!("{header}");
     }
 
-    for issue in issues {
+    for (issue, points) in issues.iter().zip(&points) {
         let key = if color {
             format!("{:<key_w$}", issue.key).yellow().to_string()
         } else {
@@ -936,12 +993,23 @@ pub(crate) fn render_issue_table(issues: &[Issue], out: &OutputConfig) {
             format!("{:<status_w$}", status_val)
         };
         println!(
-            "{key} {status} {:<assignee_w$} {:<type_w$} {}",
+            "{key} {status} {:<assignee_w$} {:<type_w$} {}{}",
             truncate(issue.assignee(), assignee_w - 2),
             truncate(issue.issue_type(), type_w - 2),
+            points_col(points.as_deref().unwrap_or("")),
             truncate(issue.summary(), summary_w),
         );
     }
+}
+
+/// The story points as a table shows them: `None` when the site has no story
+/// points field, `-` when the issue is unestimated.
+fn story_points_cell(issue: &Issue) -> Option<String> {
+    issue.story_points.as_ref().map(|points| {
+        points
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), ToString::to_string)
+    })
 }
 
 fn render_issue_detail(issue: &Issue) {
@@ -978,6 +1046,9 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
     }
     if let Some(ref epic) = issue.epic {
         writeln!(out, "  Epic:       {epic}")?;
+    }
+    if let Some(points) = story_points_cell(issue) {
+        writeln!(out, "  Points:     {points}")?;
     }
     let current: Vec<_> = issue
         .sprints
@@ -1121,10 +1192,30 @@ fn user_to_json(user: Option<&UserField>) -> serde_json::Value {
 }
 
 /// Keys of an `issue_to_json` object: the names `--fields` accepts.
-pub(crate) const ISSUE_SUMMARY_KEYS: [&str; 12] = [
-    "key", "id", "url", "summary", "status", "assignee", "priority", "type", "parent", "epic",
-    "created", "updated",
+pub(crate) const ISSUE_SUMMARY_KEYS: [&str; 13] = [
+    "key",
+    "id",
+    "url",
+    "summary",
+    "status",
+    "assignee",
+    "priority",
+    "type",
+    "parent",
+    "epic",
+    "storyPoints",
+    "created",
+    "updated",
 ];
+
+/// Add `storyPoints` when the read looked them up and the site has a field to
+/// read them from. Absent otherwise: `null` would claim the issue is
+/// unestimated when nothing was known either way.
+fn insert_story_points(json: &mut serde_json::Value, issue: &Issue) {
+    if let (Some(points), Some(obj)) = (&issue.story_points, json.as_object_mut()) {
+        obj.insert("storyPoints".into(), serde_json::json!(points));
+    }
+}
 
 fn parent_to_json(issue: &Issue) -> serde_json::Value {
     match &issue.fields.parent {
@@ -1141,7 +1232,7 @@ fn parent_to_json(issue: &Issue) -> serde_json::Value {
 }
 
 pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::Value {
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "key": issue.key,
         "id": issue.id,
         "url": client.browse_url(&issue.key),
@@ -1156,7 +1247,9 @@ pub(crate) fn issue_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "epic": issue.epic,
         "created": issue.fields.created,
         "updated": issue.fields.updated,
-    })
+    });
+    insert_story_points(&mut json, issue);
+    json
 }
 
 fn attachment_to_json(a: &Attachment) -> serde_json::Value {
@@ -1247,7 +1340,7 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         })
         .collect();
 
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "key": issue.key,
         "id": issue.id,
         "url": client.browse_url(&issue.key),
@@ -1277,7 +1370,9 @@ pub fn issue_detail_to_json(issue: &Issue, client: &JiraClient) -> serde_json::V
         "updated": issue.fields.updated,
         "comments": comments,
         "issueLinks": issue_links,
-    })
+    });
+    insert_story_points(&mut json, issue);
+    json
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1514,6 +1609,7 @@ mod tests {
             },
             epic: None,
             sprints: Vec::new(),
+            story_points: None,
         }
     }
 
@@ -1907,6 +2003,47 @@ mod tests {
     }
 
     #[test]
+    fn story_points_json_separates_unknown_unestimated_and_estimated() {
+        let client = crate::api::JiraClient::new(
+            "https://example.atlassian.net",
+            "test@example.com",
+            "test-token",
+            crate::api::AuthType::Basic,
+            3,
+        )
+        .unwrap();
+        let mut issue = issue_fixture(None, None);
+        for to_json in [issue_to_json, issue_detail_to_json] {
+            issue.story_points = None;
+            assert!(to_json(&issue, &client).get("storyPoints").is_none());
+            issue.story_points = Some(None);
+            assert_eq!(
+                to_json(&issue, &client)["storyPoints"],
+                serde_json::Value::Null
+            );
+            issue.story_points = Some(Some(serde_json::Number::from_f64(0.5).unwrap()));
+            assert_eq!(
+                to_json(&issue, &client)["storyPoints"],
+                serde_json::json!(0.5)
+            );
+        }
+    }
+
+    #[test]
+    fn detail_shows_points_only_when_the_site_has_a_story_points_field() {
+        let render = |points| {
+            let mut issue = issue_fixture(None, None);
+            issue.story_points = points;
+            let mut buf = Vec::new();
+            write_issue_detail(&mut buf, &issue).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        assert!(!render(None).contains("Points:"));
+        assert!(render(Some(None)).contains("  Points:     -\n"));
+        assert!(render(Some(Some(3.into()))).contains("  Points:     3\n"));
+    }
+
+    #[test]
     fn fields_names_are_exactly_the_issue_json_keys() {
         let client = crate::api::JiraClient::new(
             "https://example.atlassian.net",
@@ -1916,7 +2053,10 @@ mod tests {
             3,
         )
         .unwrap();
-        let json = issue_to_json(&issue_fixture(None, None), &client);
+        // Story points looked up, so every optional key is present.
+        let mut issue = issue_fixture(None, None);
+        issue.story_points = Some(None);
+        let json = issue_to_json(&issue, &client);
         let mut keys: Vec<&str> = json
             .as_object()
             .unwrap()

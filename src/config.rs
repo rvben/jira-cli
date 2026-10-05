@@ -20,6 +20,7 @@ pub struct ProfileConfig {
     pub auth_type: Option<String>,
     pub api_version: Option<u8>,
     pub read_only: Option<bool>,
+    pub story_points_field: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -39,6 +40,7 @@ struct RawConfig {
     auth_type: Option<String>,
     api_version: Option<u8>,
     read_only: Option<bool>,
+    story_points_field: Option<String>,
 }
 
 impl RawConfig {
@@ -69,6 +71,11 @@ impl RawConfig {
                 .or_else(|| self.auth_type.clone()),
             api_version: self.default.api_version.or(self.api_version),
             read_only: self.default.read_only.or(self.read_only),
+            story_points_field: self
+                .default
+                .story_points_field
+                .clone()
+                .or_else(|| self.story_points_field.clone()),
         }
     }
 }
@@ -86,6 +93,9 @@ pub struct Config {
     pub credential_store: String,
     pub cloud_id: Option<String>,
     pub token_kind: String,
+    /// The custom field story points are read from, when the profile pins one
+    /// instead of leaving it to discovery.
+    pub story_points_field: Option<String>,
 }
 
 /// What a profile's site reports about its deployment, held against the REST
@@ -290,6 +300,11 @@ impl Config {
             None => file_profile.read_only.unwrap_or(false),
         };
 
+        let story_points_field = env_var("JIRA_STORY_POINTS_FIELD")
+            .or_else(|| normalize_value(file_profile.story_points_field))
+            .map(|field| parse_story_points_field(&field))
+            .transpose()?;
+
         let cloud_id = env_var("JIRA_CLOUD_ID").or(file_profile.cloud_id);
         let token_kind = env_var("JIRA_TOKEN_KIND")
             .or(file_profile.token_kind)
@@ -315,8 +330,22 @@ impl Config {
             credential_store,
             cloud_id,
             token_kind,
+            story_points_field,
         })
     }
+}
+
+/// A pinned story points field must be a custom field ID. A field name is the
+/// likely mistake, and accepting it would request a field Jira does not have.
+fn parse_story_points_field(value: &str) -> Result<String, ApiError> {
+    let digits = value.strip_prefix("customfield_").unwrap_or_default();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ApiError::InvalidInput(format!(
+            "story_points_field `{value}` is not a custom field ID such as customfield_10016; \
+             `jira fields list --custom` shows the IDs"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 /// Render the set of selectable profile names. An empty set is named
@@ -469,6 +498,7 @@ pub fn show(
                 "credentialStore": cfg.credential_store,
                 "tokenKind": cfg.token_kind,
                 "cloudId": cfg.cloud_id,
+                "storyPointsField": cfg.story_points_field,
             }))
             .expect("failed to serialize JSON"),
         );
@@ -662,6 +692,7 @@ pub fn schema_example_config() -> serde_json::Value {
             "auth_type": "basic",
             "api_version": 3,
             "read_only": true,
+            "story_points_field": "customfield_10016",
         },
         "profiles": {
             "work": {
@@ -674,7 +705,7 @@ pub fn schema_example_config() -> serde_json::Value {
             "datacenter": {
                 "host": "jira.mycompany.com",
                 "credential_store": "keyring",
-                    "auth_type": "pat",
+                "auth_type": "pat",
                 "api_version": 2,
             }
         }
@@ -1721,6 +1752,23 @@ struct ProfileWrite<'a> {
     read_only: bool,
 }
 
+/// Profile keys set by hand rather than by a login, which a rewrite of the
+/// profile keeps. Anything else not written afresh is dropped, so obsolete keys
+/// from earlier releases do not linger.
+const HAND_SET_PROFILE_KEYS: [&str; 1] = ["story_points_field"];
+
+fn existing_section<'a>(
+    root: &'a toml::map::Map<String, toml::Value>,
+    profile_name: &str,
+) -> Option<&'a toml::map::Map<String, toml::Value>> {
+    let section = if profile_name == "default" {
+        root.get("default")
+    } else {
+        root.get("profiles")?.as_table()?.get(profile_name)
+    };
+    section?.as_table()
+}
+
 fn write_profile_to_config(
     path: &std::path::Path,
     profile_name: &str,
@@ -1744,7 +1792,15 @@ fn write_profile_to_config(
         toml::Value::String(profile_name.to_owned()),
     );
 
-    let mut section = toml::map::Map::new();
+    let mut section: toml::map::Map<String, toml::Value> = existing_section(root, profile_name)
+        .map(|table| {
+            table
+                .iter()
+                .filter(|(key, _)| HAND_SET_PROFILE_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     section.insert(
         "host".to_owned(),
         toml::Value::String(profile.host.to_owned()),
@@ -2343,6 +2399,107 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("acme.atlassian.net"));
         assert!(!content.contains("expires_at"), "{content}");
+    }
+
+    /// A pinned story points field is set by hand; logging in again must not
+    /// quietly put the profile back on discovery.
+    #[test]
+    fn rewriting_a_profile_keeps_its_pinned_story_points_field() {
+        for (name, existing) in [
+            (
+                "default",
+                "[default]\nhost = \"old.atlassian.net\"\nstory_points_field = \"customfield_10028\"\n",
+            ),
+            (
+                "work",
+                "[profiles.work]\nhost = \"old.atlassian.net\"\nstory_points_field = \"customfield_10028\"\n",
+            ),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, existing).unwrap();
+
+            write_profile_to_config(
+                &path,
+                name,
+                ProfileWrite {
+                    host: "acme.atlassian.net",
+                    email: Some("me@acme.com"),
+                    token: "secret",
+                    credential_store: "file",
+                    cloud_id: None,
+                    token_kind: "classic",
+                    auth_type: "basic",
+                    api_version: 3,
+                    read_only: false,
+                },
+            )
+            .unwrap();
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(content.contains("acme.atlassian.net"), "{content}");
+            assert!(!content.contains("old.atlassian.net"), "{content}");
+            assert!(
+                content.contains("story_points_field = \"customfield_10028\""),
+                "{name}: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn story_points_field_must_be_a_custom_field_id() {
+        assert_eq!(
+            parse_story_points_field("customfield_10016").unwrap(),
+            "customfield_10016"
+        );
+        for bad in [
+            "Story Points",
+            "customfield_",
+            "customfield_10a",
+            "10016",
+            "timeestimate",
+        ] {
+            let err = parse_story_points_field(bad).unwrap_err();
+            assert!(matches!(err, ApiError::InvalidInput(_)), "{bad}");
+            assert!(err.to_string().contains("jira fields list"), "{err}");
+        }
+    }
+
+    #[test]
+    fn load_story_points_field_env_overrides_file() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_config(
+            dir.path(),
+            r#"
+[default]
+host = "file.atlassian.net"
+email = "me@example.com"
+token = "tok"
+story_points_field = "customfield_10016"
+"#,
+        )
+        .unwrap();
+
+        let _config_dir = set_config_dir_env(dir.path());
+        let _host = EnvVarGuard::unset("JIRA_HOST");
+        let _email = EnvVarGuard::unset("JIRA_EMAIL");
+        let _token = EnvVarGuard::unset("JIRA_TOKEN");
+        let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+        let _field = EnvVarGuard::unset("JIRA_STORY_POINTS_FIELD");
+        let cfg = Config::load(None, None, None).unwrap();
+        assert_eq!(cfg.story_points_field.as_deref(), Some("customfield_10016"));
+
+        let _field = EnvVarGuard::set("JIRA_STORY_POINTS_FIELD", "customfield_10028");
+        let cfg = Config::load(None, None, None).unwrap();
+        assert_eq!(cfg.story_points_field.as_deref(), Some("customfield_10028"));
+
+        let _field = EnvVarGuard::set("JIRA_STORY_POINTS_FIELD", "Story Points");
+        assert!(matches!(
+            Config::load(None, None, None),
+            Err(ApiError::InvalidInput(_))
+        ));
     }
 
     /// Jira creates a PAT without expiry unless asked for one, and setup has no

@@ -265,11 +265,15 @@ fn list(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
             let key = clean(&issue.key);
             let status = clean(issue.status());
             let summary = clean(issue.summary());
+            let mut head = vec![
+                Span::styled(format!(" {key:<14}"), t.accent()),
+                Span::styled(status.clone(), t.status(&status)),
+            ];
+            if let Some(Some(points)) = &issue.story_points {
+                head.push(Span::styled(format!("  {points} pts"), t.muted()));
+            }
             ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(format!(" {key:<14}"), t.accent()),
-                    Span::styled(status.clone(), t.status(&status)),
-                ]),
+                Line::from(head),
                 Line::styled(format!("  {summary}"), t.text()),
             ])
         })
@@ -316,6 +320,12 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
     field(&mut lines, "TYPE", issue.issue_type(), t);
     field(&mut lines, "PRIORITY", issue.priority(), t);
     field(&mut lines, "ASSIGNEE", issue.assignee(), t);
+    if let Some(points) = &issue.story_points {
+        let points = points
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), ToString::to_string);
+        field(&mut lines, "POINTS", &points, t);
+    }
     if let Some(reporter) = &issue.fields.reporter {
         field(&mut lines, "REPORTER", &reporter.display_name, t);
     }

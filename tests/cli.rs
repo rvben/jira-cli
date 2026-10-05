@@ -1768,6 +1768,15 @@ async fn issues_attachments_degrades_absent_author_and_mime_type() {
 
 // ── schema conformance: what the binary prints vs what `jira schema` declares ──
 
+/// A Cloud field catalog holding Jira Software's estimate field, which
+/// `full_issue` sets.
+fn story_points_catalog() -> serde_json::Value {
+    serde_json::json!([{
+        "id": "customfield_10016", "name": "Story point estimate", "custom": true,
+        "schema": {"type": "number", "custom": "com.pyxis.greenhopper.jira:jsw-story-points"}
+    }])
+}
+
 /// A `/search/jql` page carrying one issue.
 fn search_page(issue: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "issues": [issue], "isLast": true })
@@ -1787,6 +1796,7 @@ fn full_issue() -> serde_json::Value {
             "reporter": { "displayName": "Bob", "accountId": "def456" },
             "priority": { "name": "Medium" },
             "issuetype": { "name": "Bug" },
+            "customfield_10016": 5,
             "parent": {
                 "id": "10000",
                 "key": "PROJ-100",
@@ -1851,6 +1861,11 @@ async fn issue_summary_commands_emit_exactly_the_fields_they_declare() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/rest/api/3/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(story_points_catalog()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .and(path("/rest/api/3/myself"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "accountId": "abc123", "displayName": "Alice"
@@ -1871,6 +1886,8 @@ async fn issue_summary_commands_emit_exactly_the_fields_they_declare() {
         );
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_json_keys_match_schema(command, &json["items"][0], &[]);
+        // Optional in the schema, so present only because the site has the field.
+        assert_eq!(json["items"][0]["storyPoints"], 5, "{command}");
     }
 }
 
@@ -1880,7 +1897,7 @@ async fn issues_show_emits_exactly_the_fields_it_declares() {
 
     Mock::given(method("GET"))
         .and(path("/rest/api/3/field"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(story_points_catalog()))
         .mount(&server)
         .await;
 
@@ -1898,6 +1915,7 @@ async fn issues_show_emits_exactly_the_fields_it_declares() {
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_json_keys_match_schema("issues show", &json, &[]);
+    assert_eq!(json["storyPoints"], 5);
 }
 
 #[tokio::test]
@@ -3617,6 +3635,9 @@ mod fields;
 
 #[path = "cli/hierarchy.rs"]
 mod hierarchy;
+
+#[path = "cli/story_points.rs"]
+mod story_points;
 
 /// A 401 on a stored credential names the profile and the exact command that
 /// replaces its token, because that is the one fix that works.

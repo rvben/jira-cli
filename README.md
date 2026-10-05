@@ -127,6 +127,7 @@ All credentials can be set via environment variables, which is useful for CI and
 | `JIRA_API_VERSION` | `3` (Cloud, default) or `2` (Data Center / Server) |
 | `JIRA_CLOUD_ID` | Atlassian Cloud ID required by a scoped token |
 | `JIRA_TOKEN_KIND` | `scoped` or `classic` |
+| `JIRA_STORY_POINTS_FIELD` | Custom field ID to read story points from (e.g. `customfield_10016`) instead of discovering it |
 | `JIRA_READ_ONLY` | Block write operations. On: `1`, `true`, `yes`, `on`. Off: `0`, `false`, `no`, `off`. Any other value is an error, not "off" |
 | `JIRA_DEBUG_HTTP` | Include the raw Jira response body in API error messages (`1`, `true`, `yes`, `on`). Useful when the default summary is ambiguous. |
 
@@ -303,6 +304,22 @@ Center it is the Epic Link field, so a subtask created directly under an epic
 shows that epic as `parent` with `epic: null`. `--fields` rejects names that are
 not output fields and lists the valid ones.
 
+The same issue JSON carries `storyPoints`, the number as Jira stores it, and
+tables show a `Points` column (`-` when the issue is unestimated). The field is
+discovered from the site's field catalog: Jira Software's estimate field (named
+"Story point estimate" on Cloud team-managed projects) or a custom number field
+named "Story Points" (company-managed projects and Data Center). `storyPoints`
+is `null` for an unestimated issue and absent when the site has no such field,
+so "not estimated" and "unknown" stay apart; asking `--fields` for
+`storyPoints` on such a site is an error. When a site uses both fields and they
+disagree on an issue, the read fails rather than picking one. Pin the field your
+boards estimate with to settle that, or to use a differently named field:
+
+```toml
+[default]
+story_points_field = "customfield_10016"   # `jira fields list --custom` shows IDs
+```
+
 `issues update --type` changes an issue's type by name or ID within one
 hierarchy level, for example Task to Story. Jira applies it only when both
 types share a workflow and field configuration. Changing a subtask into a
@@ -356,7 +373,9 @@ command to finish the operation. Rerunning `issues create` would create a duplic
 `issues show` reports the sole current sprint in `sprint` and all current and
 historical sprint values in `sprints`; the text view labels current and past sprints.
 If Jira's field catalog is unavailable, the issue still displays and JSON
-`warnings` explains why sprint data could not be loaded (and epic data on Data Center).
+`warnings` explains why sprint data could not be loaded (and epic data on Data
+Center, and story points unless `story_points_field` is set). Listings without a
+field catalog still print, without story points and with a warning on stderr.
 
 To check Server/Data Center sprint behavior against a real instance without
 writing to Jira, set `JIRA_E2E_HOST`, `JIRA_E2E_TOKEN`, and these three values

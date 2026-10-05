@@ -788,6 +788,11 @@ pub async fn run(
             "project must be a Jira project key".into(),
         ));
     }
+    // Story points are an extra the workbench does without when field
+    // discovery fails; with the lookup on, every list would fail instead.
+    if client.story_point_fields().await.is_ok() {
+        client.enable_story_points_lookup();
+    }
     let client = Arc::new(client);
     let color = color
         && std::env::var_os("NO_COLOR").is_none()
@@ -866,6 +871,7 @@ mod tests {
             credential_store: "file".into(),
             cloud_id: None,
             token_kind: "classic".into(),
+            story_points_field: None,
         };
         App::new(&cfg, Some("APP"), false)
     }

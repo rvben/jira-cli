@@ -17,7 +17,7 @@ pub async fn run(
     all: bool,
     fields: Option<&[String]>,
 ) -> Result<(), ApiError> {
-    super::issues::enable_epic_lookup_for(client, out, fields);
+    super::issues::enable_lookups_for(client, out, fields).await?;
     if all {
         let issues = fetch_all_issues(client, jql).await?;
         let count = issues.len();

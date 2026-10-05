@@ -16,6 +16,11 @@ pub struct Issue {
     /// Sprint values discovered from Jira Software's instance-specific field.
     #[serde(skip)]
     pub sprints: Vec<IssueSprint>,
+    /// Story points, filled in by the client after fetching. `None` when they
+    /// were not looked up or the site has no story points field; `Some(None)`
+    /// when the issue has no estimate. The number is kept as Jira sent it.
+    #[serde(skip)]
+    pub story_points: Option<Option<serde_json::Number>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -93,8 +98,8 @@ pub struct IssueFields {
     #[serde(rename = "issuelinks")]
     pub issue_links: Option<Vec<IssueLink>>,
     pub parent: Option<ParentIssue>,
-    /// Requested fields without a typed slot (the Data Center Epic Link custom
-    /// field, whose ID differs per instance).
+    /// Requested fields without a typed slot: the Data Center Epic Link,
+    /// Sprint and story points custom fields, whose IDs differ per instance.
     #[serde(flatten, skip_serializing)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
