@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.19](https://github.com/rvben/jira-cli/compare/v0.4.18...v0.4.19) - 2026-10-05
+
+### Added
+
+- **sprints**: show sprint point totals ([e227b8c](https://github.com/rvben/jira-cli/commit/e227b8cdb7258fb61a671367119e4e956c6ccf12))
+- **issues**: report story points ([edf1d9f](https://github.com/rvben/jira-cli/commit/edf1d9ffdca71f436d5ecffe127b3f8fd25880bd))
+
 ## [0.4.18](https://github.com/rvben/jira-cli/compare/v0.4.17...v0.4.18) - 2026-09-29
 
 ### Added
