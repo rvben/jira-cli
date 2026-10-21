@@ -332,6 +332,7 @@ async fn e2e_bulk_transition_dry_run() {
         &out,
         &format!("project = {project} AND summary ~ 'e2e' AND status = 'To Do'"),
         "In Progress",
+        &Default::default(),
         true,
     )
     .await

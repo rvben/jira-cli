@@ -956,6 +956,7 @@ mod tests {
                 id: "11".into(),
                 name: "Done".into(),
                 to: None,
+                fields: None,
             }],
             selected: 0,
         };

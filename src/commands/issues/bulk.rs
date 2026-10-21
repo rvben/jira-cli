@@ -1,5 +1,5 @@
 use super::{fetch_all_issues, transitions};
-use crate::api::{ApiError, JiraClient};
+use crate::api::{ApiError, JiraClient, TransitionInput};
 use crate::output::{OutputConfig, contract_for, error_envelope_for};
 use serde_json::{Value, json};
 
@@ -95,6 +95,7 @@ pub async fn bulk_transition(
     out: &OutputConfig,
     jql: &str,
     to: &str,
+    input: &TransitionInput<'_>,
     dry_run: bool,
 ) -> Result<(), ApiError> {
     let issues = fetch_all_issues(client, jql).await?;
@@ -110,16 +111,20 @@ pub async fn bulk_transition(
         let attempt = async {
             let available = client.get_transitions(&issue.key).await?;
             let selected = transitions::resolve(&issue.key, to, &available)?;
+            let prepared = client.prepare_transition(&issue.key, selected, input).await?;
             if dry_run {
                 return Ok(json!({"key": issue.key, "status": issue.status(),
                     "action": "would transition", "to": to, "transitionId": selected.id,
-                    "destinationStatus": selected.to.as_ref().map(|s| &s.name)}));
+                    "destinationStatus": selected.to.as_ref().map(|s| &s.name),
+                    "fields": prepared.fields, "warnings": prepared.warnings}));
             }
             phase = "write";
-            client.do_transition(&issue.key, &selected.id).await?;
+            let comment = client.transition_issue(&issue.key, &prepared).await?;
             Ok::<_, ApiError>(
                 json!({"key": issue.key, "from": issue.status(), "to": to, "ok": true,
-                    "transitionId": selected.id, "destinationStatus": selected.to.as_ref().map(|s| &s.name)}),
+                    "transitionId": selected.id, "destinationStatus": selected.to.as_ref().map(|s| &s.name),
+                    "fields": prepared.fields, "commentId": comment.map(|c| c.id),
+                    "warnings": prepared.warnings}),
             )
         }
         .await;
@@ -132,11 +137,19 @@ pub async fn bulk_transition(
             }
             Err(error) => {
                 aborted = aborts_run(&error);
+                if transitioned(&error) {
+                    phase = "comment";
+                }
                 results.push(failed_item(&issue.key, &error, phase));
             }
         }
     }
     finish(out, dry_run, results, succeeded)
+}
+
+/// Whether the transition was applied and only its follow-up comment failed.
+fn transitioned(error: &ApiError) -> bool {
+    matches!(error, ApiError::WithDetails { details, .. } if details["transitioned"] == true)
 }
 
 pub async fn bulk_assign(
@@ -159,9 +172,18 @@ pub async fn bulk_assign(
             continue;
         }
         if dry_run {
-            results.push(json!({"key": issue.key,
-                "currentAssignee": issue.fields.assignee.as_ref().map(|a| &a.display_name),
-                "action": "would assign", "to": assignee}));
+            results.push(
+                match client.check_assign(&issue.key, account_id.as_deref()).await {
+                    Ok(warnings) => json!({"key": issue.key,
+                    "currentAssignee": issue.fields.assignee.as_ref().map(|a| &a.display_name),
+                    "action": "would assign", "to": assignee, "accountId": account_id,
+                    "warnings": warnings}),
+                    Err(error) => {
+                        aborted = aborts_run(&error);
+                        failed_item(&issue.key, &error, "lookup")
+                    }
+                },
+            );
             continue;
         }
         match client.assign_issue(&issue.key, account_id.as_deref()).await {

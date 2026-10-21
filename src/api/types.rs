@@ -460,6 +460,11 @@ pub struct Transition {
     pub name: String,
     /// The status this transition leads to, including its workflow category.
     pub to: Option<TransitionTo>,
+    /// The transition screen's fields, keyed by field ID (requested with
+    /// `expand=transitions.fields`). Empty when the transition has no screen;
+    /// absent when Jira did not report them.
+    #[serde(default, skip_serializing)]
+    pub fields: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 /// The target status of a transition.

@@ -938,9 +938,16 @@ async fn transition_matches_by_name_case_insensitive() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::issues::transition(&client, &out, "PROJ-1", "in progress")
-        .await
-        .unwrap();
+    jira_cli::commands::issues::transition(
+        &client,
+        &out,
+        "PROJ-1",
+        "in progress",
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -957,9 +964,16 @@ async fn transition_not_found_returns_structured_error() {
 
     let client = test_client(&server);
     let out = json_out();
-    let err = jira_cli::commands::issues::transition(&client, &out, "PROJ-1", "Nonexistent")
-        .await
-        .unwrap_err();
+    let err = jira_cli::commands::issues::transition(
+        &client,
+        &out,
+        "PROJ-1",
+        "Nonexistent",
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(jira_cli::output::contract_for(&err).kind, "not_found");
     assert_eq!(jira_cli::output::contract_for(&err).exit_code, 4);
     assert!(err.to_string().contains("Nonexistent"));
@@ -1580,9 +1594,16 @@ async fn transition_not_found_produces_no_stdout_data() {
         json: true,
         quiet: true,
     };
-    let err = jira_cli::commands::issues::transition(&client, &out, "PROJ-1", "Nonexistent")
-        .await
-        .unwrap_err();
+    let err = jira_cli::commands::issues::transition(
+        &client,
+        &out,
+        "PROJ-1",
+        "Nonexistent",
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap_err();
 
     // Must return NotFound (exit code 4), not a generic error
     assert!(
@@ -2553,9 +2574,16 @@ async fn transition_response_includes_resulting_status() {
     let out = json_out();
     // Verify the command completes without error.
     // The `status` field in the JSON output comes from the `to.name` field of the transition.
-    jira_cli::commands::issues::transition(&client, &out, "PROJ-1", "Start Progress")
-        .await
-        .unwrap();
+    jira_cli::commands::issues::transition(
+        &client,
+        &out,
+        "PROJ-1",
+        "Start Progress",
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
 }
 
 // ── issue list --type filter ───────────────────────────────────────────────────
@@ -2811,7 +2839,7 @@ async fn log_work_posts_to_worklog_endpoint() {
         .await;
 
     let out = json_out();
-    jira_cli::commands::issues::log_work(&client, &out, "PROJ-1", "2h", None, None)
+    jira_cli::commands::issues::log_work(&client, &out, "PROJ-1", "2h", None, None, false)
         .await
         .unwrap();
 }
@@ -2845,6 +2873,7 @@ async fn log_work_with_comment_includes_body_in_payload() {
         "30m",
         Some("Fixed the flaky test"),
         None,
+        false,
     )
     .await
     .unwrap();
@@ -2898,6 +2927,7 @@ async fn bulk_transition_dry_run_validates_without_writes() {
         &out,
         "project = PROJ AND status = 'To Do'",
         "In Progress",
+        &Default::default(),
         true,
     )
     .await
@@ -2943,6 +2973,7 @@ async fn bulk_transition_calls_transition_for_each_issue() {
         &out,
         "project = PROJ",
         "In Progress",
+        &Default::default(),
         false,
     )
     .await
@@ -3213,6 +3244,7 @@ async fn log_work_with_started_includes_started_in_payload() {
         "1h",
         None,
         Some("2024-06-01T09:00:00.000+0000"),
+        false,
     )
     .await
     .unwrap();
@@ -3234,6 +3266,16 @@ async fn log_work_with_started_includes_started_in_payload() {
 async fn issues_link_command_posts_correct_payload() {
     let server = MockServer::start().await;
 
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issueLinkType"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issueLinkTypes": [
+                {"id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
     Mock::given(method("POST"))
         .and(path("/rest/api/3/issueLink"))
         .respond_with(ResponseTemplate::new(201))
@@ -3243,12 +3285,16 @@ async fn issues_link_command_posts_correct_payload() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::issues::link(&client, &out, "PROJ-1", "PROJ-2", "Blocks")
+    jira_cli::commands::issues::link(&client, &out, "PROJ-1", "PROJ-2", "blocks", false)
         .await
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let post = requests
+        .iter()
+        .find(|r| r.method == "POST")
+        .expect("link request");
+    let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
     assert_eq!(body["type"]["name"], "Blocks");
     assert_eq!(body["inwardIssue"]["key"], "PROJ-1");
     assert_eq!(body["outwardIssue"]["key"], "PROJ-2");
@@ -3267,7 +3313,7 @@ async fn issues_unlink_command_sends_delete_request() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::issues::unlink(&client, &out, "10055")
+    jira_cli::commands::issues::unlink(&client, &out, "10055", false)
         .await
         .unwrap();
 }

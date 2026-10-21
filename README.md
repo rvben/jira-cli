@@ -251,18 +251,22 @@ jira issues update MYAPP-123 --assignee none
 # Transition
 jira issues list-transitions MYAPP-123
 jira issues transition MYAPP-123 --to "In Review"
+jira issues transition MYAPP-123 --to Done --resolution Fixed --comment "Released in 1.4"
+jira issues transition MYAPP-123 --to Done --field "Root cause=Cache race" --dry-run
 
 # Assign
 jira issues assign MYAPP-123 --assignee me
-jira issues assign MYAPP-123 --assignee user@example.com
+jira issues assign MYAPP-123 --assignee user@example.com --dry-run  # checks assignability
 
 # Comment
 jira issues comment MYAPP-123 --body "Deployed to staging."
+jira issues comment MYAPP-123 --body "Deployed to staging." --dry-run
 jira issues comments MYAPP-123
 
 # Log work
-jira issues log-work MYAPP-123 --time-spent 2h
-jira issues log-work MYAPP-123 --time-spent 30m --comment "Fixed the flaky test"
+jira issues log-work MYAPP-123 --time 2h
+jira issues log-work MYAPP-123 --time 30m --comment "Fixed the flaky test"
+jira issues log-work MYAPP-123 --time 1h --started 2024-01-15T09:00+01:00 --dry-run
 
 # Attachments
 jira issues attachments MYAPP-123
@@ -270,11 +274,14 @@ jira issues attach MYAPP-123 --file ./design.png --file ./spec.pdf
 jira issues attach MYAPP-123 --file ./design.png --dry-run  # checks permission and size limit
 jira issues download-attachment 10042 --dir ./downloads
 jira issues download-attachment 10042 --dir ./downloads --force  # overwrite an existing file
+jira issues delete-attachment 10042 --dry-run  # shows the attachment it would delete
 jira issues delete-attachment 10042
 
 # Links
 jira issues link-types
-jira issues link MYAPP-123 --to MYAPP-456 --type "Blocks"
+jira issues link MYAPP-123 --to MYAPP-456 --link-type Blocks  # MYAPP-123 blocks MYAPP-456
+jira issues link MYAPP-123 --to MYAPP-456 --link-type Blocks --dry-run
+jira issues unlink <link-id> --dry-run  # describes the link it would remove
 jira issues unlink <link-id>
 
 # Move to sprint
@@ -285,6 +292,7 @@ jira issues move MYAPP-123 --sprint active --board 42
 # Bulk operations (use --dry-run to preview)
 jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "In Progress"
 jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "In Progress" --dry-run
+jira issues bulk-transition --jql 'project = MYAPP AND status = "In Review"' --to Done --resolution Fixed --comment "Released"
 jira issues bulk-assign --jql 'project = MYAPP AND sprint in openSprints()' --assignee me
 ```
 
@@ -374,6 +382,18 @@ rich-text field is converted to ADF. JSON objects skip these checks.
 `--assignee none` and `--assignee unassign` explicitly leave a new issue unassigned
 or clear an existing assignee. Omitting the flag preserves Jira's create default
 or the existing assignee. These aliases also work with `issues assign`.
+`--assignee` on `create`, `update`, `assign` and `bulk-assign` takes the same
+user forms as user `--field` values: `me`, an e-mail address, or a username or
+account ID.
+
+`issues transition` and `bulk-transition` check `--field`, `--resolution` and
+`--comment` against the transition screen. Field names or IDs must be on the
+screen, values are typed as above, and required screen fields that are neither
+given, defaulted nor already set on the issue are reported before the
+transition is sent. A transition without a screen takes no fields. When the
+screen has no comment field, the comment is added after the transition and the
+command says so; if only that comment fails, the error says the transition was
+applied, and bulk results mark it `phase: "comment"`.
 
 On `issues create`, `issues update`, and `issues move`, sprint names and `active` are scoped to the
 issue project's Scrum boards. `--board ID` overrides this scope. Exact names
@@ -443,12 +463,14 @@ Bulk commands emit a summary even for zero matches. Any per-issue failure
 returns exit 9 (`bulk_failure`); stdout still contains the full summary.
 `total = succeeded + ready + failed + notAttempted`, where `ready` counts
 dry-run entries that passed available checks and `succeeded` counts completed
-writes. Assignment previews resolve the assignee but do not check per-issue
-assignability; transition previews resolve the transition for each issue. Issue-local
+writes. Assignment previews check, per issue, that you may assign it and that
+the assignee is assignable; transition previews resolve the transition and check
+its screen fields for each issue. Issue-local
 failures do not discard or replay completed work. Authentication/permission,
 rate-limit, network, and server failures stop further requests and mark the
 remaining issues `notAttempted`. Each failure includes `errorKind` and
-`retryable`, plus the failed `phase` (`lookup` or `write`). Write timeouts,
+`retryable`, plus the failed `phase` (`lookup`, `write`, or `comment` when a transition
+succeeded but its follow-up comment did not). Write timeouts,
 connection failures, and server errors are marked `outcome: "unknown"`: the
 server may have applied the write. These count under `failed` because success
 was not confirmed; check issue state before retrying them. Never blindly rerun a partially completed bulk command.
@@ -565,7 +587,7 @@ stdout when the exit code is nonzero.
 
 Set `JIRA_READ_ONLY=1` to block every command that writes to Jira. The CLI returns exit code 2 with a structured error for any blocked command, before it opens a connection. This is useful when giving an AI agent read access to Jira without the risk of unintended modifications.
 
-`--dry-run` remains available for create, update, move, attach, and both bulk commands in read-only mode. These commands resolve and validate inputs without writing to Jira; the HTTP client also blocks write requests as a second check.
+`--dry-run` remains available in read-only mode for every command that has it: create, update, move, transition, assign, comment, link, unlink, log-work, attach, delete-attachment, and both bulk commands. These commands resolve and validate inputs without writing to Jira; the HTTP client also blocks write requests as a second check.
 
 The guard covers writes to Jira, not writes to your disk: `jira init`, `jira config init`, `jira config remove` and `jira issues download-attachment` still work, because they change local files only.
 
@@ -637,7 +659,7 @@ These flags are available on every command. `--json` is a compatibility alias fo
 ```sh
 make build          # debug build
 make check          # fmt check + clippy + tests (run before committing)
-make test           # unit + integration tests (wiremock, no real Jira needed)
+make test           # unit + integration tests (wiremock, no real Jira needed; needs cargo-nextest)
 make lint           # fmt check + clippy
 make fmt            # auto-format
 make install        # check + release build + copy to ~/.local/bin/jira

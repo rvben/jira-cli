@@ -120,7 +120,7 @@ fn typed_value(
             Some(s) if is_date(s) => Ok(value),
             _ => Err(wrong("a date such as 2026-01-31", &value)),
         },
-        (Some(kind @ ("option" | "priority" | "version" | "component")), _) => {
+        (Some(kind @ ("option" | "priority" | "version" | "component" | "resolution")), _) => {
             match scalar(&value) {
                 Some(input) => reference(name, kind, definition, &input),
                 None => Err(wrong("one value", &value)),
@@ -237,15 +237,7 @@ pub(super) fn validate_required(
             continue;
         }
         let invalid = match fields.get(id) {
-            Some(value) => match value {
-                Value::Null => true,
-                Value::String(s) => s.trim().is_empty(),
-                Value::Array(items) => items.is_empty(),
-                Value::Object(items) => {
-                    items.is_empty() || (value["type"] == "doc" && empty_adf(value))
-                }
-                _ => false,
-            },
+            Some(value) => is_empty_value(value),
             None => {
                 creating
                     && definition["hasDefaultValue"] != true
@@ -271,6 +263,18 @@ pub(super) fn validate_required(
         )));
     }
     Ok(())
+}
+
+/// Whether a field value counts as unset: null, blank text, an empty list or
+/// object, or a rich-text document without content.
+pub(super) fn is_empty_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(items) => items.is_empty() || (value["type"] == "doc" && empty_adf(value)),
+        _ => false,
+    }
 }
 
 // Plain-text flags become ADF on Cloud. An empty paragraph is still empty for

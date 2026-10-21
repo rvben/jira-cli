@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-use jira_cli::api::{ApiError, IssueDraft, IssueUpdate, JiraClient};
+use jira_cli::api::{ApiError, IssueDraft, IssueUpdate, JiraClient, TransitionInput};
 use jira_cli::commands;
 use jira_cli::config::Config;
 use jira_cli::output::{OutputConfig, exit_codes, machine_readable_errors};
@@ -343,7 +343,7 @@ enum IssuesCommand {
         #[arg(long)]
         fix_versions: Vec<String>,
 
-        /// Assign to this account ID (use "me" for yourself, "none" or "unassign" for no assignee)
+        /// Assignee: username or account ID, e-mail address, "me", or "none"/"unassign" for no assignee
         #[arg(long)]
         assignee: Option<String>,
 
@@ -421,7 +421,7 @@ enum IssuesCommand {
         #[arg(long)]
         labels: Vec<String>,
 
-        /// Assign to this account ID (use "me" for yourself, "none" or "unassign" to clear)
+        /// Assignee: username or account ID, e-mail address, "me", or "none"/"unassign" to clear
         #[arg(long)]
         assignee: Option<String>,
 
@@ -458,6 +458,10 @@ enum IssuesCommand {
         /// Comment body (plain text)
         #[arg(short, long)]
         body: String,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Move an issue to a new status
@@ -468,6 +472,23 @@ enum IssuesCommand {
         /// Target status name or transition ID
         #[arg(long)]
         to: String,
+
+        /// Set a transition-screen field: key=value (field ID or name; repeatable).
+        /// Values are checked against the screen's field types
+        #[arg(long = "field", value_parser = parse_field)]
+        fields: Vec<(String, serde_json::Value)>,
+
+        /// Resolution name or ID to set (shortcut for --field resolution=NAME)
+        #[arg(long)]
+        resolution: Option<String>,
+
+        /// Comment to add with the transition
+        #[arg(long)]
+        comment: Option<String>,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// List available transitions for an issue
@@ -481,9 +502,13 @@ enum IssuesCommand {
         /// Issue key (e.g. PROJ-123)
         key: String,
 
-        /// Account ID, "me" for yourself, or "none" to unassign
+        /// Username or account ID, e-mail address, "me" for yourself, or "none" to unassign
         #[arg(long)]
         assignee: String,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// List available issue link types
@@ -498,15 +523,23 @@ enum IssuesCommand {
         #[arg(long)]
         to: String,
 
-        /// Link type name (e.g. "Blocks", "Duplicate", "Relates")
+        /// Link type name or ID (e.g. "Blocks", "Duplicate", "Relates")
         #[arg(long, default_value = "Relates")]
         link_type: String,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Remove a link between issues by link ID
     Unlink {
         /// Link ID (shown in `issues show` output and JSON)
         link_id: String,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Log work (time) on an issue
@@ -525,6 +558,10 @@ enum IssuesCommand {
         /// When the work was started (ISO-8601, e.g. 2024-01-15T09:00:00.000+0000)
         #[arg(long)]
         started: Option<String>,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// List attachments on an issue
@@ -565,6 +602,10 @@ enum IssuesCommand {
     DeleteAttachment {
         /// Attachment ID (shown in `issues attachments` output)
         id: String,
+
+        /// Validate and print the normalized write plan without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Transition all issues matching a JQL query to a new status
@@ -576,6 +617,19 @@ enum IssuesCommand {
         /// Target status name or transition ID
         #[arg(long)]
         to: String,
+
+        /// Set a transition-screen field: key=value (field ID or name; repeatable).
+        /// Values are checked against the screen's field types
+        #[arg(long = "field", value_parser = parse_field)]
+        fields: Vec<(String, serde_json::Value)>,
+
+        /// Resolution name or ID to set (shortcut for --field resolution=NAME)
+        #[arg(long)]
+        resolution: Option<String>,
+
+        /// Comment to add with the transition
+        #[arg(long)]
+        comment: Option<String>,
 
         /// Preview without making any changes
         #[arg(long)]
@@ -592,7 +646,7 @@ enum IssuesCommand {
         #[arg(long)]
         jql: String,
 
-        /// Account ID, "me" for yourself, or "none" to unassign
+        /// Username or account ID, e-mail address, "me" for yourself, or "none" to unassign
         #[arg(long)]
         assignee: String,
 
@@ -1032,14 +1086,14 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 IssuesCommand::Create { dry_run: false, .. }
                     | IssuesCommand::Update { dry_run: false, .. }
                     | IssuesCommand::Move { dry_run: false, .. }
-                    | IssuesCommand::Comment { .. }
-                    | IssuesCommand::Transition { .. }
-                    | IssuesCommand::Assign { .. }
-                    | IssuesCommand::Link { .. }
-                    | IssuesCommand::Unlink { .. }
-                    | IssuesCommand::LogWork { .. }
+                    | IssuesCommand::Comment { dry_run: false, .. }
+                    | IssuesCommand::Transition { dry_run: false, .. }
+                    | IssuesCommand::Assign { dry_run: false, .. }
+                    | IssuesCommand::Link { dry_run: false, .. }
+                    | IssuesCommand::Unlink { dry_run: false, .. }
+                    | IssuesCommand::LogWork { dry_run: false, .. }
                     | IssuesCommand::Attach { dry_run: false, .. }
-                    | IssuesCommand::DeleteAttachment { .. }
+                    | IssuesCommand::DeleteAttachment { dry_run: false, .. }
                     | IssuesCommand::BulkTransition { dry_run: false, .. }
                     | IssuesCommand::BulkAssign { dry_run: false, .. }
             )
@@ -1264,30 +1318,48 @@ async fn dispatch(
             } => {
                 commands::issues::move_to_sprint(client, out, &key, &sprint, board, dry_run).await?
             }
-            IssuesCommand::Comment { key, body } => {
-                commands::issues::comment(client, out, &key, &body).await?
+            IssuesCommand::Comment { key, body, dry_run } => {
+                commands::issues::comment(client, out, &key, &body, dry_run).await?
             }
-            IssuesCommand::Transition { key, to } => {
-                commands::issues::transition(client, out, &key, &to).await?
+            IssuesCommand::Transition {
+                key,
+                to,
+                fields,
+                resolution,
+                comment,
+                dry_run,
+            } => {
+                let input = TransitionInput {
+                    resolution: resolution.as_deref(),
+                    comment: comment.as_deref(),
+                    fields: &fields,
+                };
+                commands::issues::transition(client, out, &key, &to, &input, dry_run).await?
             }
             IssuesCommand::ListTransitions { key } => {
                 commands::issues::list_transitions(client, out, &key).await?
             }
-            IssuesCommand::Assign { key, assignee } => {
-                commands::issues::assign(client, out, &key, &assignee).await?
-            }
+            IssuesCommand::Assign {
+                key,
+                assignee,
+                dry_run,
+            } => commands::issues::assign(client, out, &key, &assignee, dry_run).await?,
             IssuesCommand::LinkTypes => commands::issues::link_types(client, out).await?,
-            IssuesCommand::Link { key, to, link_type } => {
-                commands::issues::link(client, out, &key, &to, &link_type).await?
-            }
-            IssuesCommand::Unlink { link_id } => {
-                commands::issues::unlink(client, out, &link_id).await?
+            IssuesCommand::Link {
+                key,
+                to,
+                link_type,
+                dry_run,
+            } => commands::issues::link(client, out, &key, &to, &link_type, dry_run).await?,
+            IssuesCommand::Unlink { link_id, dry_run } => {
+                commands::issues::unlink(client, out, &link_id, dry_run).await?
             }
             IssuesCommand::LogWork {
                 key,
                 time,
                 comment,
                 started,
+                dry_run,
             } => {
                 commands::issues::log_work(
                     client,
@@ -1296,6 +1368,7 @@ async fn dispatch(
                     &time,
                     comment.as_deref(),
                     started.as_deref(),
+                    dry_run,
                 )
                 .await?
             }
@@ -1308,12 +1381,15 @@ async fn dispatch(
             IssuesCommand::DownloadAttachment { id, dir, force } => {
                 commands::issues::download_attachment(client, out, &id, &dir, force).await?
             }
-            IssuesCommand::DeleteAttachment { id } => {
-                commands::issues::delete_attachment(client, out, &id).await?
+            IssuesCommand::DeleteAttachment { id, dry_run } => {
+                commands::issues::delete_attachment(client, out, &id, dry_run).await?
             }
             IssuesCommand::BulkTransition {
                 jql,
                 to,
+                fields,
+                resolution,
+                comment,
                 dry_run,
                 yes,
             } => {
@@ -1323,7 +1399,12 @@ async fn dispatch(
                     )
                     .into());
                 }
-                commands::issues::bulk_transition(client, out, &jql, &to, dry_run).await?
+                let input = TransitionInput {
+                    resolution: resolution.as_deref(),
+                    comment: comment.as_deref(),
+                    fields: &fields,
+                };
+                commands::issues::bulk_transition(client, out, &jql, &to, &input, dry_run).await?
             }
             IssuesCommand::BulkAssign {
                 jql,
@@ -1797,7 +1878,9 @@ fn schema_json() -> serde_json::Value {
                 {"name": "issue", "type": "string"},
                 {"name": "transition", "type": "string"},
                 {"name": "status", "type": "string"},
-                {"name": "id", "type": "string"}
+                {"name": "id", "type": "string"},
+                {"name": "fields", "type": "object", "description": "Transition-screen fields that were set, keyed by field ID"},
+                {"name": "commentId", "type": "string", "nullable": true, "description": "Set when the comment had to be added separately because the screen has no comment field"}
             ]),
         ),
         (
@@ -1903,7 +1986,7 @@ fn schema_json() -> serde_json::Value {
                 {"name": "succeeded", "type": "integer", "description": "Always 0 on a --dry-run, which changes nothing"},
                 {"name": "failed", "type": "integer"},
                 {"name": "notAttempted", "type": "integer", "description":"Unprocessed issues after a session, rate limit, or connection failure"},
-                {"name": "ready", "type": "integer", "description":"Preview entries that passed available checks; bulk assign resolves the assignee but does not check per-issue assignability. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
+                {"name": "ready", "type": "integer", "description":"Preview entries that passed the same per-issue checks as the write. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
                 {"name": "issues", "type": "object[]", "description": "One entry per matched issue", "fields": [
                     {"name": "key", "type": "string"},
                     {"name": "status", "type": "string", "optional":true, "description":"Current status on a dry run"},
@@ -1912,10 +1995,13 @@ fn schema_json() -> serde_json::Value {
                     {"name": "from", "type": "string", "optional": true, "description": "Status before the transition; present only on a successful transition"},
                     {"name": "to", "type": "string", "optional": true},
                     {"name": "action", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
+                    {"name": "fields", "type": "object", "optional": true, "description": "Normalized transition-screen fields, keyed by field ID"},
+                    {"name": "commentId", "type": "string", "nullable": true, "optional": true, "description": "Present on a successful transition; set when the comment was added separately"},
+                    {"name": "warnings", "type": "string[]", "optional": true, "description": "Checks Jira could not answer for this issue"},
                     {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
                     {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"},
                     {"name": "errorKind", "type": "string", "optional": true},
-                    {"name": "phase", "type": "string", "optional":true, "description":"lookup or write, on failed requests"},
+                    {"name": "phase", "type": "string", "optional":true, "description":"lookup or write, on failed requests; comment when the transition was applied but its separate comment failed (do not retry the transition)"},
                     {"name": "outcome", "type": "string", "optional":true, "description":"failed or unknown; unknown means a write may have been applied, so inspect issue state before retrying"},
                     {"name": "retryable", "type": "boolean", "optional": true, "description":"Error category retryability; inspect issue state before retrying a write with an uncertain result"},
                     {"name": "errorDetails", "type": "object", "optional": true, "description":"Context whose keys depend on errorKind"},
@@ -1931,12 +2017,14 @@ fn schema_json() -> serde_json::Value {
                 {"name": "succeeded", "type": "integer", "description": "Always 0 on a --dry-run, which changes nothing"},
                 {"name": "failed", "type": "integer"},
                 {"name": "notAttempted", "type": "integer", "description":"Unprocessed issues after a session, rate limit, or connection failure"},
-                {"name": "ready", "type": "integer", "description":"Preview entries that passed available checks; bulk assign resolves the assignee but does not check per-issue assignability. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
+                {"name": "ready", "type": "integer", "description":"Preview entries that passed the same per-issue checks as the write. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
                 {"name": "issues", "type": "object[]", "description": "One entry per matched issue", "fields": [
                     {"name": "key", "type": "string"},
                     {"name": "currentAssignee", "type": "string", "nullable": true, "optional": true, "description": "Present only on a --dry-run entry; null when the issue is unassigned"},
                     {"name": "action", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
                     {"name": "to", "type": "string", "optional": true},
+                    {"name": "accountId", "type": "string", "nullable": true, "optional": true, "description": "Resolved user on a --dry-run entry; null to unassign"},
+                    {"name": "warnings", "type": "string[]", "optional": true, "description": "Checks Jira could not answer for this issue; --dry-run only"},
                     {"name": "assignee", "type": "string", "optional": true, "description": "Present only on a successful assignment"},
                     {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
                     {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"},
@@ -2560,11 +2648,14 @@ fn walk_commands(
                 "arg":"--dry-run", "effects":"read_only", "output_fields":write_preview_fields(),
                 "description":"Uses the same normalization and preflight checks as the real write; no issue or sprint writes are sent. Server-only validators may still reject a later write."
             }));
-        } else if base_path == "issues attach" {
-            entry.insert("x-dry-run".into(), serde_json::json!({
-                "arg":"--dry-run", "effects":"read_only", "output_fields":attach_preview_fields(),
-                "description":"Confirms the issue exists, every file is readable, and each file fits the site's upload limit; nothing is uploaded."
-            }));
+        } else if let Some((fields, description)) = single_preview(&base_path) {
+            entry.insert(
+                "x-dry-run".into(),
+                serde_json::json!({
+                    "arg":"--dry-run", "effects":"read_only", "output_fields":fields,
+                    "description":description
+                }),
+            );
         } else if matches!(
             base_path.as_str(),
             "issues bulk-transition" | "issues bulk-assign"
@@ -2668,20 +2759,103 @@ fn write_preview_fields() -> serde_json::Value {
     fields
 }
 
-fn attach_preview_fields() -> serde_json::Value {
-    let mut fields = serde_json::json!([
-        {"name":"dryRun","type":"boolean"},
-        {"name":"operation","type":"string"},
-        {"name":"key","type":"string"},
-        {"name":"files","type":"object[]","fields":[
-            {"name":"filename","type":"string"},
-            {"name":"size","type":"integer","description":"Size in bytes"},
-            {"name":"mimeType","type":"string"}
-        ]},
-        {"name":"warnings","type":"string[]"}
-    ]);
-    normalize_output_fields(fields.as_array_mut().unwrap());
-    fields
+/// The `--dry-run` preview of a single-issue write: its output fields and
+/// what it checks. Every preview also carries `dryRun`, `operation` and
+/// `warnings` (checks Jira could not answer).
+fn single_preview(command: &str) -> Option<(serde_json::Value, &'static str)> {
+    let (fields, description) = match command {
+        "issues comment" => (
+            serde_json::json!([
+                {"name":"key","type":"string"},
+                {"name":"body","type":"string"}
+            ]),
+            "Checks the issue exists, the body is not empty and you may comment; nothing is posted.",
+        ),
+        "issues transition" => (
+            serde_json::json!([
+                {"name":"key","type":"string"},
+                {"name":"transition","type":"object","fields":[
+                    {"name":"id","type":"string"},{"name":"name","type":"string"}
+                ]},
+                {"name":"status","type":"string","description":"Status the issue would move to"},
+                {"name":"fields","type":"object","description":"Normalized transition-screen fields; keys are field IDs"},
+                {"name":"comment","type":"string","nullable":true}
+            ]),
+            "Resolves the transition and checks --field, --resolution and --comment against its screen, including required fields the issue lacks; nothing is transitioned.",
+        ),
+        "issues assign" => (
+            serde_json::json!([
+                {"name":"key","type":"string"},
+                {"name":"accountId","type":"string","nullable":true,"description":"Resolved user; null to unassign"},
+                {"name":"currentAssignee","type":"string","nullable":true,"description":"Display name of the current assignee; null when unassigned"}
+            ]),
+            "Resolves the user (me, e-mail, username or account ID) and checks the assign permission and that the user is assignable; nothing is assigned.",
+        ),
+        "issues link" => (
+            serde_json::json!([
+                {"name":"from","type":"string"},
+                {"name":"to","type":"string"},
+                {"name":"type","type":"object","fields":[
+                    {"name":"id","type":"string"},{"name":"name","type":"string"},
+                    {"name":"inward","type":"string"},{"name":"outward","type":"string"}
+                ]},
+                {"name":"description","type":"string","description":"How Jira will read the link, e.g. \"PROJ-1 blocks PROJ-2\""}
+            ]),
+            "Checks both issues exist, resolves the link type and checks the link permission; no link is created.",
+        ),
+        "issues unlink" => (
+            serde_json::json!([
+                {"name":"linkId","type":"string"},
+                {"name":"type","type":"string","nullable":true},
+                {"name":"inwardIssue","type":"string","nullable":true},
+                {"name":"outwardIssue","type":"string","nullable":true},
+                {"name":"description","type":"string"}
+            ]),
+            "Fetches the link and checks the link permission; nothing is removed.",
+        ),
+        "issues log-work" => (
+            serde_json::json!([
+                {"name":"key","type":"string"},
+                {"name":"timeSpent","type":"string","description":"Checked duration, e.g. \"2h 30m\""},
+                {"name":"started","type":"string","nullable":true,"description":"In Jira's yyyy-MM-ddTHH:mm:ss.SSSZ form"},
+                {"name":"comment","type":"string","nullable":true}
+            ]),
+            "Checks the duration and start time, that the issue exists, the work-on permission and that time tracking is enabled; no work is logged.",
+        ),
+        "issues attach" => (
+            serde_json::json!([
+                {"name":"key","type":"string"},
+                {"name":"files","type":"object[]","fields":[
+                    {"name":"filename","type":"string"},
+                    {"name":"size","type":"integer","description":"Size in bytes"},
+                    {"name":"mimeType","type":"string"}
+                ]}
+            ]),
+            "Confirms the issue exists, every file is readable, and each file fits the site's upload limit; nothing is uploaded.",
+        ),
+        "issues delete-attachment" => (
+            serde_json::json!([
+                {"name":"attachment","type":"object","description":"The attachment that would be deleted, as `issues attachments` lists it","fields":[
+                    {"name":"id","type":"string"},
+                    {"name":"filename","type":"string"},
+                    {"name":"size","type":"integer","description":"Size in bytes"},
+                    {"name":"mimeType","type":"string","nullable":true},
+                    {"name":"author","type":"string","nullable":true},
+                    {"name":"created","type":"string"}
+                ]}
+            ]),
+            "Fetches the attachment so you can confirm it is the right one; nothing is deleted.",
+        ),
+        _ => return None,
+    };
+    let mut all = vec![
+        serde_json::json!({"name":"dryRun","type":"boolean"}),
+        serde_json::json!({"name":"operation","type":"string"}),
+    ];
+    all.extend(fields.as_array().into_iter().flatten().cloned());
+    all.push(serde_json::json!({"name":"warnings","type":"string[]"}));
+    normalize_output_fields(&mut all);
+    Some((serde_json::Value::Array(all), description))
 }
 
 fn handle_completions(

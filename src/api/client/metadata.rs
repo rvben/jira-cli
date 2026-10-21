@@ -5,8 +5,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+mod transition;
 mod type_change;
 mod validation;
+pub use transition::{PreparedTransition, TransitionInput};
 use validation::{
     UserCardinality, normalize_field_values, normalize_named_arrays, user_field, validate_required,
 };
@@ -442,39 +444,7 @@ impl JiraClient {
         input: &str,
         myself: &mut Option<String>,
     ) -> Result<Value, ApiError> {
-        let input = input.trim();
-        let id = if input.eq_ignore_ascii_case("me") {
-            match myself {
-                Some(id) => id.clone(),
-                None => myself.insert(self.get_myself().await?.account_id).clone(),
-            }
-        } else if input.contains('@') {
-            let matches = self
-                .search_users(input)
-                .await?
-                .into_iter()
-                .filter(|u| {
-                    u.email_address
-                        .as_deref()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(input))
-                })
-                .collect::<Vec<_>>();
-            match matches.as_slice() {
-                [user] => user.account_id.clone(),
-                [] => {
-                    return Err(ApiError::InvalidInput(format!(
-                        "No Jira user has the e-mail address {input:?}; pass the username or account ID instead (see `jira users search`)"
-                    )));
-                }
-                _ => {
-                    return Err(ApiError::InvalidInput(format!(
-                        "Several Jira users share the e-mail address {input:?}; pass the username or account ID instead (see `jira users search`)"
-                    )));
-                }
-            }
-        } else {
-            input.to_owned()
-        };
+        let id = self.resolve_user(input, myself).await?;
         Ok(self.assignee_payload(&id))
     }
 
@@ -808,13 +778,13 @@ fn normalize_priority(
 /// Prefer an exact name/ID, then case-insensitive names, then a unique label
 /// with a numeric rank removed, then prefixes. Never guess between ties.
 #[derive(Clone, Copy, PartialEq)]
-enum OptionMatch {
+pub(super) enum OptionMatch {
     NameOrId,
     Prefix,
     Priority,
 }
 
-fn match_option(
+pub(super) fn match_option(
     field: &str,
     input: &str,
     options: &[Value],

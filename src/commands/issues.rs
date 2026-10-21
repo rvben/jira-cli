@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use owo_colors::OwoColorize;
 
 use crate::api::{
-    ApiError, Attachment, Issue, IssueDraft, IssueLink, IssueUpdate, JiraClient, UserField,
-    Version, escape_jql,
+    ApiError, Attachment, Issue, IssueDraft, IssueLink, IssueUpdate, JiraClient, TransitionInput,
+    UserField, Version, escape_jql,
 };
 use crate::output::{OutputConfig, use_color};
 
@@ -583,12 +583,42 @@ fn validate_writable_sprint(sprint: &crate::api::Sprint) -> Result<(), ApiError>
     Ok(())
 }
 
+/// Print a `--dry-run` result: the JSON preview with `dryRun: true`, or the
+/// summary followed by any warnings.
+fn print_dry_run(out: &OutputConfig, mut preview: serde_json::Value, summary: &str) {
+    preview["dryRun"] = serde_json::json!(true);
+    let mut text = format!("Dry run: no changes made.\n{summary}");
+    for warning in preview["warnings"].as_array().into_iter().flatten() {
+        if let Some(warning) = warning.as_str() {
+            text.push_str(&format!("\nWarning: {warning}"));
+        }
+    }
+    out.print_result(&preview, &text);
+}
+
+/// Report preflight warnings on stderr before a write proceeds.
+pub(super) fn warn_all(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("Warning: {warning}");
+    }
+}
+
 pub async fn comment(
     client: &JiraClient,
     out: &OutputConfig,
     key: &str,
     body: &str,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    if dry_run {
+        let warnings = client.preview_comment(key, body).await?;
+        print_dry_run(
+            out,
+            serde_json::json!({"operation": "comment", "key": key, "body": body, "warnings": warnings}),
+            &format!("Would comment on {key}:\n{body}"),
+        );
+        return Ok(());
+    }
     let c = client.add_comment(key, body).await?;
     let url = client.browse_url(key);
     out.print_result(
@@ -609,16 +639,43 @@ pub async fn transition(
     out: &OutputConfig,
     key: &str,
     to: &str,
+    input: &TransitionInput<'_>,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
     let available = client.get_transitions(key).await?;
     let selected = transitions::resolve(key, to, &available)?;
-    client.do_transition(key, &selected.id).await?;
+    let prepared = client.prepare_transition(key, selected, input).await?;
     let status = selected
         .to
         .as_ref()
         .map_or(selected.name.as_str(), |s| s.name.as_str());
+    if dry_run {
+        print_dry_run(
+            out,
+            serde_json::json!({
+                "operation": "transition",
+                "key": key,
+                "transition": {"id": selected.id, "name": selected.name},
+                "status": status,
+                "fields": prepared.fields,
+                "comment": input.comment,
+                "warnings": prepared.warnings,
+            }),
+            &format!("Would transition {key} to {status} via {:?}", selected.name),
+        );
+        return Ok(());
+    }
+    warn_all(&prepared.warnings);
+    let comment = client.transition_issue(key, &prepared).await?;
     out.print_result(
-        &serde_json::json!({"issue": key, "transition": selected.name, "status": status, "id": selected.id}),
+        &serde_json::json!({
+            "issue": key,
+            "transition": selected.name,
+            "status": status,
+            "id": selected.id,
+            "fields": prepared.fields,
+            "commentId": comment.map(|c| c.id),
+        }),
         &format!("Transitioned {key} to {status}"),
     );
     Ok(())
@@ -653,11 +710,28 @@ pub async fn assign(
     out: &OutputConfig,
     key: &str,
     assignee: &str,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
-    let account_id = if assignee == "me" {
-        let me = client.get_myself().await?;
-        me.account_id
-    } else if assignee == "none" || assignee == "unassign" {
+    let account_id = resolve_assignee_arg(client, Some(assignee))
+        .await?
+        .flatten();
+    if dry_run {
+        let (current, warnings) = client.preview_assign(key, account_id.as_deref()).await?;
+        let target = account_id.as_deref().unwrap_or("nobody");
+        print_dry_run(
+            out,
+            serde_json::json!({
+                "operation": "assign",
+                "key": key,
+                "accountId": account_id,
+                "currentAssignee": current,
+                "warnings": warnings,
+            }),
+            &format!("Would assign {key} to {target}"),
+        );
+        return Ok(());
+    }
+    let Some(account_id) = account_id else {
         client.assign_issue(key, None).await?;
         out.print_result(
             // Both paths emit the same keys. A null `accountId` is the unassigned
@@ -667,8 +741,6 @@ pub async fn assign(
             &format!("Unassigned {key}"),
         );
         return Ok(());
-    } else {
-        assignee.to_string()
     };
 
     client.assign_issue(key, Some(&account_id)).await?;
@@ -717,15 +789,44 @@ pub async fn link(
     from_key: &str,
     to_key: &str,
     link_type: &str,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
-    client.link_issues(from_key, to_key, link_type).await?;
+    if dry_run {
+        let (link_type, warnings) = client.preview_link(from_key, to_key, link_type).await?;
+        let description = format!("{from_key} {} {to_key}", link_type.outward);
+        print_dry_run(
+            out,
+            serde_json::json!({
+                "operation": "link",
+                "from": from_key,
+                "to": to_key,
+                "type": {
+                    "id": link_type.id,
+                    "name": link_type.name,
+                    "inward": link_type.inward,
+                    "outward": link_type.outward,
+                },
+                "description": description,
+                "warnings": warnings,
+            }),
+            &format!("Would link: {description} ({})", link_type.name),
+        );
+        return Ok(());
+    }
+    let link_type = client.resolve_link_type(link_type).await?;
+    client
+        .link_issues(from_key, to_key, &link_type.name)
+        .await?;
     out.print_result(
         &serde_json::json!({
             "from": from_key,
             "to": to_key,
-            "type": link_type,
+            "type": link_type.name,
         }),
-        &format!("Linked {from_key} → {to_key} ({link_type})"),
+        &format!(
+            "Linked: {from_key} {} {to_key} ({})",
+            link_type.outward, link_type.name
+        ),
     );
     Ok(())
 }
@@ -735,7 +836,29 @@ pub async fn unlink(
     client: &JiraClient,
     out: &OutputConfig,
     link_id: &str,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    if dry_run {
+        let (link, warnings) = client.preview_unlink(link_id).await?;
+        let inward = link["inwardIssue"]["key"].as_str().unwrap_or("?");
+        let outward = link["outwardIssue"]["key"].as_str().unwrap_or("?");
+        let phrase = link["type"]["outward"].as_str().unwrap_or("is linked to");
+        let description = format!("{inward} {phrase} {outward}");
+        print_dry_run(
+            out,
+            serde_json::json!({
+                "operation": "unlink",
+                "linkId": link_id,
+                "type": link["type"]["name"],
+                "inwardIssue": link["inwardIssue"]["key"],
+                "outwardIssue": link["outwardIssue"]["key"],
+                "description": description,
+                "warnings": warnings,
+            }),
+            &format!("Would remove link {link_id}: {description}"),
+        );
+        return Ok(());
+    }
     client.unlink_issues(link_id).await?;
     out.print_result(
         &serde_json::json!({ "linkId": link_id }),
@@ -752,7 +875,25 @@ pub async fn log_work(
     time_spent: &str,
     comment: Option<&str>,
     started: Option<&str>,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    if dry_run {
+        let (time_spent, started) = crate::api::client::worklog_input(time_spent, started)?;
+        let warnings = client.preview_worklog(key).await?;
+        print_dry_run(
+            out,
+            serde_json::json!({
+                "operation": "log-work",
+                "key": key,
+                "timeSpent": time_spent,
+                "started": started,
+                "comment": comment,
+                "warnings": warnings,
+            }),
+            &format!("Would log {time_spent} on {key}"),
+        );
+        return Ok(());
+    }
     let entry = client.log_work(key, time_spent, comment, started).await?;
     out.print_result(
         &serde_json::json!({
@@ -842,9 +983,9 @@ pub async fn attach(
     if dry_run {
         let (files, warnings) = client.preview_attachments(key, files).await?;
         let names: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
-        out.print_result(
-            &serde_json::json!({
-                "dryRun": true,
+        print_dry_run(
+            out,
+            serde_json::json!({
                 "operation": "attach",
                 "key": key,
                 "files": files.iter().map(|f| serde_json::json!({
@@ -919,7 +1060,26 @@ pub async fn delete_attachment(
     client: &JiraClient,
     out: &OutputConfig,
     id: &str,
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    if dry_run {
+        let a = client.get_attachment(id).await?;
+        print_dry_run(
+            out,
+            serde_json::json!({
+                "operation": "delete-attachment",
+                "attachment": attachment_to_json(&a),
+                "warnings": [],
+            }),
+            &format!(
+                "Would delete attachment {id}: {} ({}, by {})",
+                a.filename,
+                format_size(a.size),
+                a.author()
+            ),
+        );
+        return Ok(());
+    }
     client.delete_attachment(id).await?;
     out.print_result(
         &serde_json::json!({ "id": id, "deleted": true }),
@@ -1574,20 +1734,22 @@ fn resolve_terminal_width(tty_width: Option<usize>, columns: Option<usize>) -> u
 ///
 /// `--assignee me` triggers a `GET /myself` round-trip to fetch the current user's account ID.
 /// `--assignee none` or `unassign` returns `Some(None)` (the unassign sentinel).
-/// `--assignee <id>` returns `Some(Some(id))` (set to the literal account ID).
+/// `--assignee <e-mail>` looks the user up by exact e-mail address.
+/// `--assignee <id>` returns `Some(Some(id))` (set to the literal username or account ID).
 /// `None` (flag absent) returns `None` (keep the create default or existing assignee).
+fn is_unassign(input: &str) -> bool {
+    let input = input.trim();
+    input.eq_ignore_ascii_case("none") || input.eq_ignore_ascii_case("unassign")
+}
+
 pub async fn resolve_assignee_arg(
     client: &JiraClient,
     arg: Option<&str>,
 ) -> Result<Option<Option<String>>, ApiError> {
     match arg {
         None => Ok(None),
-        Some("none" | "unassign") => Ok(Some(None)),
-        Some("me") => {
-            let me = client.get_myself().await?;
-            Ok(Some(Some(me.account_id)))
-        }
-        Some(id) => Ok(Some(Some(id.to_string()))),
+        Some(input) if is_unassign(input) => Ok(Some(None)),
+        Some(input) => client.resolve_user_id(input).await.map(|id| Some(Some(id))),
     }
 }
 

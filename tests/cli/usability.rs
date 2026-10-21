@@ -1093,6 +1093,13 @@ fn every_preview_contract_has_a_conformance_test() {
         "issues bulk-assign",
         "issues bulk-transition",
         "issues attach",
+        "issues comment",
+        "issues assign",
+        "issues link",
+        "issues unlink",
+        "issues log-work",
+        "issues delete-attachment",
+        "issues transition",
     ]
     .into_iter()
     .collect();
@@ -1563,4 +1570,616 @@ async fn attach_preview_checks_issue_files_and_limit_without_uploading() {
             "a preview never uploads"
         );
     }
+}
+
+async fn grant(server: &MockServer, permission: &str, allowed: bool) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/mypermissions"))
+        .and(query_param("permissions", permission))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"permissions":{permission:{"havePermission":allowed}}})),
+        )
+        .mount(server)
+        .await;
+}
+
+async fn issue_exists(server: &MockServer, key: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/3/issue/{key}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"key":key,
+            "fields":{"project":{"key":"PROJ"},"assignee":{"accountId":"old-1","displayName":"Old Owner"}}})))
+        .mount(server)
+        .await;
+}
+
+/// Whether every request so far was a read (searches are POSTs that read).
+async fn only_reads(server: &MockServer) -> bool {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.method == "GET" || r.url.path().ends_with("/search/jql"))
+}
+
+#[tokio::test]
+async fn comment_preview_checks_permission_and_empty_bodies() {
+    let server = MockServer::start().await;
+    issue_exists(&server, "PROJ-1").await;
+    grant(&server, "ADD_COMMENTS", true).await;
+    let preview = parse_success(run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "comment",
+            "PROJ-1",
+            "--body",
+            "Looks good",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(preview["dryRun"], true);
+    assert_eq!(preview["operation"], "comment");
+    assert_eq!(preview["body"], "Looks good");
+    assert_preview_schema("issues comment", &preview);
+
+    let empty = run_jira_against_read_only(
+        &server,
+        &["issues", "comment", "PROJ-1", "--body", "  ", "--dry-run"],
+    );
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("must not be empty"));
+
+    server.reset().await;
+    issue_exists(&server, "PROJ-1").await;
+    grant(&server, "ADD_COMMENTS", false).await;
+    let denied = run_jira_against_read_only(
+        &server,
+        &["issues", "comment", "PROJ-1", "--body", "Hi", "--dry-run"],
+    );
+    assert!(!denied.status.success());
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("lack permission to comment on PROJ-1")
+    );
+    assert!(only_reads(&server).await);
+}
+
+async fn user_by_email(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/user/search"))
+        .and(query_param("query", "nobody@example.com"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/user/search"))
+        .and(query_param("query", "jdoe@example.com"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"accountId":"acc-2","displayName":"J Doe Junior","emailAddress":"jdoe.jr@example.com"},
+            {"accountId":"acc-1","displayName":"J Doe","emailAddress":"JDoe@example.com"}
+        ])))
+        .mount(server)
+        .await;
+}
+
+async fn assignable(server: &MockServer, users: Value) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/user/assignable/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(users))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn assign_resolves_email_addresses_and_previews_assignability() {
+    let server = MockServer::start().await;
+    issue_exists(&server, "PROJ-1").await;
+    user_by_email(&server).await;
+    grant(&server, "ASSIGN_ISSUES", true).await;
+    assignable(
+        &server,
+        json!([{"accountId":"acc-1","displayName":"J Doe"}]),
+    )
+    .await;
+    let preview = parse_success(run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "assign",
+            "PROJ-1",
+            "--assignee",
+            "jdoe@example.com",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(preview["accountId"], "acc-1");
+    assert_eq!(preview["currentAssignee"], "Old Owner");
+    assert_eq!(preview["warnings"], json!([]));
+    assert_preview_schema("issues assign", &preview);
+    assert!(only_reads(&server).await);
+
+    Mock::given(method("PUT"))
+        .and(path("/rest/api/3/issue/PROJ-1/assignee"))
+        .and(body_json(json!({"accountId":"acc-1"})))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let assigned = parse_success(run_jira_against(
+        &server,
+        &[
+            "issues",
+            "assign",
+            "PROJ-1",
+            "--assignee",
+            "jdoe@example.com",
+        ],
+    ));
+    assert_eq!(assigned["accountId"], "acc-1");
+
+    let unknown = run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "assign",
+            "PROJ-1",
+            "--assignee",
+            "nobody@example.com",
+            "--dry-run",
+        ],
+    );
+    assert!(!unknown.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("No Jira user has the e-mail address")
+    );
+}
+
+#[tokio::test]
+async fn assign_preview_rejects_users_who_cannot_be_assigned() {
+    let server = MockServer::start().await;
+    issue_exists(&server, "PROJ-1").await;
+    grant(&server, "ASSIGN_ISSUES", true).await;
+    assignable(&server, json!([])).await;
+    let output = run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "assign",
+            "PROJ-1",
+            "--assignee",
+            "acc-9",
+            "--dry-run",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not an assignable user"));
+}
+
+#[tokio::test]
+async fn bulk_assign_preview_checks_each_issue_for_assignability() {
+    let server = MockServer::start().await;
+    search_issues(&server, 2).await;
+    grant(&server, "ASSIGN_ISSUES", true).await;
+    assignable(&server, json!([])).await;
+    let output = run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "bulk-assign",
+            "--jql",
+            "project = PROJ",
+            "--assignee",
+            "acc-9",
+            "--dry-run",
+        ],
+    );
+    assert!(!output.status.success());
+    let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["failed"], 2);
+    assert_eq!(summary["issues"][0]["phase"], "lookup");
+    assert!(
+        summary["issues"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not an assignable user")
+    );
+    assert!(only_reads(&server).await);
+}
+
+async fn link_types(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issueLinkType"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"issueLinkTypes":[
+                {"id":"10000","name":"Blocks","inward":"is blocked by","outward":"blocks"},
+                {"id":"10001","name":"Relates","inward":"relates to","outward":"relates to"}
+            ]})),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn link_preview_resolves_the_type_and_the_write_uses_its_canonical_name() {
+    let server = MockServer::start().await;
+    issue_exists(&server, "PROJ-1").await;
+    issue_exists(&server, "PROJ-2").await;
+    link_types(&server).await;
+    grant(&server, "LINK_ISSUES", true).await;
+    let preview = parse_success(run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "link",
+            "PROJ-1",
+            "--to",
+            "PROJ-2",
+            "--link-type",
+            "blocks",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(preview["type"]["name"], "Blocks");
+    assert_eq!(preview["description"], "PROJ-1 blocks PROJ-2");
+    assert_preview_schema("issues link", &preview);
+    assert!(only_reads(&server).await);
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issueLink"))
+        .and(body_json(json!({"type":{"name":"Blocks"},
+            "inwardIssue":{"key":"PROJ-1"},"outwardIssue":{"key":"PROJ-2"}})))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let linked = parse_success(run_jira_against(
+        &server,
+        &[
+            "issues",
+            "link",
+            "PROJ-1",
+            "--to",
+            "PROJ-2",
+            "--link-type",
+            "10000",
+        ],
+    ));
+    assert_eq!(linked["type"], "Blocks");
+
+    for (args, error) in [
+        (["PROJ-1", "PROJ-1", "Blocks"], "to itself"),
+        (["PROJ-1", "PROJ-2", "Duplicates"], "Duplicates"),
+    ] {
+        let output = run_jira_against_read_only(
+            &server,
+            &[
+                "issues",
+                "link",
+                args[0],
+                "--to",
+                args[1],
+                "--link-type",
+                args[2],
+                "--dry-run",
+            ],
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unlink_preview_describes_the_link_it_would_remove() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issueLink/10055"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id":"10055",
+            "type":{"name":"Blocks","inward":"is blocked by","outward":"blocks"},
+            "inwardIssue":{"key":"PROJ-1"},"outwardIssue":{"key":"PROJ-2"}})),
+        )
+        .mount(&server)
+        .await;
+    grant(&server, "LINK_ISSUES", true).await;
+    let preview = parse_success(run_jira_against_read_only(
+        &server,
+        &["issues", "unlink", "10055", "--dry-run"],
+    ));
+    assert_eq!(preview["linkId"], "10055");
+    assert_eq!(preview["description"], "PROJ-1 blocks PROJ-2");
+    assert_preview_schema("issues unlink", &preview);
+
+    let bad = run_jira_against_read_only(&server, &["issues", "unlink", "10/../1", "--dry-run"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("Invalid link ID"));
+    assert!(only_reads(&server).await);
+}
+
+#[tokio::test]
+async fn log_work_checks_duration_and_start_time_before_any_request() {
+    let server = MockServer::start().await;
+    issue_exists(&server, "PROJ-1").await;
+    grant(&server, "WORK_ON_ISSUES", true).await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"timeTrackingEnabled":true})))
+        .mount(&server)
+        .await;
+    let preview = parse_success(run_jira_against_read_only(
+        &server,
+        &[
+            "issues",
+            "log-work",
+            "PROJ-1",
+            "--time",
+            "2h30m",
+            "--started",
+            "2024-01-15T09:00+01:00",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(preview["timeSpent"], "2h 30m");
+    assert_eq!(preview["started"], "2024-01-15T09:00:00.000+0100");
+    assert_preview_schema("issues log-work", &preview);
+
+    let before = server.received_requests().await.unwrap().len();
+    for (time, started, error) in [
+        ("2 hours", None, "Invalid time"),
+        ("1h", Some("2024-01-15T09:00:00"), "time zone"),
+    ] {
+        let mut args = vec!["issues", "log-work", "PROJ-1", "--time", time];
+        if let Some(started) = started {
+            args.extend(["--started", started]);
+        }
+        let output = run_jira_against(&server, &args);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        before,
+        "invalid input is rejected locally"
+    );
+    assert!(only_reads(&server).await);
+}
+
+#[tokio::test]
+async fn delete_attachment_preview_shows_the_attachment() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/attachment/10100"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id":"10100",
+            "filename":"notes.txt","size":5,"mimeType":"text/plain",
+            "author":{"accountId":"acc-1","displayName":"J Doe"},
+            "created":"2024-01-15T09:00:00.000+0000"})),
+        )
+        .mount(&server)
+        .await;
+    let preview = parse_success(run_jira_against_read_only(
+        &server,
+        &["issues", "delete-attachment", "10100", "--dry-run"],
+    ));
+    assert_eq!(preview["attachment"]["filename"], "notes.txt");
+    assert_eq!(preview["attachment"]["author"], "J Doe");
+    assert_preview_schema("issues delete-attachment", &preview);
+    assert!(only_reads(&server).await);
+}
+
+fn done_with_screen(comment_on_screen: bool) -> Value {
+    let mut fields = json!({
+        "resolution": {"name":"Resolution","required":true,"schema":{"type":"resolution","system":"resolution"},
+            "allowedValues":[{"id":"1","name":"Fixed"},{"id":"2","name":"Won't Fix"}]},
+        "customfield_10050": {"name":"Root cause","required":false,"schema":{"type":"string","custom":"com.atlassian.jira.plugin.system.customfieldtypes:textarea"}}
+    });
+    if comment_on_screen {
+        fields["comment"] = json!({"name":"Comment","required":false,"schema":{"type":"comments-page","system":"comment"}});
+    }
+    json!([{"id":"31","name":"Done","to":{"name":"Done"},"fields":fields},
+           {"id":"21","name":"Start","to":{"name":"In Progress"},"fields":{}}])
+}
+
+#[tokio::test]
+async fn transition_sends_screen_fields_resolution_and_comment_in_one_request() {
+    let server = MockServer::start().await;
+    transitions(&server, "PROJ-1", done_with_screen(true)).await;
+    let args = [
+        "issues",
+        "transition",
+        "PROJ-1",
+        "--to",
+        "Done",
+        "--resolution",
+        "fixed",
+        "--field",
+        "Root cause=Race in the cache",
+        "--comment",
+        "Shipped in 1.2",
+    ];
+    let mut preview_args = args.to_vec();
+    preview_args.push("--dry-run");
+    let preview = parse_success(run_jira_against_read_only(&server, &preview_args));
+    assert_eq!(preview["transition"], json!({"id":"31","name":"Done"}));
+    assert_eq!(preview["status"], "Done");
+    assert_eq!(
+        preview["fields"]["customfield_10050"]["type"], "doc",
+        "a textarea on Cloud takes rich text"
+    );
+    assert_eq!(preview["comment"], "Shipped in 1.2");
+    assert_preview_schema("issues transition", &preview);
+    assert!(only_reads(&server).await);
+
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = parse_success(run_jira_against(&server, &args));
+    assert_eq!(result["fields"], preview["fields"]);
+    assert_eq!(result["commentId"], Value::Null);
+    let requests = server.received_requests().await.unwrap();
+    let post = requests.iter().find(|r| r.method == "POST").unwrap();
+    let body: Value = serde_json::from_slice(&post.body).unwrap();
+    assert_eq!(body["transition"], json!({"id":"31"}));
+    assert_eq!(body["fields"], preview["fields"]);
+    assert!(
+        body["update"]["comment"][0]["add"]["body"].is_object(),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn transition_comment_without_a_screen_field_is_added_after_the_transition() {
+    let server = MockServer::start().await;
+    transitions(&server, "PROJ-1", done_with_screen(false)).await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/comment"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"777",
+            "author":{"accountId":"acc-1","displayName":"J Doe"},"created":"2024-01-15T09:00:00.000+0000",
+            "body":{"type":"doc","version":1,"content":[]}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "transition",
+            "PROJ-1",
+            "--to",
+            "Done",
+            "--resolution",
+            "Fixed",
+            "--comment",
+            "Shipped",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no comment field"));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["commentId"], "777");
+    let requests = server.received_requests().await.unwrap();
+    let posts: Vec<_> = requests.iter().filter(|r| r.method == "POST").collect();
+    assert!(
+        posts[0].url.path().ends_with("/transitions"),
+        "transition first"
+    );
+    let body: Value = serde_json::from_slice(&posts[0].body).unwrap();
+    assert!(body.get("update").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn transition_field_problems_are_reported_before_any_write() {
+    let server = MockServer::start().await;
+    transitions(&server, "PROJ-1", done_with_screen(true)).await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"fields":{"resolution":null}})),
+        )
+        .mount(&server)
+        .await;
+    let cases: [(&[&str], &str); 5] = [
+        (&["--to", "Done"], "resolution"),
+        (&["--to", "Done", "--resolution", "Duplicate"], "Duplicate"),
+        (
+            &[
+                "--to",
+                "Done",
+                "--resolution",
+                "Fixed",
+                "--field",
+                "Severity=high",
+            ],
+            "available: ",
+        ),
+        (&["--to", "Start", "--resolution", "Fixed"], "has no screen"),
+        (
+            &[
+                "--to",
+                "Done",
+                "--resolution",
+                "Fixed",
+                "--field",
+                "resolution=Fixed",
+            ],
+            "conflicts with --field resolution",
+        ),
+    ];
+    for (extra, error) in cases {
+        let mut args = vec!["issues", "transition", "PROJ-1"];
+        args.extend_from_slice(extra);
+        let output = run_jira_against(&server, &args);
+        assert!(!output.status.success(), "{extra:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(error), "{extra:?}: {stderr}");
+    }
+    assert!(only_reads(&server).await);
+}
+
+#[tokio::test]
+async fn bulk_transition_reports_a_failed_follow_up_comment_as_its_own_phase() {
+    let server = MockServer::start().await;
+    search_issues(&server, 1).await;
+    transitions(&server, "PROJ-1", done_with_screen(false)).await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/transitions"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/3/issue/PROJ-1/comment"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"errorMessages":["Comment rejected"]})),
+        )
+        .mount(&server)
+        .await;
+    let output = run_jira_against(
+        &server,
+        &[
+            "issues",
+            "bulk-transition",
+            "--jql",
+            "project = PROJ",
+            "--to",
+            "Done",
+            "--resolution",
+            "Fixed",
+            "--comment",
+            "Shipped",
+            "--yes",
+        ],
+    );
+    assert!(!output.status.success());
+    let summary: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+    let item = &summary["issues"][0];
+    assert_eq!(item["phase"], "comment");
+    assert_eq!(item["outcome"], "failed");
+    assert_eq!(item["errorDetails"]["transitioned"], true);
+    assert!(
+        item["error"]
+            .as_str()
+            .unwrap()
+            .contains("do not repeat the transition")
+    );
 }

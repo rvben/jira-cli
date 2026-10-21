@@ -2,7 +2,7 @@ pub mod client;
 pub mod scopes;
 pub mod types;
 
-pub use client::JiraClient;
+pub use client::{JiraClient, TransitionInput};
 pub use types::*;
 
 use std::fmt;

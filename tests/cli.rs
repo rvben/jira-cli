@@ -3006,6 +3006,22 @@ const OBJECTS_WITHOUT_A_DECLARED_SHAPE: &[(&str, &str)] = &[
         "context keys depend on the per-issue error kind",
     ),
     (
+        "issues transition.fields",
+        "field IDs depend on the workflow's transition screen",
+    ),
+    (
+        "issues transition.x-dry-run.fields",
+        "field IDs depend on the workflow's transition screen",
+    ),
+    (
+        "issues bulk-transition.issues.fields",
+        "field IDs depend on the workflow's transition screen",
+    ),
+    (
+        "issues bulk-transition.x-dry-run.issues.fields",
+        "field IDs depend on the workflow's transition screen",
+    ),
+    (
         "issues create-meta.fields",
         "field IDs and metadata definitions depend on the Jira create screen",
     ),

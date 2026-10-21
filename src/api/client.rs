@@ -12,8 +12,11 @@ use super::types::*;
 mod derived;
 mod hierarchy;
 mod metadata;
+mod preflight;
 mod sprints;
 mod story_points;
+mod worklog;
+pub use metadata::{PreparedTransition, TransitionInput};
 
 fn parse_issue_sprints(
     extra: &serde_json::Map<String, serde_json::Value>,
@@ -776,12 +779,13 @@ impl JiraClient {
         started: Option<&str>,
     ) -> Result<WorklogEntry, ApiError> {
         validate_issue_key(key)?;
+        let (time_spent, started) = worklog_input(time_spent, started)?;
         let mut payload = serde_json::json!({ "timeSpent": time_spent });
         if let Some(c) = comment {
             payload["comment"] = self.make_body(c);
         }
         if let Some(s) = started {
-            payload["started"] = serde_json::Value::String(s.to_string());
+            payload["started"] = serde_json::Value::String(s);
         }
         self.post(&format!("issue/{key}/worklog"), &payload).await
     }
@@ -789,14 +793,19 @@ impl JiraClient {
     /// Add a comment to an issue.
     pub async fn add_comment(&self, key: &str, body: &str) -> Result<Comment, ApiError> {
         validate_issue_key(key)?;
+        preflight::validate_comment(body)?;
         let payload = serde_json::json!({ "body": self.make_body(body) });
         self.post(&format!("issue/{key}/comment"), &payload).await
     }
 
-    /// List available transitions for an issue.
+    /// List available transitions for an issue, with their screen fields.
     pub async fn get_transitions(&self, key: &str) -> Result<Vec<Transition>, ApiError> {
         validate_issue_key(key)?;
-        let resp: TransitionsResponse = self.get(&format!("issue/{key}/transitions")).await?;
+        let resp: TransitionsResponse = self
+            .get(&format!(
+                "issue/{key}/transitions?expand=transitions.fields"
+            ))
+            .await?;
         Ok(resp.transitions)
     }
 
@@ -831,7 +840,7 @@ impl JiraClient {
     /// Build the assignee payload for the current API version.
     ///
     /// API v3 uses `accountId`; API v2 uses `name` (username).
-    fn assignee_payload(&self, id: &str) -> serde_json::Value {
+    pub(super) fn assignee_payload(&self, id: &str) -> serde_json::Value {
         if self.api_version >= 3 {
             serde_json::json!({ "accountId": id })
         } else {
@@ -1024,27 +1033,13 @@ impl JiraClient {
         let files = read_uploads(paths)?;
         self.issue_project(key).await?;
         let mut warnings = Vec::new();
-        let path = format!("mypermissions?issueKey={key}&permissions=CREATE_ATTACHMENTS");
-        match self.get::<serde_json::Value>(&path).await {
-            Ok(perms) => {
-                match perms["permissions"]["CREATE_ATTACHMENTS"]["havePermission"].as_bool() {
-                    Some(true) => {}
-                    Some(false) => {
-                        return Err(ApiError::InvalidInput(format!(
-                            "You lack permission to add attachments to {key}"
-                        )));
-                    }
-                    None => warnings.push(
-                        "Jira did not report the attachment permission; it could not be checked."
-                            .into(),
-                    ),
-                }
-            }
-            // Older servers reject the permission filter; that only means unknown.
-            Err(ApiError::NotFound(_) | ApiError::Api { status: 400, .. }) => warnings
-                .push("Your attachment permission is unavailable; it could not be checked.".into()),
-            Err(err) => return Err(err),
-        }
+        self.check_permission(
+            &[key],
+            "CREATE_ATTACHMENTS",
+            "add attachments to",
+            &mut warnings,
+        )
+        .await?;
         match self.get::<serde_json::Value>("attachment/meta").await {
             Ok(meta) => {
                 if meta["enabled"] == false {
@@ -1138,8 +1133,7 @@ impl JiraClient {
         link_type: &str,
     ) -> Result<(), ApiError> {
         self.ensure_writable()?;
-        validate_issue_key(from_key)?;
-        validate_issue_key(to_key)?;
+        preflight::validate_link_keys(from_key, to_key)?;
         let payload = serde_json::json!({
             "type": { "name": link_type },
             "inwardIssue": { "key": from_key },
@@ -1153,6 +1147,7 @@ impl JiraClient {
     /// Remove an issue link by its ID.
     pub async fn unlink_issues(&self, link_id: &str) -> Result<(), ApiError> {
         self.ensure_writable()?;
+        preflight::validate_link_id(link_id)?;
         let url = format!("{}/issueLink/{link_id}", self.base_url);
         self.send(self.http.delete(&url)).await?;
         Ok(())
@@ -1421,6 +1416,18 @@ fn validate_attachment_id(id: &str) -> Result<(), ApiError> {
 /// Percent-encode a string for use in a URL query parameter.
 ///
 /// Uses `%20` for spaces (not `+`) per standard URL encoding.
+/// Validate and normalise `log-work` input: the duration and the optional
+/// start time, in the forms Jira's worklog API accepts.
+pub fn worklog_input(
+    time_spent: &str,
+    started: Option<&str>,
+) -> Result<(String, Option<String>), ApiError> {
+    Ok((
+        worklog::normalize_duration(time_spent)?,
+        started.map(worklog::normalize_started).transpose()?,
+    ))
+}
+
 fn percent_encode(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len() * 2);
     for byte in s.bytes() {

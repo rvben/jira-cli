@@ -1,4 +1,4 @@
-.PHONY: build release test test-e2e lint fmt check clean install release-patch release-minor release-major jira-start jira-stop jira-wait jira-logs jira-reset jira-backup jira-restore
+.PHONY: build release nextest test test-e2e lint fmt check clean install release-patch release-minor release-major jira-start jira-stop jira-wait jira-logs jira-reset jira-backup jira-restore
 
 build:
 	cargo build
@@ -6,16 +6,23 @@ build:
 release:
 	cargo build --release
 
+# The test runner. Fail with the install command rather than cargo's
+# "no such command" when it is missing.
+nextest:
+	@cargo nextest --version >/dev/null 2>&1 || { \
+		echo "cargo-nextest is not installed; install it with: cargo install cargo-nextest --locked" >&2; \
+		exit 1; }
+
 # Every test target except e2e, which needs live Jira credentials. Selecting by
 # exclusion means a new test file is covered the moment it is added; naming the
 # included targets instead is how tests/cli.rs went unrun.
-test:
+test: nextest
 	cargo nextest run -E 'not binary(e2e)'
 
 # Run end-to-end tests against a real Jira instance.
 # Requires: JIRA_E2E_HOST, JIRA_E2E_EMAIL, JIRA_E2E_TOKEN
 # Optional: JIRA_E2E_PROJECT (default: TST)
-test-e2e:
+test-e2e: nextest
 	cargo nextest run --test e2e
 
 # --all-targets so test code is linted too. Without it clippy sees only the
