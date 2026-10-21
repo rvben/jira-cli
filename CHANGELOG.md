@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.20](https://github.com/rvben/jira-cli/compare/v0.4.19...v0.4.20) - 2026-10-21
+
+### Added
+
+- **tui**: ask for every required transition field the issue lacks ([e68c074](https://github.com/rvben/jira-cli/commit/e68c07414b0e3563d0427b026462f1b59ea7dbf0))
+- **issues**: show transition screen fields and ask for a resolution in the workbench ([33f4b75](https://github.com/rvben/jira-cli/commit/33f4b754bcb0327e28fa36fd04abad3e713d9cb1))
+- **issues**: check transition fields, resolve users everywhere and preview every write ([897d0ba](https://github.com/rvben/jira-cli/commit/897d0bafffc35dd2a77549d55f941a749dd666a9))
+- **issues**: check --field values by type and add attach --dry-run ([6f2f9ba](https://github.com/rvben/jira-cli/commit/6f2f9baaecec5e777b8eb5b4ddd790e5de667a15))
+
 ## [0.4.19](https://github.com/rvben/jira-cli/compare/v0.4.18...v0.4.19) - 2026-10-05
 
 ### Added
