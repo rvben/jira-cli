@@ -987,6 +987,7 @@ fn schema_arg_types_constraints_enums_defaults_and_previews_match_the_parser() {
         "issues move",
         "issues bulk-assign",
         "issues bulk-transition",
+        "issues attach",
     ] {
         assert_eq!(command(name)["x-dry-run"]["effects"], "read_only");
         assert!(
@@ -1091,6 +1092,7 @@ fn every_preview_contract_has_a_conformance_test() {
         "issues move",
         "issues bulk-assign",
         "issues bulk-transition",
+        "issues attach",
     ]
     .into_iter()
     .collect();
@@ -1485,5 +1487,80 @@ fn schema_omits_clap_generated_help_commands_and_flags() {
         for arg in command["args"].as_array().unwrap() {
             assert!(arg["name"] != "--help" && arg["name"] != "--version");
         }
+    }
+}
+
+#[tokio::test]
+async fn attach_preview_checks_issue_files_and_limit_without_uploading() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    for (limit, allowed, error) in [
+        (5, true, None),
+        (4, true, Some("up to 4 bytes")),
+        (
+            5,
+            false,
+            Some("lack permission to add attachments to PROJ-1"),
+        ),
+    ] {
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/mypermissions"))
+            .and(query_param("issueKey", "PROJ-1"))
+            .and(query_param("permissions", "CREATE_ATTACHMENTS"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"permissions":{"CREATE_ATTACHMENTS":{"havePermission":allowed}}}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"fields":{"project":{"key":"PROJ"}}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/attachment/meta"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"enabled":true,"uploadLimit":limit})),
+            )
+            .mount(&server)
+            .await;
+        let output = run_jira_against_read_only(
+            &server,
+            &[
+                "issues",
+                "attach",
+                "PROJ-1",
+                "--file",
+                file.to_str().unwrap(),
+                "--dry-run",
+            ],
+        );
+        if let Some(error) = error {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains(error));
+        } else {
+            let preview = parse_success(output);
+            assert_eq!(preview["files"][0]["filename"], "notes.txt");
+            assert_eq!(preview["files"][0]["size"], 5);
+            assert_eq!(preview["files"][0]["mimeType"], "text/plain");
+            assert_eq!(preview["warnings"], json!([]));
+            assert_preview_schema("issues attach", &preview);
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "GET"),
+            "a preview never uploads"
+        );
     }
 }

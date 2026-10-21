@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 
 mod type_change;
 mod validation;
-use validation::{normalize_named_arrays, validate_required};
+use validation::{
+    UserCardinality, normalize_field_values, normalize_named_arrays, user_field, validate_required,
+};
 
 pub(super) type Fields = BTreeMap<String, Value>;
 pub(super) const EPIC_LINK_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-epic-link";
@@ -397,6 +399,85 @@ impl JiraClient {
         Ok(())
     }
 
+    /// Raw `--field` user values are typed as a username or account ID, an
+    /// e-mail address, or `me`; Jira only accepts a user object. JSON objects
+    /// and nulls pass through untouched as the escape hatch.
+    async fn normalize_user_fields(
+        &self,
+        fields: &mut Value,
+        meta: Option<&Fields>,
+        custom: &[(String, Value)],
+    ) -> Result<(), ApiError> {
+        let mut myself = None;
+        for (id, _) in custom {
+            let Some(cardinality) = user_field(id, meta.and_then(|m| m.get(id))) else {
+                continue;
+            };
+            let value = match (cardinality, fields[id].take()) {
+                (UserCardinality::Single, Value::String(input)) => {
+                    self.user_value(&input, &mut myself).await?
+                }
+                (UserCardinality::Many, Value::String(input)) => {
+                    json!([self.user_value(&input, &mut myself).await?])
+                }
+                (UserCardinality::Many, Value::Array(items)) => {
+                    let mut users = Vec::with_capacity(items.len());
+                    for item in items {
+                        users.push(match item {
+                            Value::String(input) => self.user_value(&input, &mut myself).await?,
+                            other => other,
+                        });
+                    }
+                    Value::Array(users)
+                }
+                (_, other) => other,
+            };
+            fields[id] = value;
+        }
+        Ok(())
+    }
+
+    async fn user_value(
+        &self,
+        input: &str,
+        myself: &mut Option<String>,
+    ) -> Result<Value, ApiError> {
+        let input = input.trim();
+        let id = if input.eq_ignore_ascii_case("me") {
+            match myself {
+                Some(id) => id.clone(),
+                None => myself.insert(self.get_myself().await?.account_id).clone(),
+            }
+        } else if input.contains('@') {
+            let matches = self
+                .search_users(input)
+                .await?
+                .into_iter()
+                .filter(|u| {
+                    u.email_address
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(input))
+                })
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [user] => user.account_id.clone(),
+                [] => {
+                    return Err(ApiError::InvalidInput(format!(
+                        "No Jira user has the e-mail address {input:?}; pass the username or account ID instead (see `jira users search`)"
+                    )));
+                }
+                _ => {
+                    return Err(ApiError::InvalidInput(format!(
+                        "Several Jira users share the e-mail address {input:?}; pass the username or account ID instead (see `jira users search`)"
+                    )));
+                }
+            }
+        } else {
+            input.to_owned()
+        };
+        Ok(self.assignee_payload(&id))
+    }
+
     pub(super) async fn prepare_create(
         &self,
         fields: &mut Value,
@@ -442,6 +523,9 @@ impl JiraClient {
             normalize_priority(fields, field_meta, priority)?;
         }
         normalize_named_arrays(fields, field_meta, custom)?;
+        normalize_field_values(fields, field_meta, custom, self.api_version)?;
+        self.normalize_user_fields(fields, field_meta, custom)
+            .await?;
         if let Some(key) = draft.epic.or(draft.parent) {
             let target = self.issue_type_for_link(key).await?;
             if draft.epic.is_some() && !target.is_epic() {
@@ -469,6 +553,15 @@ impl JiraClient {
                 "Issue type {:?} requires --parent <STORY-OR-TASK>",
                 issue_type.name
             )));
+        }
+        // Jira's own create screen fills a required reporter with the creator.
+        if let Some(definition) = field_meta.and_then(|m| m.get("reporter"))
+            && definition["required"] == true
+            && definition["hasDefaultValue"] != true
+            && definition["defaultValue"].is_null()
+            && fields.get("reporter").is_none()
+        {
+            fields["reporter"] = self.user_value("me", &mut None).await?;
         }
         validate_required(fields, field_meta, true)?;
         Ok(meta)
@@ -498,6 +591,9 @@ impl JiraClient {
             normalize_priority(fields, meta.as_ref(), priority)?;
         }
         normalize_named_arrays(fields, meta.as_ref(), custom)?;
+        normalize_field_values(fields, meta.as_ref(), custom, self.api_version)?;
+        self.normalize_user_fields(fields, meta.as_ref(), custom)
+            .await?;
         // The epic checks below judge the type the issue will have after this
         // write, since a type change and epic linkage travel in one request.
         let target_type = match update.issue_type {

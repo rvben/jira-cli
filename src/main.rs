@@ -541,6 +541,10 @@ enum IssuesCommand {
         /// File to upload (can be specified multiple times)
         #[arg(short, long, required = true)]
         file: Vec<std::path::PathBuf>,
+
+        /// Check the issue, files, permission and size limit without uploading
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Download an attachment by ID
@@ -1034,7 +1038,7 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     | IssuesCommand::Link { .. }
                     | IssuesCommand::Unlink { .. }
                     | IssuesCommand::LogWork { .. }
-                    | IssuesCommand::Attach { .. }
+                    | IssuesCommand::Attach { dry_run: false, .. }
                     | IssuesCommand::DeleteAttachment { .. }
                     | IssuesCommand::BulkTransition { dry_run: false, .. }
                     | IssuesCommand::BulkAssign { dry_run: false, .. }
@@ -1298,8 +1302,8 @@ async fn dispatch(
             IssuesCommand::Attachments { key } => {
                 commands::issues::attachments(client, out, &key).await?
             }
-            IssuesCommand::Attach { key, file } => {
-                commands::issues::attach(client, out, &key, &file).await?
+            IssuesCommand::Attach { key, file, dry_run } => {
+                commands::issues::attach(client, out, &key, &file, dry_run).await?
             }
             IssuesCommand::DownloadAttachment { id, dir, force } => {
                 commands::issues::download_attachment(client, out, &id, &dir, force).await?
@@ -2556,6 +2560,11 @@ fn walk_commands(
                 "arg":"--dry-run", "effects":"read_only", "output_fields":write_preview_fields(),
                 "description":"Uses the same normalization and preflight checks as the real write; no issue or sprint writes are sent. Server-only validators may still reject a later write."
             }));
+        } else if base_path == "issues attach" {
+            entry.insert("x-dry-run".into(), serde_json::json!({
+                "arg":"--dry-run", "effects":"read_only", "output_fields":attach_preview_fields(),
+                "description":"Confirms the issue exists, every file is readable, and each file fits the site's upload limit; nothing is uploaded."
+            }));
         } else if matches!(
             base_path.as_str(),
             "issues bulk-transition" | "issues bulk-assign"
@@ -2653,6 +2662,22 @@ fn write_preview_fields() -> serde_json::Value {
             {"name":"fields","type":"boolean","nullable":true,"description":"True when field metadata was available; null for move"}
         ]},
         {"name":"steps","type":"string[]","description":"Ordered operations: create_issue, update_issue, move_to_sprint. A move after create applies to the newly created issue."},
+        {"name":"warnings","type":"string[]"}
+    ]);
+    normalize_output_fields(fields.as_array_mut().unwrap());
+    fields
+}
+
+fn attach_preview_fields() -> serde_json::Value {
+    let mut fields = serde_json::json!([
+        {"name":"dryRun","type":"boolean"},
+        {"name":"operation","type":"string"},
+        {"name":"key","type":"string"},
+        {"name":"files","type":"object[]","fields":[
+            {"name":"filename","type":"string"},
+            {"name":"size","type":"integer","description":"Size in bytes"},
+            {"name":"mimeType","type":"string"}
+        ]},
         {"name":"warnings","type":"string[]"}
     ]);
     normalize_output_fields(fields.as_array_mut().unwrap());

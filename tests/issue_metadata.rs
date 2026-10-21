@@ -1297,3 +1297,231 @@ async fn required_descriptions_accept_nontext_rich_content_and_raw_overrides() {
         .unwrap();
     assert_eq!(write_fields(&server).await["description"], description);
 }
+
+fn user_fields() -> Value {
+    json!({
+        "reporter": {"name": "Reporter", "required": true, "schema": {"type": "user", "system": "reporter"}},
+        "customfield_40000": {"name": "Reviewers", "schema": {"type": "array", "items": "user"}}
+    })
+}
+
+#[tokio::test]
+async fn raw_user_fields_become_user_objects_for_each_api_version() {
+    for (version, id_key) in [(2, "name"), (3, "accountId")] {
+        let server = MockServer::start().await;
+        modern(&server, version, user_fields()).await;
+        get(
+            &server,
+            &format!("/rest/api/{version}/myself"),
+            json!({id_key: "self-id", "displayName": "Me"}),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/{version}/user/search")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {id_key: "other-id", "displayName": "Other", "emailAddress": "Other@Example.com"},
+                {id_key: "near-id", "displayName": "Near", "emailAddress": "other@example.com.au"}
+            ])))
+            .mount(&server)
+            .await;
+        let custom = [
+            ("reporter".to_owned(), json!("me")),
+            (
+                "customfield_40000".to_owned(),
+                json!(["u123", "other@example.com", {"key": "raw"}]),
+            ),
+        ];
+        let preview = client(&server, version)
+            .preview_create_issue(&draft(), &custom)
+            .await
+            .unwrap();
+        no_writes(&server).await;
+        allow_write(&server, version, false).await;
+        client(&server, version)
+            .create_issue(&draft(), &custom)
+            .await
+            .unwrap();
+        let fields = write_fields(&server).await;
+        assert_eq!(
+            fields, preview["fields"],
+            "preview must show the exact payload"
+        );
+        assert_eq!(fields["reporter"], json!({id_key: "self-id"}));
+        assert_eq!(
+            fields["customfield_40000"],
+            json!([{id_key: "u123"}, {id_key: "other-id"}, {"key": "raw"}])
+        );
+    }
+}
+
+#[tokio::test]
+async fn system_user_fields_are_shaped_without_metadata_and_on_update() {
+    let server = MockServer::start().await;
+    allow_write(&server, 2, true).await;
+    client(&server, 2)
+        .update_issue(
+            "PROJ-1",
+            &IssueUpdate::default(),
+            &[
+                ("reporter".into(), json!("jdoe")),
+                ("customfield_1".into(), json!("plain")),
+            ],
+        )
+        .await
+        .unwrap();
+    let fields = write_fields(&server).await;
+    assert_eq!(fields["reporter"], json!({"name": "jdoe"}));
+    assert_eq!(fields["customfield_1"], "plain");
+}
+
+#[tokio::test]
+async fn unknown_email_and_missing_user_field_fail_before_writing() {
+    let server = MockServer::start().await;
+    let mut fields = user_fields();
+    fields["customfield_40000"]["required"] = json!(true);
+    modern(&server, 2, fields).await;
+    get(
+        &server,
+        "/rest/api/2/myself",
+        json!({"name": "self-id", "displayName": "Me"}),
+    )
+    .await;
+    get(&server, "/rest/api/2/user/search", json!([])).await;
+    let err = client(&server, 2)
+        .create_issue(
+            &draft(),
+            &[("reporter".into(), json!("nobody@example.com"))],
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("nobody@example.com"), "{err}");
+    let err = client(&server, 2)
+        .create_issue(&draft(), &[])
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("--field customfield_40000=me"),
+        "{err}"
+    );
+    no_writes(&server).await;
+}
+
+#[tokio::test]
+async fn required_reporter_defaults_to_the_current_user() {
+    for (version, id_key, default) in [
+        (2, "name", false),
+        (3, "accountId", false),
+        (2, "name", true),
+    ] {
+        let server = MockServer::start().await;
+        let mut fields = user_fields();
+        fields["reporter"]["hasDefaultValue"] = json!(default);
+        modern(&server, version, fields).await;
+        get(
+            &server,
+            &format!("/rest/api/{version}/myself"),
+            json!({id_key: "self-id", "displayName": "Me"}),
+        )
+        .await;
+        let preview = client(&server, version)
+            .preview_create_issue(&draft(), &[])
+            .await
+            .unwrap();
+        let reporter = &preview["fields"]["reporter"];
+        if default {
+            assert!(reporter.is_null(), "Jira fills its own default: {reporter}");
+        } else {
+            assert_eq!(*reporter, json!({id_key: "self-id"}));
+        }
+        no_writes(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn raw_field_values_are_checked_and_shaped_by_schema() {
+    let fields = json!({
+        "customfield_10016": {"name": "Story Points", "schema": {"type": "number"}},
+        "customfield_10020": {"name": "Code", "schema": {"type": "string"}},
+        "customfield_10030": {"name": "Colour", "schema": {"type": "option"},
+            "allowedValues": [{"id": "1", "value": "Red"}, {"id": "2", "value": "Blue"}]},
+        "customfield_10040": {"name": "Tags", "schema": {"type": "array", "items": "option"},
+            "allowedValues": [{"id": "1", "value": "Red"}, {"id": "2", "value": "Blue"}]},
+        "customfield_10050": {"name": "Due", "schema": {"type": "date"}},
+        "customfield_10060": {"name": "Notes", "schema": {"type": "string",
+            "custom": "com.atlassian.jira.plugin.system.customfieldtypes:textarea"}},
+        "fixVersions": {"name": "Fix versions", "schema": {"type": "array", "items": "version"},
+            "allowedValues": [{"id": "100", "name": "1.0"}]},
+        "labels": {"name": "Labels", "schema": {"type": "array", "items": "string"}}
+    });
+    for version in [2, 3] {
+        let server = MockServer::start().await;
+        modern(&server, version, fields.clone()).await;
+        let custom = [
+            ("customfield_10016".to_owned(), json!("5")),
+            ("customfield_10020".to_owned(), json!(123)),
+            ("customfield_10030".to_owned(), json!("blue")),
+            ("customfield_10040".to_owned(), json!("Red")),
+            ("customfield_10050".to_owned(), json!("2026-01-31")),
+            ("customfield_10060".to_owned(), json!("Line")),
+            ("fixVersions".to_owned(), json!(["1.0"])),
+            ("labels".to_owned(), json!("backend")),
+        ];
+        let preview = client(&server, version)
+            .preview_create_issue(&draft(), &custom)
+            .await
+            .unwrap();
+        let sent = &preview["fields"];
+        assert_eq!(sent["customfield_10016"], json!(5));
+        assert_eq!(sent["customfield_10020"], json!("123"));
+        assert_eq!(sent["customfield_10030"], json!({"id": "2"}));
+        assert_eq!(sent["customfield_10040"], json!([{"id": "1"}]));
+        assert_eq!(sent["customfield_10050"], json!("2026-01-31"));
+        assert_eq!(sent["fixVersions"], json!([{"id": "100"}]));
+        assert_eq!(sent["labels"], json!(["backend"]));
+        if version >= 3 {
+            assert_eq!(sent["customfield_10060"]["type"], "doc");
+        } else {
+            assert_eq!(sent["customfield_10060"], json!("Line"));
+        }
+
+        let raw = [("customfield_10030".to_owned(), json!({"value": "Red"}))];
+        let preview = client(&server, version)
+            .preview_create_issue(&draft(), &raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            preview["fields"]["customfield_10030"],
+            json!({"value": "Red"})
+        );
+
+        for (id, value, message) in [
+            (
+                "customfield_10016",
+                json!("five"),
+                "Story Points (customfield_10016) expects a number",
+            ),
+            (
+                "customfield_10030",
+                json!("Green"),
+                "valid: \"Red\" (ID 1), \"Blue\" (ID 2)",
+            ),
+            (
+                "customfield_10030",
+                json!(["Red", "Blue"]),
+                "Colour (customfield_10030) expects one value",
+            ),
+            (
+                "customfield_10050",
+                json!("31/01/2026"),
+                "Due (customfield_10050) expects a date",
+            ),
+        ] {
+            let err = client(&server, version)
+                .preview_create_issue(&draft(), &[(id.to_owned(), value)])
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(message), "{err}");
+        }
+        no_writes(&server).await;
+    }
+}

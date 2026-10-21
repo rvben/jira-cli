@@ -995,23 +995,10 @@ impl JiraClient {
         validate_issue_key(key)?;
 
         let mut form = reqwest::multipart::Form::new();
-        for path in paths {
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    ApiError::InvalidInput(format!(
-                        "'{}' does not name a file to upload",
-                        path.display()
-                    ))
-                })?
-                .to_string();
-            let content_type = mime_guess::from_path(&file_name).first_or_octet_stream();
-            let data = std::fs::read(path)
-                .map_err(|e| ApiError::Other(format!("cannot read {}: {e}", path.display())))?;
-            let part = reqwest::multipart::Part::bytes(data)
-                .file_name(file_name)
-                .mime_str(content_type.as_ref())
+        for file in read_uploads(paths)? {
+            let part = reqwest::multipart::Part::bytes(file.data)
+                .file_name(file.filename)
+                .mime_str(&file.mime_type)
                 .map_err(|e| ApiError::Other(e.to_string()))?;
             form = form.part("file", part);
         }
@@ -1024,6 +1011,63 @@ impl JiraClient {
             .multipart(form);
         let resp = self.send(request).await?;
         resp.json::<Vec<Attachment>>().await.map_err(ApiError::Http)
+    }
+
+    /// Check an upload without sending it: the issue exists, every file is
+    /// readable, and the site accepts attachments of that size.
+    pub async fn preview_attachments(
+        &self,
+        key: &str,
+        paths: &[PathBuf],
+    ) -> Result<(Vec<UploadFile>, Vec<String>), ApiError> {
+        validate_issue_key(key)?;
+        let files = read_uploads(paths)?;
+        self.issue_project(key).await?;
+        let mut warnings = Vec::new();
+        let path = format!("mypermissions?issueKey={key}&permissions=CREATE_ATTACHMENTS");
+        match self.get::<serde_json::Value>(&path).await {
+            Ok(perms) => {
+                match perms["permissions"]["CREATE_ATTACHMENTS"]["havePermission"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(ApiError::InvalidInput(format!(
+                            "You lack permission to add attachments to {key}"
+                        )));
+                    }
+                    None => warnings.push(
+                        "Jira did not report the attachment permission; it could not be checked."
+                            .into(),
+                    ),
+                }
+            }
+            // Older servers reject the permission filter; that only means unknown.
+            Err(ApiError::NotFound(_) | ApiError::Api { status: 400, .. }) => warnings
+                .push("Your attachment permission is unavailable; it could not be checked.".into()),
+            Err(err) => return Err(err),
+        }
+        match self.get::<serde_json::Value>("attachment/meta").await {
+            Ok(meta) => {
+                if meta["enabled"] == false {
+                    return Err(ApiError::InvalidInput(
+                        "Attachments are disabled on this Jira site".into(),
+                    ));
+                }
+                if let Some(limit) = meta["uploadLimit"].as_u64()
+                    && let Some(file) = files.iter().find(|f| f.data.len() as u64 > limit)
+                {
+                    return Err(ApiError::InvalidInput(format!(
+                        "{} is {} bytes; this Jira site accepts attachments up to {limit} bytes",
+                        file.filename,
+                        file.data.len()
+                    )));
+                }
+            }
+            Err(ApiError::NotFound(_)) => warnings.push(
+                "Attachment settings are unavailable; the size limit could not be checked.".into(),
+            ),
+            Err(err) => return Err(err),
+        }
+        Ok((files, warnings))
     }
 
     /// Fetch the metadata of a single attachment.
@@ -1497,6 +1541,41 @@ struct JiraErrorPayload {
     message: Option<String>,
     #[serde(default)]
     errors: BTreeMap<String, String>,
+}
+
+/// A local file read and named for upload.
+pub struct UploadFile {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
+fn read_uploads(paths: &[PathBuf]) -> Result<Vec<UploadFile>, ApiError> {
+    paths
+        .iter()
+        .map(|path| {
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    ApiError::InvalidInput(format!(
+                        "'{}' does not name a file to upload",
+                        path.display()
+                    ))
+                })?
+                .to_string();
+            let mime_type = mime_guess::from_path(&filename)
+                .first_or_octet_stream()
+                .to_string();
+            let data = std::fs::read(path)
+                .map_err(|e| ApiError::Other(format!("cannot read {}: {e}", path.display())))?;
+            Ok(UploadFile {
+                filename,
+                mime_type,
+                data,
+            })
+        })
+        .collect()
 }
 
 fn write_preview(

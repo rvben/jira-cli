@@ -229,6 +229,8 @@ jira issues create --project MYAPP --summary "Write unit tests" --type Subtask \
   --parent MYAPP-42                           # creates a subtask
 jira issues create --project MYAPP --summary "Add dark mode" --type Story \
   --epic MYAPP-10 --priority Medium           # resolves this project's fields
+jira issues create --project MYAPP --summary "Add dark mode" --type Story \
+  --field reporter=jdoe                       # user fields accept me, a username or an e-mail
 
 # Preview normalized fields without making changes
 jira issues create -p MYAPP -t Story -s "Example" --priority Medium --dry-run
@@ -265,6 +267,7 @@ jira issues log-work MYAPP-123 --time-spent 30m --comment "Fixed the flaky test"
 # Attachments
 jira issues attachments MYAPP-123
 jira issues attach MYAPP-123 --file ./design.png --file ./spec.pdf
+jira issues attach MYAPP-123 --file ./design.png --dry-run  # checks permission and size limit
 jira issues download-attachment 10042 --dir ./downloads
 jira issues download-attachment 10042 --dir ./downloads --force  # overwrite an existing file
 jira issues delete-attachment 10042
@@ -351,6 +354,22 @@ provided when creating an issue. Updates leave omitted fields untouched and
 reject explicit clears of required fields. `--field ID=VALUE` can supply required
 custom values. Unavailable metadata endpoints retain the existing pass-through
 behavior; authentication and server failures are still reported.
+
+User fields given through `--field` (such as `reporter`, or a custom user
+picker) accept a username or account ID, an e-mail address, or `me`, and are
+sent as the user object Jira expects: `{"name": ...}` on Data Center and
+`{"accountId": ...}` on Cloud. An e-mail must match exactly one user. JSON
+objects are sent unchanged. The fields are recognised from field metadata, and
+`assignee` and `reporter` are recognised even when metadata is unavailable.
+When a project requires a reporter and has no default, `create` sets it to
+you, as Jira's own create screen does.
+
+Other `--field` values are checked against the field's type before anything is
+written, so `--dry-run` catches them too. Numbers must be numbers, dates use
+`YYYY-MM-DD`, and select-list, version, component and priority values are
+matched against the allowed options (`--field customfield_10030=Blue`). A
+single value for a list field becomes a one-item list, and on Cloud text for a
+rich-text field is converted to ADF. JSON objects skip these checks.
 
 `--assignee none` and `--assignee unassign` explicitly leave a new issue unassigned
 or clear an existing assignee. Omitting the flag preserves Jira's create default
@@ -546,7 +565,7 @@ stdout when the exit code is nonzero.
 
 Set `JIRA_READ_ONLY=1` to block every command that writes to Jira. The CLI returns exit code 2 with a structured error for any blocked command, before it opens a connection. This is useful when giving an AI agent read access to Jira without the risk of unintended modifications.
 
-`--dry-run` remains available for create, update, move, and both bulk commands in read-only mode. These commands resolve and validate inputs without writing to Jira; the HTTP client also blocks write requests as a second check.
+`--dry-run` remains available for create, update, move, attach, and both bulk commands in read-only mode. These commands resolve and validate inputs without writing to Jira; the HTTP client also blocks write requests as a second check.
 
 The guard covers writes to Jira, not writes to your disk: `jira init`, `jira config init`, `jira config remove` and `jira issues download-attachment` still work, because they change local files only.
 

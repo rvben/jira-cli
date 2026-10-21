@@ -837,7 +837,25 @@ pub async fn attach(
     out: &OutputConfig,
     key: &str,
     files: &[PathBuf],
+    dry_run: bool,
 ) -> Result<(), ApiError> {
+    if dry_run {
+        let (files, warnings) = client.preview_attachments(key, files).await?;
+        let names: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+        out.print_result(
+            &serde_json::json!({
+                "dryRun": true,
+                "operation": "attach",
+                "key": key,
+                "files": files.iter().map(|f| serde_json::json!({
+                    "filename": f.filename, "size": f.data.len(), "mimeType": f.mime_type,
+                })).collect::<Vec<_>>(),
+                "warnings": warnings,
+            }),
+            &format!("Would attach {} to {key}", names.join(", ")),
+        );
+        return Ok(());
+    }
     let uploaded = client.upload_attachments(key, files).await?;
     let names: Vec<&str> = uploaded.iter().map(|a| a.filename.as_str()).collect();
     out.print_result(
