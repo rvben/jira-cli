@@ -193,9 +193,11 @@ without a project, it includes issues from all active sprints you can access.
 | `o`, `?`, `q` | Open in browser, show help, quit |
 
 In the comment editor, Enter starts a new line and Ctrl+S opens the review
-screen. Esc keeps the draft for this session. The transition picker marks
-transitions whose screens need fields and asks for a resolution when one is
-required; other required fields are set with `jira issues transition --field`.
+screen. Esc keeps the draft for this session. The transition picker names the
+required fields each transition's screen needs and the issue lacks, then asks
+for them one at a time: pick from the allowed values, or type the value (a user
+by name, e-mail address or `me`). Fields the issue already has are not asked
+for, and Esc steps back to the previous field.
 If Jira does not confirm a write, refresh the issue before trying again. Write actions are unavailable when the
 active profile is read-only. `jira tui` requires a terminal; scripts can use
 `jira issues mine` or `jira search` instead.

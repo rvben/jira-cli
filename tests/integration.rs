@@ -3169,6 +3169,32 @@ async fn transition_404_returns_not_found() {
 }
 
 #[tokio::test]
+async fn empty_fields_reports_what_the_issue_lacks() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-1"))
+        .and(query_param(
+            "fields",
+            "customfield_1,customfield_2,resolution",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "fields": {"resolution": {"name": "Fixed"}, "customfield_1": null, "customfield_2": []}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let empty = client
+        .empty_fields("PROJ-1", &["customfield_1", "customfield_2", "resolution"])
+        .await
+        .unwrap();
+    assert_eq!(empty, ["customfield_1", "customfield_2"]);
+    // Nothing to check: no request is made.
+    assert!(client.empty_fields("PROJ-1", &[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn assign_issue_404_returns_not_found() {
     let server = MockServer::start().await;
 

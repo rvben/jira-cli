@@ -598,15 +598,15 @@ fn overlay(frame: &mut Frame, app: &App, t: &Theme) {
             let rows = items
                 .iter()
                 .map(|item| {
-                    let destination = item.to.as_ref().map(|to| to.name.as_str()).unwrap_or("");
-                    let asks = item
-                        .required_inputs()
-                        .iter()
-                        .map(|(_, name)| clean(name))
-                        .collect::<Vec<_>>();
-                    let mut row = format!("{}  →  {}", clean(&item.name), clean(destination));
-                    if !asks.is_empty() {
-                        row.push_str(&format!("  ·  asks for {}", asks.join(", ")));
+                    let transition = &item.transition;
+                    let destination = transition.to.as_ref().map_or("", |to| to.name.as_str());
+                    let mut row = format!("{}  →  {}", clean(&transition.name), clean(destination));
+                    if !item.asks.is_empty() {
+                        let asks = item.asks.iter().map(|ask| clean(&ask.name));
+                        row.push_str(&format!(
+                            "  ·  asks for {}",
+                            asks.collect::<Vec<_>>().join(", ")
+                        ));
                     }
                     row
                 })
@@ -621,25 +621,101 @@ fn overlay(frame: &mut Frame, app: &App, t: &Theme) {
                 "  Enter apply  ·  Esc cancel  ·  ↑/↓ choose",
             );
         }
-        Overlay::Resolution {
+        Overlay::Fields {
             key,
             items,
             transition,
-            options,
+            values,
             selected,
-        } => picker(
-            frame,
-            t,
-            " RESOLUTION ",
-            format!(
-                "  {key}  ·  {} requires a resolution",
-                clean(&items[*transition].name)
-            ),
-            options.iter().map(|option| clean(option)).collect(),
-            *selected,
-            "  Enter apply  ·  Esc back  ·  ↑/↓ choose",
-        ),
+            editor,
+        } => {
+            let choice = &items[*transition];
+            let ask = &choice.asks[values.len()];
+            let next = if values.len() + 1 == choice.asks.len() {
+                "apply"
+            } else {
+                "next"
+            };
+            let subtitle = format!(
+                "  {key}  ·  {} needs {}{}",
+                clean(&choice.transition.name),
+                clean(&ask.name),
+                if choice.asks.len() > 1 {
+                    format!("  ({}/{})", values.len() + 1, choice.asks.len())
+                } else {
+                    String::new()
+                }
+            );
+            if ask.options.is_empty() {
+                field_input(
+                    frame,
+                    app,
+                    t,
+                    subtitle,
+                    editor,
+                    &format!("  {}  ·  Enter {next}  ·  Esc back", ask.hint),
+                );
+            } else {
+                picker(
+                    frame,
+                    t,
+                    " TRANSITION FIELDS ",
+                    subtitle,
+                    ask.options.iter().map(|option| clean(option)).collect(),
+                    *selected,
+                    &format!("  Enter {next}  ·  Esc back  ·  ↑/↓ choose"),
+                );
+            }
+        }
     }
+}
+
+/// A one-line text field for a transition value, with any error above it.
+fn field_input(
+    frame: &mut Frame,
+    app: &App,
+    t: &Theme,
+    subtitle: String,
+    editor: &super::editor::Editor,
+    footer: &str,
+) {
+    let area = centered(frame.area(), 72, 6);
+    frame.render_widget(Clear, area);
+    let block = t
+        .panel()
+        .title(Span::styled(" TRANSITION FIELDS ", t.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 3 {
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let (heading, style) = match &app.error {
+        Some(error) => (format!("  {error}"), t.status("blocked")),
+        None => (subtitle, t.muted()),
+    };
+    frame.render_widget(
+        Paragraph::new(fit(&heading, rows[0].width as usize)).style(style),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(clean(&format!("  {}", editor.display())))
+            .style(t.text())
+            .scroll((
+                0,
+                editor
+                    .cursor_column()
+                    .saturating_sub(rows[1].width.saturating_sub(7) as usize)
+                    as u16,
+            )),
+        rows[1],
+    );
+    frame.render_widget(Paragraph::new(footer.to_owned()).style(t.accent()), rows[2]);
 }
 
 /// A titled list with one selected row, kept in view while scrolling.

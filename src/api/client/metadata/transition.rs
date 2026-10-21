@@ -160,22 +160,32 @@ impl JiraClient {
             })
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>();
-        let current = if absent.is_empty() {
-            Value::Null
-        } else {
-            self.get::<Value>(&format!("issue/{key}?fields={}", absent.join(",")))
-                .await?
-        };
+        let empty = self.empty_fields(key, &absent).await?;
         Ok(required
             .into_iter()
-            .filter(|(id, definition)| {
-                fields.get(id.as_str()).is_some()
-                    || (definition["hasDefaultValue"] != true
-                        && current["fields"]
-                            .get(id.as_str())
-                            .is_none_or(is_empty_value))
-            })
+            .filter(|(id, _)| fields.get(id.as_str()).is_some() || empty.contains(&id.as_str()))
             .map(|(id, definition)| (id.clone(), definition.clone()))
+            .collect())
+    }
+
+    /// The fields among `ids` that `key` has no value for. Asks Jira only
+    /// when there is something to check.
+    pub async fn empty_fields<'f>(
+        &self,
+        key: &str,
+        ids: &[&'f str],
+    ) -> Result<Vec<&'f str>, ApiError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        validate_issue_key(key)?;
+        let current = self
+            .get::<Value>(&format!("issue/{key}?fields={}", ids.join(",")))
+            .await?;
+        Ok(ids
+            .iter()
+            .copied()
+            .filter(|id| current["fields"].get(*id).is_none_or(is_empty_value))
             .collect())
     }
 }

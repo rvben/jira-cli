@@ -67,7 +67,8 @@ enum Request {
     Transition {
         key: String,
         transition: Box<Transition>,
-        resolution: Option<String>,
+        /// Values for the required fields the issue lacks, as `--field` takes them.
+        fields: Vec<(String, serde_json::Value)>,
     },
     Comment {
         key: String,
@@ -77,7 +78,7 @@ enum Request {
 enum Response {
     List(SearchResponse),
     Detail(Box<Issue>),
-    Transitions(Vec<Transition>),
+    Transitions(Vec<Choice>),
     Written,
 }
 /// Why a request failed, and whether a write may still have been applied.
@@ -92,6 +93,20 @@ impl From<ApiError> for Failure {
             message: error.to_string(),
         }
     }
+}
+/// A transition and the required fields the issue still lacks for it.
+struct Choice {
+    transition: Transition,
+    asks: Vec<Ask>,
+}
+/// One value the user must supply before a transition can be sent.
+struct Ask {
+    id: String,
+    name: String,
+    /// Allowed values to choose from; empty means the value is typed.
+    options: Vec<String>,
+    /// What to type when there are no options.
+    hint: &'static str,
 }
 struct Job {
     request: Request,
@@ -119,16 +134,19 @@ enum Overlay {
     },
     Transitions {
         key: String,
-        items: Vec<Transition>,
+        items: Vec<Choice>,
         selected: usize,
     },
-    /// The resolution a transition requires; Esc returns to the transitions.
-    Resolution {
+    /// The required fields a transition still needs, asked one at a time:
+    /// `values` answers the first asks. Esc steps back, then returns to the
+    /// transitions.
+    Fields {
         key: String,
-        items: Vec<Transition>,
+        items: Vec<Choice>,
         transition: usize,
-        options: Vec<String>,
+        values: Vec<String>,
         selected: usize,
+        editor: Editor,
     },
     Help,
 }
@@ -592,20 +610,20 @@ impl App {
                         selected = (selected + 1).min(items.len().saturating_sub(1))
                     }
                     KeyCode::Enter if selected < items.len() => {
-                        let options = resolution_choices(&items[selected]);
-                        if options.is_empty() {
+                        if items[selected].asks.is_empty() {
                             return Action::Fetch(Request::Transition {
                                 key: issue_key,
-                                transition: Box::new(items.swap_remove(selected)),
-                                resolution: None,
+                                transition: Box::new(items.swap_remove(selected).transition),
+                                fields: Vec::new(),
                             });
                         }
-                        self.overlay = Overlay::Resolution {
+                        self.overlay = Overlay::Fields {
                             key: issue_key,
                             items,
                             transition: selected,
-                            options,
+                            values: Vec::new(),
                             selected: 0,
+                            editor: Editor::new(String::new(), false),
                         };
                         return Action::None;
                     }
@@ -618,41 +636,87 @@ impl App {
                 };
                 return Action::None;
             }
-            Overlay::Resolution {
+            Overlay::Fields {
                 key: issue_key,
                 mut items,
                 transition,
-                mut options,
+                mut values,
                 mut selected,
+                mut editor,
             } => {
+                let ask = &items[transition].asks[values.len()];
+                let typed = ask.options.is_empty();
                 match key.code {
                     KeyCode::Esc => {
-                        self.overlay = Overlay::Transitions {
-                            key: issue_key,
-                            items,
-                            selected: transition,
+                        let Some(previous) = values.pop() else {
+                            self.error = None;
+                            self.overlay = Overlay::Transitions {
+                                key: issue_key,
+                                items,
+                                selected: transition,
+                            };
+                            return Action::None;
                         };
-                        return Action::None;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        selected = (selected + 1).min(options.len().saturating_sub(1))
+                        let ask = &items[transition].asks[values.len()];
+                        selected = ask.options.iter().position(|o| *o == previous).unwrap_or(0);
+                        editor = Editor::new(
+                            if ask.options.is_empty() {
+                                previous
+                            } else {
+                                String::new()
+                            },
+                            false,
+                        );
+                        self.error = None;
                     }
                     KeyCode::Enter => {
-                        return Action::Fetch(Request::Transition {
-                            key: issue_key,
-                            transition: Box::new(items.swap_remove(transition)),
-                            resolution: Some(options.swap_remove(selected)),
-                        });
+                        let value = if typed {
+                            editor.text().trim().to_owned()
+                        } else {
+                            ask.options[selected].clone()
+                        };
+                        if value.is_empty() {
+                            self.error = Some(format!("{} needs a value", ask.name));
+                        } else {
+                            values.push(value);
+                            if values.len() == items[transition].asks.len() {
+                                let choice = items.swap_remove(transition);
+                                let fields = choice
+                                    .asks
+                                    .into_iter()
+                                    .zip(values)
+                                    .map(|(ask, value)| (ask.id, value.into()))
+                                    .collect();
+                                return Action::Fetch(Request::Transition {
+                                    key: issue_key,
+                                    transition: Box::new(choice.transition),
+                                    fields,
+                                });
+                            }
+                            selected = 0;
+                            editor = Editor::new(String::new(), false);
+                            self.error = None;
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if !typed => {
+                        selected = selected.saturating_sub(1)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if !typed => {
+                        selected = (selected + 1).min(ask.options.len() - 1)
+                    }
+                    _ if typed => {
+                        editor.key(key);
+                        self.error = None;
                     }
                     _ => {}
                 }
-                self.overlay = Overlay::Resolution {
+                self.overlay = Overlay::Fields {
                     key: issue_key,
                     items,
                     transition,
-                    options,
+                    values,
                     selected,
+                    editor,
                 };
                 return Action::None;
             }
@@ -783,8 +847,16 @@ impl App {
     }
 
     fn paste(&mut self, value: &str) {
-        if let Overlay::Input { editor, .. } = &mut self.overlay {
-            editor.paste(value);
+        match &mut self.overlay {
+            Overlay::Input { editor, .. } => editor.paste(value),
+            Overlay::Fields {
+                items,
+                transition,
+                values,
+                editor,
+                ..
+            } if items[*transition].asks[values.len()].options.is_empty() => editor.paste(value),
+            _ => {}
         }
     }
 }
@@ -804,24 +876,45 @@ fn clean(input: &str) -> String {
         .collect()
 }
 
-/// The resolutions to choose from when `transition` requires one and has no
-/// default; empty when it does not, or Jira lists no values to pick from.
-fn resolution_choices(transition: &Transition) -> Vec<String> {
-    if !transition
-        .required_inputs()
-        .iter()
-        .any(|(id, _)| *id == "resolution")
-    {
-        return Vec::new();
-    }
-    transition.fields.as_ref().map_or_else(Vec::new, |fields| {
-        fields["resolution"]["allowedValues"]
+/// Pair each transition with the required, default-less fields it needs that
+/// the issue has no value for: what the workbench must ask before sending.
+fn choices(transitions: Vec<Transition>, empty: &[String]) -> Vec<Choice> {
+    transitions
+        .into_iter()
+        .map(|transition| {
+            let asks = transition
+                .required_inputs()
+                .into_iter()
+                .filter(|(id, _)| empty.iter().any(|e| e == id))
+                .map(|(id, name)| {
+                    let definition = &transition.fields.as_ref().expect("screen fields")[id];
+                    ask(id, name, definition)
+                })
+                .collect();
+            Choice { transition, asks }
+        })
+        .collect()
+}
+
+fn ask(id: &str, name: &str, definition: &serde_json::Value) -> Ask {
+    let schema = &definition["schema"];
+    Ask {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        options: definition["allowedValues"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|option| option["name"].as_str().map(str::to_owned))
-            .collect()
-    })
+            .filter_map(|o| o["name"].as_str().or_else(|| o["value"].as_str()))
+            .map(str::to_owned)
+            .collect(),
+        hint: match (schema["type"].as_str(), schema["items"].as_str()) {
+            (Some("user"), _) | (Some("array"), Some("user")) => "name, e-mail address, or me",
+            (Some("number"), _) => "a number",
+            (Some("date"), _) => "a date such as 2026-01-31",
+            _ => "text",
+        },
+    }
 }
 
 fn valid_project_key(value: &str) -> bool {
@@ -857,17 +950,29 @@ fn start(client: Arc<JiraClient>, request: Request, app: &mut App) -> Job {
                 .get_issue(&key)
                 .await
                 .map(|issue| Response::Detail(Box::new(issue))),
-            Request::Transitions(key) => client
-                .get_transitions(&key)
+            Request::Transitions(key) => {
+                async {
+                    let transitions = client.get_transitions(&key).await?;
+                    let mut ids = transitions
+                        .iter()
+                        .flat_map(Transition::required_inputs)
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    let empty = client.empty_fields(&key, &ids).await?;
+                    let empty = empty.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                    Ok(Response::Transitions(choices(transitions, &empty)))
+                }
                 .await
-                .map(Response::Transitions),
+            }
             Request::Transition {
                 key,
                 transition,
-                resolution,
+                fields,
             } => {
                 let input = TransitionInput {
-                    resolution: resolution.as_deref(),
+                    fields: &fields,
                     ..Default::default()
                 };
                 match client.prepare_transition(&key, &transition, &input).await {
@@ -1070,77 +1175,132 @@ mod tests {
                 if key == "APP-1" && body == "For the first issue"
         ));
 
+        let done = Transition {
+            id: "11".into(),
+            name: "Done".into(),
+            to: None,
+            fields: None,
+        };
         app.overlay = Overlay::Transitions {
             key: "APP-1".into(),
-            items: vec![Transition {
-                id: "11".into(),
-                name: "Done".into(),
-                to: None,
-                fields: None,
-            }],
+            items: choices(vec![done], &[]),
             selected: 0,
         };
         assert!(matches!(
             app.key(key(KeyCode::Enter)),
-            Action::Fetch(Request::Transition { key, transition, resolution: None })
-                if key == "APP-1" && transition.id == "11"
+            Action::Fetch(Request::Transition { key, transition, fields })
+                if key == "APP-1" && transition.id == "11" && fields.is_empty()
         ));
     }
 
-    fn done_with_screen(resolution: serde_json::Value) -> Transition {
+    /// A Done transition whose screen requires a resolution and a root cause,
+    /// with an optional comment field and a required field Jira defaults.
+    fn done_with_screen() -> Transition {
         serde_json::from_value(serde_json::json!({
             "id": "31", "name": "Done",
-            "fields": { "resolution": resolution }
+            "fields": {
+                "resolution": {
+                    "name": "Resolution", "required": true, "schema": {"type": "resolution"},
+                    "allowedValues": [{"id": "1", "name": "Fixed"}, {"id": "2", "name": "Won't Do"}]
+                },
+                "customfield_1": {"name": "Root cause", "required": true, "schema": {"type": "string"}},
+                "customfield_2": {"name": "Notes", "required": false, "schema": {"type": "string"}},
+                "priority": {"name": "Priority", "required": true, "hasDefaultValue": true}
+            }
         }))
         .unwrap()
     }
 
     #[test]
-    fn required_resolution_is_asked_for_and_esc_returns_to_transitions() {
-        let mut app = app(false);
-        let open = Transition {
+    fn only_required_fields_the_issue_lacks_are_asked_for() {
+        let start = Transition {
             id: "11".into(),
             name: "Start".into(),
             to: None,
             fields: None,
         };
-        let done = done_with_screen(serde_json::json!({
-            "name": "Resolution", "required": true,
-            "allowedValues": [{"id": "1", "name": "Fixed"}, {"id": "2", "name": "Won't Do"}]
-        }));
+        let items = choices(
+            vec![start, done_with_screen()],
+            &["resolution".into(), "customfield_1".into()],
+        );
+        assert!(items[0].asks.is_empty());
+        let asks = items[1]
+            .asks
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(asks, ["customfield_1", "resolution"]);
+        assert_eq!(items[1].asks[1].options, ["Fixed", "Won't Do"]);
+        assert_eq!(items[1].asks[0].hint, "text");
+
+        // The issue already has a resolution: Done is sent without asking.
+        let mut app = app(false);
         app.overlay = Overlay::Transitions {
             key: "APP-1".into(),
-            items: vec![open, done],
+            items: choices(vec![done_with_screen()], &["customfield_2".into()]),
+            selected: 0,
+        };
+        assert!(matches!(
+            app.key(key(KeyCode::Enter)),
+            Action::Fetch(Request::Transition { fields, .. }) if fields.is_empty()
+        ));
+    }
+
+    #[test]
+    fn missing_fields_are_asked_in_turn_and_esc_steps_back() {
+        let mut app = app(false);
+        let start = Transition {
+            id: "11".into(),
+            name: "Start".into(),
+            to: None,
+            fields: None,
+        };
+        app.overlay = Overlay::Transitions {
+            key: "APP-1".into(),
+            items: choices(
+                vec![start, done_with_screen()],
+                &["resolution".into(), "customfield_1".into()],
+            ),
             selected: 1,
         };
-        assert!(matches!(app.key(key(KeyCode::Enter)), Action::None));
+        app.key(key(KeyCode::Enter));
         assert!(matches!(
             app.overlay,
-            Overlay::Resolution { ref options, transition: 1, .. } if options == &["Fixed", "Won't Do"]
+            Overlay::Fields { transition: 1, ref values, .. } if values.is_empty()
+        ));
+        app.paste("Config drift");
+        app.key(key(KeyCode::Enter));
+        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Esc));
+        // Back on the root cause, with the typed value kept.
+        assert!(matches!(
+            app.overlay,
+            Overlay::Fields { ref editor, ref values, .. }
+                if values.is_empty() && editor.text() == "Config drift"
         ));
         app.key(key(KeyCode::Esc));
         assert!(matches!(
             app.overlay,
             Overlay::Transitions { selected: 1, .. }
         ));
+
         app.key(key(KeyCode::Enter));
-        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Enter));
+        assert_eq!(app.error.as_deref(), Some("Root cause needs a value"));
+        for c in "Typo".chars() {
+            app.key(key(KeyCode::Char(c)));
+        }
+        assert!(app.error.is_none());
+        app.key(key(KeyCode::Enter));
+        app.key(key(KeyCode::Char('j')));
         assert!(matches!(
             app.key(key(KeyCode::Enter)),
-            Action::Fetch(Request::Transition { key, transition, resolution: Some(resolution) })
-                if key == "APP-1" && transition.id == "31" && resolution == "Won't Do"
+            Action::Fetch(Request::Transition { key, transition, fields })
+                if key == "APP-1" && transition.id == "31" && fields == vec![
+                    ("customfield_1".to_owned(), serde_json::json!("Typo")),
+                    ("resolution".to_owned(), serde_json::json!("Won't Do")),
+                ]
         ));
-
-        let defaulted = done_with_screen(serde_json::json!({
-            "name": "Resolution", "required": true, "hasDefaultValue": true,
-            "allowedValues": [{"id": "1", "name": "Fixed"}]
-        }));
-        assert!(resolution_choices(&defaulted).is_empty());
-        let optional = done_with_screen(serde_json::json!({
-            "name": "Resolution", "required": false,
-            "allowedValues": [{"id": "1", "name": "Fixed"}]
-        }));
-        assert!(resolution_choices(&optional).is_empty());
     }
 
     #[test]
@@ -1149,8 +1309,8 @@ mod tests {
         app.issues.push(issue("APP-1", "Task"));
         let transition = Request::Transition {
             key: "APP-1".into(),
-            transition: Box::new(done_with_screen(serde_json::json!({"required": true}))),
-            resolution: None,
+            transition: Box::new(done_with_screen()),
+            fields: Vec::new(),
         };
         app.complete(
             &transition,
@@ -1246,7 +1406,7 @@ mod tests {
                     to: None,
                     fields: None,
                 }),
-                resolution: None,
+                fields: Vec::new(),
             },
             Ok(Response::Written),
         );
@@ -1301,16 +1461,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_required_fields_and_resolution_choices() {
+    fn renders_missing_fields_as_choices_and_text() {
         let mut app = app(false);
         app.issues.push(issue("APP-1", "Task"));
-        let done = done_with_screen(serde_json::json!({
-            "name": "Resolution", "required": true,
-            "allowedValues": [{"id": "1", "name": "Fixed"}]
-        }));
         app.overlay = Overlay::Transitions {
             key: "APP-1".into(),
-            items: vec![done],
+            items: choices(
+                vec![done_with_screen()],
+                &["resolution".into(), "customfield_1".into()],
+            ),
             selected: 0,
         };
         let screen = |app: &mut App| {
@@ -1324,11 +1483,21 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>()
         };
-        assert!(screen(&mut app).contains("asks for Resolution"));
+        let shown = screen(&mut app);
+        assert!(shown.contains("asks for Root cause, Resolution"), "{shown}");
+        assert!(!shown.contains("Notes") && !shown.contains("Priority"));
         app.key(key(KeyCode::Enter));
         let shown = screen(&mut app);
-        assert!(shown.contains("Done requires a resolution"), "{shown}");
-        assert!(shown.contains("Fixed"));
+        assert!(shown.contains("Done needs Root cause  (1/2)"), "{shown}");
+        assert!(shown.contains("text  ·  Enter next"), "{shown}");
+        app.paste("Config");
+        app.key(key(KeyCode::Enter));
+        let shown = screen(&mut app);
+        assert!(shown.contains("Done needs Resolution  (2/2)"), "{shown}");
+        assert!(
+            shown.contains("Won't Do") && shown.contains("Enter apply"),
+            "{shown}"
+        );
     }
 
     #[test]

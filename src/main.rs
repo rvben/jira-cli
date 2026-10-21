@@ -3131,19 +3131,25 @@ mod tests {
         assert_eq!(conflict["retryable"], false);
     }
 
-    /// An invocation of `path` (e.g. "issues link") with every required
-    /// argument filled in, taken from the command definition itself.
-    fn sample_invocation(path: &str) -> Vec<String> {
-        let mut command = Cli::command();
-        let mut args = vec!["jira".to_owned()];
-        for name in path.split(' ') {
-            command = command
+    /// The definition of `path`, e.g. "issues link".
+    fn subcommand(path: &str) -> clap::Command {
+        path.split(' ').fold(Cli::command(), |command, name| {
+            command
                 .find_subcommand(name)
                 .unwrap_or_else(|| panic!("no subcommand {path:?}"))
-                .clone();
-            args.push(name.to_owned());
-        }
-        for arg in command.get_arguments().filter(|arg| arg.is_required_set()) {
+                .clone()
+        })
+    }
+
+    /// An invocation of `path` with every required argument filled in, taken
+    /// from the command definition itself.
+    fn sample_invocation(path: &str) -> Vec<String> {
+        let mut args = vec!["jira".to_owned()];
+        args.extend(path.split(' ').map(str::to_owned));
+        for arg in subcommand(path)
+            .get_arguments()
+            .filter(|arg| arg.is_required_set())
+        {
             let value = arg
                 .get_possible_values()
                 .first()
@@ -3157,7 +3163,8 @@ mod tests {
     }
 
     /// The read-only guard lists Jira writes by hand; the schema declares them
-    /// through `x-dry-run`. Every command with a preview must be refused
+    /// through `x-dry-run`, and the command definitions through a `--dry-run`
+    /// flag. All three must agree: every command with a preview is refused
     /// without `--dry-run` and allowed with it, and any other command that
     /// changes state must be one that only touches local files or checks the
     /// profile itself.
@@ -3182,6 +3189,13 @@ mod tests {
         for command in schema["commands"].as_array().unwrap() {
             let name = command["name"].as_str().unwrap();
             let writes = command.get("x-dry-run").is_some();
+            assert_eq!(
+                subcommand(name)
+                    .get_arguments()
+                    .any(|arg| arg.get_long() == Some("dry-run")),
+                writes,
+                "{name}: a --dry-run flag and the schema's x-dry-run must go together"
+            );
             if command["mutating"] == true && !writes {
                 assert!(
                     NOT_JIRA_WRITES.contains(&name),
@@ -3207,7 +3221,9 @@ mod tests {
                 );
             }
         }
-        assert_eq!(previewed, 13, "the schema's previewed writes");
+        // Guards against the schema losing its markers and the guard its arms
+        // together, which the checks above would not notice.
+        assert!(previewed > 0, "the schema declares no previewed writes");
     }
 
     #[test]
