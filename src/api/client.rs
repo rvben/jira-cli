@@ -809,14 +809,6 @@ impl JiraClient {
         Ok(resp.transitions)
     }
 
-    /// Execute a transition by transition ID.
-    pub async fn do_transition(&self, key: &str, transition_id: &str) -> Result<(), ApiError> {
-        validate_issue_key(key)?;
-        let payload = serde_json::json!({ "transition": { "id": transition_id } });
-        self.post_empty_response(&format!("issue/{key}/transitions"), &payload)
-            .await
-    }
-
     /// Assign an issue to a user, or unassign with `None`.
     ///
     /// API v3 (Jira Cloud) identifies users by `accountId`.

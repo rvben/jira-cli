@@ -21,7 +21,7 @@ use ratatui::crossterm::terminal::{
 };
 use tokio::task::JoinHandle;
 
-use crate::api::{ApiError, Issue, JiraClient, SearchResponse, Transition};
+use crate::api::{ApiError, Issue, JiraClient, SearchResponse, Transition, TransitionInput};
 use crate::config::Config;
 use editor::Editor;
 
@@ -66,8 +66,8 @@ enum Request {
     Transitions(String),
     Transition {
         key: String,
-        id: String,
-        name: String,
+        transition: Box<Transition>,
+        resolution: Option<String>,
     },
     Comment {
         key: String,
@@ -80,9 +80,22 @@ enum Response {
     Transitions(Vec<Transition>),
     Written,
 }
+/// Why a request failed, and whether a write may still have been applied.
+struct Failure {
+    message: String,
+    outcome_unknown: bool,
+}
+impl From<ApiError> for Failure {
+    fn from(error: ApiError) -> Self {
+        Self {
+            outcome_unknown: error.write_outcome_unknown(),
+            message: error.to_string(),
+        }
+    }
+}
 struct Job {
     request: Request,
-    task: JoinHandle<Result<Response, String>>,
+    task: JoinHandle<Result<Response, Failure>>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -107,6 +120,14 @@ enum Overlay {
     Transitions {
         key: String,
         items: Vec<Transition>,
+        selected: usize,
+    },
+    /// The resolution a transition requires; Esc returns to the transitions.
+    Resolution {
+        key: String,
+        items: Vec<Transition>,
+        transition: usize,
+        options: Vec<String>,
         selected: usize,
     },
     Help,
@@ -272,7 +293,11 @@ impl App {
         self.reselect_key = None;
         self.list_request(0)
     }
-    fn complete(&mut self, request: &Request, result: Result<Response, String>) -> Option<Request> {
+    fn complete(
+        &mut self,
+        request: &Request,
+        result: Result<Response, Failure>,
+    ) -> Option<Request> {
         self.loading = false;
         self.writing = false;
         self.loading_transitions = false;
@@ -281,18 +306,28 @@ impl App {
                 self.error = None;
                 r
             }
-            Err(e) => {
-                self.error = Some(clean(&e));
-                if let Request::Comment { key, body } = request {
-                    self.drafts.insert(key.clone(), body.clone());
-                    self.write_uncertain = Some(key.clone());
-                    self.notice = "Comment result unknown · r inspect before another write".into();
-                } else if let Request::Transition { key, .. } = request {
-                    self.write_uncertain = Some(key.clone());
-                    self.notice =
-                        "Transition result unknown · r inspect before another write".into();
-                } else {
-                    self.notice = "Request failed · r retry".into();
+            Err(failure) => {
+                self.error = Some(clean(&failure.message));
+                match request {
+                    Request::Comment { key, body } => {
+                        self.drafts.insert(key.clone(), body.clone());
+                        if failure.outcome_unknown {
+                            self.write_uncertain = Some(key.clone());
+                            self.notice =
+                                "Comment result unknown · r inspect before another write".into();
+                        } else {
+                            self.notice = "Comment not posted · draft kept · c edit".into();
+                        }
+                    }
+                    Request::Transition { key, .. } if failure.outcome_unknown => {
+                        self.write_uncertain = Some(key.clone());
+                        self.notice =
+                            "Transition result unknown · r inspect before another write".into();
+                    }
+                    Request::Transition { .. } => {
+                        self.notice = "Transition not applied · t choose again".into();
+                    }
+                    _ => self.notice = "Request failed · r retry".into(),
                 }
                 return None;
             }
@@ -361,9 +396,14 @@ impl App {
                     }
                 }
             }
-            (Request::Transition { key, name, .. }, Response::Written) => {
+            (
+                Request::Transition {
+                    key, transition, ..
+                },
+                Response::Written,
+            ) => {
                 self.overlay = Overlay::None;
-                self.notice = format!("{key} moved via {name}");
+                self.notice = format!("{key} moved via {}", transition.name);
                 self.success = true;
                 self.reselect_key = Some(key.clone());
                 return Some(self.list_request(0));
@@ -542,7 +582,7 @@ impl App {
             }
             Overlay::Transitions {
                 key: issue_key,
-                items,
+                mut items,
                 mut selected,
             } => {
                 match key.code {
@@ -551,21 +591,67 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') => {
                         selected = (selected + 1).min(items.len().saturating_sub(1))
                     }
-                    KeyCode::Enter => {
-                        if let Some(transition) = items.get(selected) {
-                            let request = Request::Transition {
+                    KeyCode::Enter if selected < items.len() => {
+                        let options = resolution_choices(&items[selected]);
+                        if options.is_empty() {
+                            return Action::Fetch(Request::Transition {
                                 key: issue_key,
-                                id: transition.id.clone(),
-                                name: transition.name.clone(),
-                            };
-                            return Action::Fetch(request);
+                                transition: Box::new(items.swap_remove(selected)),
+                                resolution: None,
+                            });
                         }
+                        self.overlay = Overlay::Resolution {
+                            key: issue_key,
+                            items,
+                            transition: selected,
+                            options,
+                            selected: 0,
+                        };
+                        return Action::None;
                     }
                     _ => {}
                 }
                 self.overlay = Overlay::Transitions {
                     key: issue_key,
                     items,
+                    selected,
+                };
+                return Action::None;
+            }
+            Overlay::Resolution {
+                key: issue_key,
+                mut items,
+                transition,
+                mut options,
+                mut selected,
+            } => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.overlay = Overlay::Transitions {
+                            key: issue_key,
+                            items,
+                            selected: transition,
+                        };
+                        return Action::None;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(options.len().saturating_sub(1))
+                    }
+                    KeyCode::Enter => {
+                        return Action::Fetch(Request::Transition {
+                            key: issue_key,
+                            transition: Box::new(items.swap_remove(transition)),
+                            resolution: Some(options.swap_remove(selected)),
+                        });
+                    }
+                    _ => {}
+                }
+                self.overlay = Overlay::Resolution {
+                    key: issue_key,
+                    items,
+                    transition,
+                    options,
                     selected,
                 };
                 return Action::None;
@@ -718,6 +804,26 @@ fn clean(input: &str) -> String {
         .collect()
 }
 
+/// The resolutions to choose from when `transition` requires one and has no
+/// default; empty when it does not, or Jira lists no values to pick from.
+fn resolution_choices(transition: &Transition) -> Vec<String> {
+    if !transition
+        .required_inputs()
+        .iter()
+        .any(|(id, _)| *id == "resolution")
+    {
+        return Vec::new();
+    }
+    transition.fields.as_ref().map_or_else(Vec::new, |fields| {
+        fields["resolution"]["allowedValues"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|option| option["name"].as_str().map(str::to_owned))
+            .collect()
+    })
+}
+
 fn valid_project_key(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
@@ -755,16 +861,27 @@ fn start(client: Arc<JiraClient>, request: Request, app: &mut App) -> Job {
                 .get_transitions(&key)
                 .await
                 .map(Response::Transitions),
-            Request::Transition { key, id, .. } => client
-                .do_transition(&key, &id)
-                .await
-                .map(|_| Response::Written),
+            Request::Transition {
+                key,
+                transition,
+                resolution,
+            } => {
+                let input = TransitionInput {
+                    resolution: resolution.as_deref(),
+                    ..Default::default()
+                };
+                match client.prepare_transition(&key, &transition, &input).await {
+                    Ok(prepared) => client.transition_issue(&key, &prepared).await,
+                    Err(error) => Err(error),
+                }
+                .map(|_| Response::Written)
+            }
             Request::Comment { key, body } => client
                 .add_comment(&key, &body)
                 .await
                 .map(|_| Response::Written),
         };
-        result.map_err(|e| e.to_string())
+        result.map_err(Failure::from)
     });
     Job { request, task }
 }
@@ -806,9 +923,12 @@ pub async fn run(
     loop {
         if job.as_ref().is_some_and(|j| j.task.is_finished()) {
             let mut done = job.take().unwrap();
-            let result = (&mut done.task)
-                .await
-                .unwrap_or_else(|e| Err(format!("Request stopped: {e}")));
+            let result = (&mut done.task).await.unwrap_or_else(|e| {
+                Err(Failure {
+                    message: format!("Request stopped: {e}"),
+                    outcome_unknown: true,
+                })
+            });
             if let Some(next) = app.complete(&done.request, result) {
                 job = Some(start(client.clone(), next, &mut app));
             }
@@ -962,9 +1082,107 @@ mod tests {
         };
         assert!(matches!(
             app.key(key(KeyCode::Enter)),
-            Action::Fetch(Request::Transition { key, id, .. })
-                if key == "APP-1" && id == "11"
+            Action::Fetch(Request::Transition { key, transition, resolution: None })
+                if key == "APP-1" && transition.id == "11"
         ));
+    }
+
+    fn done_with_screen(resolution: serde_json::Value) -> Transition {
+        serde_json::from_value(serde_json::json!({
+            "id": "31", "name": "Done",
+            "fields": { "resolution": resolution }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn required_resolution_is_asked_for_and_esc_returns_to_transitions() {
+        let mut app = app(false);
+        let open = Transition {
+            id: "11".into(),
+            name: "Start".into(),
+            to: None,
+            fields: None,
+        };
+        let done = done_with_screen(serde_json::json!({
+            "name": "Resolution", "required": true,
+            "allowedValues": [{"id": "1", "name": "Fixed"}, {"id": "2", "name": "Won't Do"}]
+        }));
+        app.overlay = Overlay::Transitions {
+            key: "APP-1".into(),
+            items: vec![open, done],
+            selected: 1,
+        };
+        assert!(matches!(app.key(key(KeyCode::Enter)), Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Resolution { ref options, transition: 1, .. } if options == &["Fixed", "Won't Do"]
+        ));
+        app.key(key(KeyCode::Esc));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Transitions { selected: 1, .. }
+        ));
+        app.key(key(KeyCode::Enter));
+        app.key(key(KeyCode::Down));
+        assert!(matches!(
+            app.key(key(KeyCode::Enter)),
+            Action::Fetch(Request::Transition { key, transition, resolution: Some(resolution) })
+                if key == "APP-1" && transition.id == "31" && resolution == "Won't Do"
+        ));
+
+        let defaulted = done_with_screen(serde_json::json!({
+            "name": "Resolution", "required": true, "hasDefaultValue": true,
+            "allowedValues": [{"id": "1", "name": "Fixed"}]
+        }));
+        assert!(resolution_choices(&defaulted).is_empty());
+        let optional = done_with_screen(serde_json::json!({
+            "name": "Resolution", "required": false,
+            "allowedValues": [{"id": "1", "name": "Fixed"}]
+        }));
+        assert!(resolution_choices(&optional).is_empty());
+    }
+
+    #[test]
+    fn known_write_failures_do_not_block_further_writes() {
+        let mut app = app(false);
+        app.issues.push(issue("APP-1", "Task"));
+        let transition = Request::Transition {
+            key: "APP-1".into(),
+            transition: Box::new(done_with_screen(serde_json::json!({"required": true}))),
+            resolution: None,
+        };
+        app.complete(
+            &transition,
+            Err(ApiError::InvalidInput("Resolution is required".into()).into()),
+        );
+        assert!(app.write_uncertain.is_none());
+        assert_eq!(app.notice, "Transition not applied · t choose again");
+        assert_eq!(
+            app.error.as_deref(),
+            Some("Invalid input: Resolution is required")
+        );
+
+        let comment = Request::Comment {
+            key: "APP-1".into(),
+            body: "A note".into(),
+        };
+        app.complete(
+            &comment,
+            Err(ApiError::Forbidden("no permission".into()).into()),
+        );
+        assert!(app.write_uncertain.is_none());
+        assert_eq!(app.drafts.get("APP-1").map(String::as_str), Some("A note"));
+
+        app.complete(
+            &transition,
+            Err(ApiError::Api {
+                status: 502,
+                message: "Bad gateway".into(),
+            }
+            .into()),
+        );
+        assert_eq!(app.write_uncertain.as_deref(), Some("APP-1"));
     }
 
     #[test]
@@ -991,7 +1209,13 @@ mod tests {
             body: "A note".into(),
         };
         app.selected = 0;
-        app.complete(&request, Err("connection closed".into()));
+        app.complete(
+            &request,
+            Err(Failure {
+                message: "connection closed".into(),
+                outcome_unknown: true,
+            }),
+        );
         assert_eq!(app.write_uncertain.as_deref(), Some("OPS-1"));
         assert_eq!(app.drafts.get("OPS-1").map(String::as_str), Some("A note"));
         assert!(matches!(app.key(key(KeyCode::Char('c'))), Action::None));
@@ -1016,8 +1240,13 @@ mod tests {
         let next = app.complete(
             &Request::Transition {
                 key: "APP-1".into(),
-                id: "11".into(),
-                name: "Done".into(),
+                transition: Box::new(Transition {
+                    id: "11".into(),
+                    name: "Done".into(),
+                    to: None,
+                    fields: None,
+                }),
+                resolution: None,
             },
             Ok(Response::Written),
         );
@@ -1069,6 +1298,37 @@ mod tests {
             .collect();
         assert!(screen.contains("INSPECTOR"));
         assert!(screen.contains("APP-1"));
+    }
+
+    #[test]
+    fn renders_required_fields_and_resolution_choices() {
+        let mut app = app(false);
+        app.issues.push(issue("APP-1", "Task"));
+        let done = done_with_screen(serde_json::json!({
+            "name": "Resolution", "required": true,
+            "allowedValues": [{"id": "1", "name": "Fixed"}]
+        }));
+        app.overlay = Overlay::Transitions {
+            key: "APP-1".into(),
+            items: vec![done],
+            selected: 0,
+        };
+        let screen = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| view::draw(frame, app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(screen(&mut app).contains("asks for Resolution"));
+        app.key(key(KeyCode::Enter));
+        let shown = screen(&mut app);
+        assert!(shown.contains("Done requires a resolution"), "{shown}");
+        assert!(shown.contains("Fixed"));
     }
 
     #[test]

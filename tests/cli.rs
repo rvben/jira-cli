@@ -2623,8 +2623,8 @@ async fn issue_link_commands_emit_exactly_the_fields_they_declare() {
     }
 }
 
-/// `issues list-transitions` serializes the API type straight through, so its
-/// declaration is the only thing standing between an agent and a silent rename.
+/// `issues list-transitions` describes each transition's screen, nested
+/// fields and options included; the declaration covers every level.
 #[tokio::test]
 async fn issues_list_transitions_emits_exactly_the_fields_it_declares() {
     let server = MockServer::start().await;
@@ -2634,7 +2634,19 @@ async fn issues_list_transitions_emits_exactly_the_fields_it_declares() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "transitions": [{
                 "id": "31", "name": "Done",
-                "to": { "name": "Done", "statusCategory": { "key": "done", "name": "Done" } }
+                "to": { "name": "Done", "statusCategory": { "key": "done", "name": "Done" } },
+                "fields": {
+                    "resolution": {
+                        "name": "Resolution", "required": true, "hasDefaultValue": false,
+                        "schema": { "type": "resolution" },
+                        "allowedValues": [{ "id": "1", "name": "Fixed" }, { "id": "2", "name": "Duplicate" }]
+                    },
+                    "customfield_1": {
+                        "name": "Root cause", "required": false,
+                        "schema": { "type": "array", "items": "option" },
+                        "allowedValues": [{ "id": "7", "value": "Config" }]
+                    }
+                }
             }]
         })))
         .mount(&server)
@@ -2648,6 +2660,28 @@ async fn issues_list_transitions_emits_exactly_the_fields_it_declares() {
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_json_keys_match_schema("issues list-transitions", &json[0], &[]);
+    let fields = &json[0]["fields"];
+    assert_eq!(fields[0]["id"], "resolution", "required fields come first");
+    assert_eq!(fields[0]["allowedValues"][1]["name"], "Duplicate");
+    assert_eq!(fields[1]["items"], "option");
+    assert_eq!(
+        fields[1]["allowedValues"][0]["name"], "Config",
+        "options named by value get a name"
+    );
+
+    let output = run_jira_against(
+        &server,
+        &["issues", "list-transitions", "PROJ-1", "--output", "text"],
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("Resolution [resolution]: required · Fixed, Duplicate"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Root cause [customfield_1]: optional · Config"),
+        "{text}"
+    );
 }
 
 /// The project, user, board and field listings.

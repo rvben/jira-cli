@@ -595,59 +595,101 @@ fn overlay(frame: &mut Frame, app: &App, t: &Theme) {
             items,
             selected,
         } => {
-            let area = centered(frame.area(), 72, (items.len() as u16 + 6).min(19));
-            frame.render_widget(Clear, area);
-            let block = t
-                .panel()
-                .title(Span::styled(" TRANSITION ISSUE ", t.accent()));
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            if inner.height < 3 {
-                return;
-            }
-            let rows = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(inner);
-            frame.render_widget(
-                Paragraph::new(format!("  {key}  ·  choose a workflow action")).style(t.muted()),
-                rows[0],
-            );
-            let visible = rows[1].height as usize;
-            let start = selected
-                .saturating_sub(visible.saturating_sub(1) / 2)
-                .min(items.len().saturating_sub(visible));
-            let lines: Vec<Line> = items
+            let rows = items
                 .iter()
-                .enumerate()
-                .skip(start)
-                .take(visible)
-                .map(|(index, item)| {
+                .map(|item| {
                     let destination = item.to.as_ref().map(|to| to.name.as_str()).unwrap_or("");
-                    Line::styled(
-                        format!(
-                            "  {}  {}  →  {}",
-                            if index == *selected { "▌" } else { " " },
-                            clean(&item.name),
-                            clean(destination)
-                        ),
-                        if index == *selected {
-                            t.accent().bg(t.focus)
-                        } else {
-                            t.text()
-                        },
-                    )
+                    let asks = item
+                        .required_inputs()
+                        .iter()
+                        .map(|(_, name)| clean(name))
+                        .collect::<Vec<_>>();
+                    let mut row = format!("{}  →  {}", clean(&item.name), clean(destination));
+                    if !asks.is_empty() {
+                        row.push_str(&format!("  ·  asks for {}", asks.join(", ")));
+                    }
+                    row
                 })
                 .collect();
-            frame.render_widget(Paragraph::new(lines).style(t.text()), rows[1]);
-            frame.render_widget(
-                Paragraph::new("  Enter apply  ·  Esc cancel  ·  ↑/↓ choose").style(t.muted()),
-                rows[2],
+            picker(
+                frame,
+                t,
+                " TRANSITION ISSUE ",
+                format!("  {key}  ·  choose a workflow action"),
+                rows,
+                *selected,
+                "  Enter apply  ·  Esc cancel  ·  ↑/↓ choose",
             );
         }
+        Overlay::Resolution {
+            key,
+            items,
+            transition,
+            options,
+            selected,
+        } => picker(
+            frame,
+            t,
+            " RESOLUTION ",
+            format!(
+                "  {key}  ·  {} requires a resolution",
+                clean(&items[*transition].name)
+            ),
+            options.iter().map(|option| clean(option)).collect(),
+            *selected,
+            "  Enter apply  ·  Esc back  ·  ↑/↓ choose",
+        ),
     }
+}
+
+/// A titled list with one selected row, kept in view while scrolling.
+fn picker(
+    frame: &mut Frame,
+    t: &Theme,
+    title: &str,
+    subtitle: String,
+    items: Vec<String>,
+    selected: usize,
+    footer: &str,
+) {
+    let area = centered(frame.area(), 72, (items.len() as u16 + 6).min(19));
+    frame.render_widget(Clear, area);
+    let block = t.panel().title(Span::styled(title.to_owned(), t.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 3 {
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(Paragraph::new(subtitle).style(t.muted()), rows[0]);
+    let visible = rows[1].height as usize;
+    let start = selected
+        .saturating_sub(visible.saturating_sub(1) / 2)
+        .min(items.len().saturating_sub(visible));
+    let lines: Vec<Line> = items
+        .into_iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, item)| {
+            let chosen = index == selected;
+            Line::styled(
+                format!("  {}  {item}", if chosen { "▌" } else { " " }),
+                if chosen {
+                    t.accent().bg(t.focus)
+                } else {
+                    t.text()
+                },
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).style(t.text()), rows[1]);
+    frame.render_widget(Paragraph::new(footer.to_owned()).style(t.muted()), rows[2]);
 }
 
 fn input_overlay(

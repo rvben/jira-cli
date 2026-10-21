@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 fn failed_item(key: &str, error: &ApiError, phase: &str) -> Value {
     let envelope = error_envelope_for(error);
-    let outcome = if phase == "write" && uncertain_response(error) {
+    let outcome = if phase == "write" && error.write_outcome_unknown() {
         "unknown"
     } else {
         "failed"
@@ -209,15 +209,6 @@ fn aborts_run(error: &ApiError) -> bool {
         | ApiError::Forbidden(_)
         | ApiError::RateLimit
         | ApiError::Http(_) => true,
-        ApiError::Api { status, .. } => *status >= 500,
-        _ => false,
-    }
-}
-
-fn uncertain_response(error: &ApiError) -> bool {
-    match error {
-        ApiError::WithDetails { source, .. } => uncertain_response(source),
-        ApiError::Http(_) => true,
         ApiError::Api { status, .. } => *status >= 500,
         _ => false,
     }

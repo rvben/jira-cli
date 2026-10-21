@@ -193,8 +193,10 @@ without a project, it includes issues from all active sprints you can access.
 | `o`, `?`, `q` | Open in browser, show help, quit |
 
 In the comment editor, Enter starts a new line and Ctrl+S opens the review
-screen. Esc keeps the draft for this session. If Jira does not confirm a write,
-refresh the issue before trying again. Write actions are unavailable when the
+screen. Esc keeps the draft for this session. The transition picker marks
+transitions whose screens need fields and asks for a resolution when one is
+required; other required fields are set with `jira issues transition --field`.
+If Jira does not confirm a write, refresh the issue before trying again. Write actions are unavailable when the
 active profile is read-only. `jira tui` requires a terminal; scripts can use
 `jira issues mine` or `jira search` instead.
 
@@ -249,7 +251,7 @@ jira issues update MYAPP-123 --type Story     # Task -> Story, same hierarchy le
 jira issues update MYAPP-123 --assignee none
 
 # Transition
-jira issues list-transitions MYAPP-123
+jira issues list-transitions MYAPP-123  # destination status and the fields each one asks for
 jira issues transition MYAPP-123 --to "In Review"
 jira issues transition MYAPP-123 --to Done --resolution Fixed --comment "Released in 1.4"
 jira issues transition MYAPP-123 --to Done --field "Root cause=Cache race" --dry-run

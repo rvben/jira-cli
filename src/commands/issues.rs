@@ -686,21 +686,18 @@ pub async fn list_transitions(
     out: &OutputConfig,
     key: &str,
 ) -> Result<(), ApiError> {
-    let ts = client.get_transitions(key).await?;
-
+    let described = client
+        .get_transitions(key)
+        .await?
+        .iter()
+        .map(transitions::describe)
+        .collect::<Vec<_>>();
     if out.json {
-        out.print_data(&serde_json::to_string_pretty(&ts).expect("failed to serialize JSON"));
+        out.print_data(
+            &serde_json::to_string_pretty(&described).expect("failed to serialize JSON"),
+        );
     } else {
-        let color = use_color();
-        let header = format!("{:<6} {}", "ID", "Name");
-        if color {
-            println!("{}", header.bold());
-        } else {
-            println!("{header}");
-        }
-        for t in &ts {
-            println!("{:<6} {}", t.id, t.name);
-        }
+        transitions::print(&described, use_color());
     }
     Ok(())
 }

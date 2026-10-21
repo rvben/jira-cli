@@ -467,6 +467,20 @@ pub struct Transition {
     pub fields: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
+impl Transition {
+    /// The screen fields that need a value from you: required and without a
+    /// default, as `(id, name)`. Empty when the screen asks for nothing or
+    /// Jira did not report it. The issue may already have some of them set.
+    pub fn required_inputs(&self) -> Vec<(&str, &str)> {
+        self.fields
+            .iter()
+            .flatten()
+            .filter(|(_, field)| field["required"] == true && field["hasDefaultValue"] != true)
+            .map(|(id, field)| (id.as_str(), field["name"].as_str().unwrap_or(id)))
+            .collect()
+    }
+}
+
 /// The target status of a transition.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

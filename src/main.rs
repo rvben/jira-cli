@@ -491,7 +491,8 @@ enum IssuesCommand {
         dry_run: bool,
     },
 
-    /// List available transitions for an issue
+    /// List available transitions for an issue, with each one's destination
+    /// status and screen fields (required ones, allowed resolutions)
     ListTransitions {
         /// Issue key (e.g. PROJ-123)
         key: String,
@@ -1893,6 +1894,18 @@ fn schema_json() -> serde_json::Value {
                     {"name": "statusCategory", "type": "object", "nullable": true, "fields": [
                         {"name": "key", "type": "string", "description": "Workflow category, e.g. \"new\", \"indeterminate\", \"done\""},
                         {"name": "name", "type": "string"}
+                    ]}
+                ]},
+                {"name": "fields", "type": "object[]", "nullable": true, "description": "The transition screen's fields, required first: what to pass as --resolution or --field. Empty when the transition has no screen; null when Jira did not report it", "fields": [
+                    {"name": "id", "type": "string", "description": "Field ID, accepted by --field"},
+                    {"name": "name", "type": "string", "description": "Display name, also accepted by --field"},
+                    {"name": "required", "type": "boolean"},
+                    {"name": "hasDefaultValue", "type": "boolean", "description": "A required field with a default needs no value"},
+                    {"name": "type", "type": "string", "nullable": true, "description": "Jira's schema type, e.g. \"resolution\", \"option\", \"user\", \"array\""},
+                    {"name": "items", "type": "string", "nullable": true, "description": "Item type when `type` is \"array\""},
+                    {"name": "allowedValues", "type": "object[]", "nullable": true, "description": "The values Jira accepts; null when the field is free-form", "fields": [
+                        {"name": "id", "type": "string", "nullable": true},
+                        {"name": "name", "type": "string", "nullable": true, "description": "Pass this to --resolution or --field"}
                     ]}
                 ]}
             ]),

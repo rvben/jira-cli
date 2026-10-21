@@ -3,7 +3,9 @@ use wiremock::matchers::{
 };
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use jira_cli::api::{ApiError, AuthType, IssueDraft, IssueUpdate, JiraClient};
+use jira_cli::api::{
+    ApiError, AuthType, IssueDraft, IssueUpdate, JiraClient, Transition, TransitionInput,
+};
 use jira_cli::output::OutputConfig;
 use tempfile::TempDir;
 
@@ -3136,8 +3138,23 @@ async fn get_project_404_returns_not_found() {
 
 // ── Error cases for write operations ─────────────────────────────────────────
 
+/// Apply transition `id` without screen metadata, as a caller that only knows
+/// the transition ID would.
+async fn transition(client: &JiraClient, key: &str, id: &str) -> Result<(), ApiError> {
+    let transition = Transition {
+        id: id.into(),
+        name: "Example".into(),
+        to: None,
+        fields: None,
+    };
+    let prepared = client
+        .prepare_transition(key, &transition, &TransitionInput::default())
+        .await?;
+    client.transition_issue(key, &prepared).await.map(|_| ())
+}
+
 #[tokio::test]
-async fn do_transition_404_returns_not_found() {
+async fn transition_404_returns_not_found() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -3147,7 +3164,7 @@ async fn do_transition_404_returns_not_found() {
         .await;
 
     let client = test_client(&server);
-    let err = client.do_transition("PROJ-999", "21").await.unwrap_err();
+    let err = transition(&client, "PROJ-999", "21").await.unwrap_err();
     assert!(matches!(err, ApiError::NotFound(_)));
 }
 
@@ -4034,7 +4051,7 @@ async fn transition_409_returns_conflict_error() {
         .await;
 
     let client = test_client(&server);
-    let err = client.do_transition("PROJ-1", "31").await.unwrap_err();
+    let err = transition(&client, "PROJ-1", "31").await.unwrap_err();
 
     assert!(
         matches!(err, ApiError::Conflict(_)),
@@ -4909,7 +4926,7 @@ async fn read_only_client_blocks_every_write_boundary_but_allows_search_posts() 
         client.create_issue(&draft, &[]).await.map(|_| ()),
         client.update_issue("PROJ-1", &update, &[]).await,
         client.assign_issue("PROJ-1", None).await,
-        client.do_transition("PROJ-1", "21").await,
+        transition(&client, "PROJ-1", "21").await,
         client.add_comment("PROJ-1", "Example").await.map(|_| ()),
         client
             .log_work("PROJ-1", "1h", None, None)

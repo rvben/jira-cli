@@ -14,7 +14,7 @@
 //! All write tests create issues tagged `[e2e-auto]` in the summary so they can
 //! be bulk-deleted after a test run if needed.
 
-use jira_cli::api::{AuthType, IssueDraft, IssueUpdate, JiraClient};
+use jira_cli::api::{AuthType, IssueDraft, IssueUpdate, JiraClient, TransitionInput};
 use jira_cli::output::OutputConfig;
 
 fn e2e_client() -> Option<(JiraClient, String)> {
@@ -239,10 +239,14 @@ async fn e2e_create_comment_transition_show_delete() {
         .iter()
         .find(|t| t.name.eq_ignore_ascii_case("In Progress"))
         .expect("'In Progress' transition not found");
-    client
-        .do_transition(key, &in_progress.id)
+    let prepared = client
+        .prepare_transition(key, in_progress, &TransitionInput::default())
         .await
-        .expect("do_transition failed");
+        .expect("prepare_transition failed");
+    client
+        .transition_issue(key, &prepared)
+        .await
+        .expect("transition_issue failed");
 
     let after = client
         .get_issue(key)

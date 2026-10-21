@@ -95,6 +95,18 @@ impl ApiError {
             remedy: None,
         }
     }
+
+    /// Whether a write that failed this way may still have been applied: the
+    /// connection broke or Jira failed internally, so only re-reading the
+    /// issue tells.
+    pub fn write_outcome_unknown(&self) -> bool {
+        match self {
+            ApiError::WithDetails { source, .. } => source.write_outcome_unknown(),
+            ApiError::Http(_) => true,
+            ApiError::Api { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for ApiError {
