@@ -920,6 +920,31 @@ fn login_with_token_fields() -> serde_json::Value {
     ])
 }
 
+/// Whether `command` writes to Jira, so read-only profiles refuse it before
+/// connecting. Previews (`--dry-run`) only read. The workbench checks the
+/// profile itself and keeps browsing available.
+fn writes_to_jira(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Issues(cmd) if matches!(
+            cmd.as_ref(),
+            IssuesCommand::Create { dry_run: false, .. }
+                | IssuesCommand::Update { dry_run: false, .. }
+                | IssuesCommand::Move { dry_run: false, .. }
+                | IssuesCommand::Comment { dry_run: false, .. }
+                | IssuesCommand::Transition { dry_run: false, .. }
+                | IssuesCommand::Assign { dry_run: false, .. }
+                | IssuesCommand::Link { dry_run: false, .. }
+                | IssuesCommand::Unlink { dry_run: false, .. }
+                | IssuesCommand::LogWork { dry_run: false, .. }
+                | IssuesCommand::Attach { dry_run: false, .. }
+                | IssuesCommand::DeleteAttachment { dry_run: false, .. }
+                | IssuesCommand::BulkTransition { dry_run: false, .. }
+                | IssuesCommand::BulkAssign { dry_run: false, .. }
+        )
+    )
+}
+
 fn parse_cli() -> Result<Cli, clap::Error> {
     let matches = Cli::command().try_get_matches()?;
     let mut cli = Cli::from_arg_matches(&matches)?;
@@ -1079,32 +1104,11 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
 
     let cfg = Config::load(cli.host, cli.email, cli.profile)?;
 
-    if cfg.read_only {
-        let is_write = matches!(
-            &cli.command,
-            Command::Issues(cmd) if matches!(
-                cmd.as_ref(),
-                IssuesCommand::Create { dry_run: false, .. }
-                    | IssuesCommand::Update { dry_run: false, .. }
-                    | IssuesCommand::Move { dry_run: false, .. }
-                    | IssuesCommand::Comment { dry_run: false, .. }
-                    | IssuesCommand::Transition { dry_run: false, .. }
-                    | IssuesCommand::Assign { dry_run: false, .. }
-                    | IssuesCommand::Link { dry_run: false, .. }
-                    | IssuesCommand::Unlink { dry_run: false, .. }
-                    | IssuesCommand::LogWork { dry_run: false, .. }
-                    | IssuesCommand::Attach { dry_run: false, .. }
-                    | IssuesCommand::DeleteAttachment { dry_run: false, .. }
-                    | IssuesCommand::BulkTransition { dry_run: false, .. }
-                    | IssuesCommand::BulkAssign { dry_run: false, .. }
-            )
-        );
-        if is_write {
-            return Err(ApiError::InvalidInput(
-                "read-only mode is enabled (unset JIRA_READ_ONLY or remove read_only from config to allow writes)".into(),
-            )
-            .into());
-        }
+    if cfg.read_only && writes_to_jira(&cli.command) {
+        return Err(ApiError::InvalidInput(
+            "read-only mode is enabled (unset JIRA_READ_ONLY or remove read_only from config to allow writes)".into(),
+        )
+        .into());
     }
 
     let client = JiraClient::new_with_cloud(
@@ -3125,6 +3129,85 @@ mod tests {
 
         assert_eq!(conflict["exit_code"], 7);
         assert_eq!(conflict["retryable"], false);
+    }
+
+    /// An invocation of `path` (e.g. "issues link") with every required
+    /// argument filled in, taken from the command definition itself.
+    fn sample_invocation(path: &str) -> Vec<String> {
+        let mut command = Cli::command();
+        let mut args = vec!["jira".to_owned()];
+        for name in path.split(' ') {
+            command = command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no subcommand {path:?}"))
+                .clone();
+            args.push(name.to_owned());
+        }
+        for arg in command.get_arguments().filter(|arg| arg.is_required_set()) {
+            let value = arg
+                .get_possible_values()
+                .first()
+                .map_or_else(|| "1".to_owned(), |value| value.get_name().to_owned());
+            if let Some(long) = arg.get_long() {
+                args.push(format!("--{long}"));
+            }
+            args.push(value);
+        }
+        args
+    }
+
+    /// The read-only guard lists Jira writes by hand; the schema declares them
+    /// through `x-dry-run`. Every command with a preview must be refused
+    /// without `--dry-run` and allowed with it, and any other command that
+    /// changes state must be one that only touches local files or checks the
+    /// profile itself.
+    #[test]
+    fn read_only_guard_covers_every_jira_write_in_the_schema() {
+        const NOT_JIRA_WRITES: &[&str] = &[
+            "tui",
+            "issues download-attachment",
+            "auth login",
+            "auth logout",
+            "auth migrate",
+            "config init",
+            "config remove",
+            "profile use",
+            "profile remove",
+            "init",
+        ];
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let mut previewed = 0;
+        for command in schema["commands"].as_array().unwrap() {
+            let name = command["name"].as_str().unwrap();
+            let writes = command.get("x-dry-run").is_some();
+            if command["mutating"] == true && !writes {
+                assert!(
+                    NOT_JIRA_WRITES.contains(&name),
+                    "{name} changes state but has no --dry-run preview; guard it in writes_to_jira or list it as not writing to Jira"
+                );
+            }
+            let args = sample_invocation(name);
+            let cli =
+                Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{}: {e}", args.join(" ")));
+            assert_eq!(
+                writes_to_jira(&cli.command),
+                writes,
+                "read-only guard disagrees with the schema about {}",
+                args.join(" ")
+            );
+            if writes {
+                previewed += 1;
+                let preview = Cli::try_parse_from(args.iter().chain(&["--dry-run".to_owned()]))
+                    .unwrap_or_else(|e| panic!("{name} --dry-run: {e}"));
+                assert!(
+                    !writes_to_jira(&preview.command),
+                    "{name} --dry-run must stay available in read-only mode"
+                );
+            }
+        }
+        assert_eq!(previewed, 13, "the schema's previewed writes");
     }
 
     #[test]
