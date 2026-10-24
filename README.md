@@ -24,6 +24,14 @@ $ jira issues list --project MYAPP --json
 
 ## Installation
 
+### Homebrew
+
+```sh
+brew install rvben/tap/jira-cli
+```
+
+### Other installation methods
+
 ```sh
 uv tool install jira-cli-rs
 ```
