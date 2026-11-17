@@ -1322,7 +1322,7 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
                 c.author.display_name.clone()
             };
             writeln!(out, "  {} - {}", author, format_date(&c.created))?;
-            let body = display_text(c.body.as_ref(), terminal_width().saturating_sub(4), color);
+            let body = display_text(c.body.as_ref(), 4, color);
             for line in body.lines() {
                 writeln!(out, "    {line}")?;
             }

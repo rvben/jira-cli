@@ -1964,6 +1964,41 @@ async fn issues_show_renders_wiki_markup_unless_raw() {
 }
 
 #[tokio::test]
+async fn wiki_issue_show_comments_respect_columns() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    let mut issue = full_issue();
+    issue["fields"]["comment"]["comments"][0]["body"] =
+        serde_json::json!("wrapcheck each line should fit inside forty columns");
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issue))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    let output = jira_cmd(&dir)
+        .args(["-o", "text", "issues", "show", "PROJ-1"])
+        .env("COLUMNS", "40")
+        .env("JIRA_HOST", server.uri())
+        .env("JIRA_EMAIL", "test@example.com")
+        .env("JIRA_TOKEN", "test-token")
+        .env("JIRA_API_VERSION", "2")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let first_line = stdout
+        .lines()
+        .find(|line| line.contains("wrapcheck"))
+        .unwrap();
+    assert_eq!(first_line, "    wrapcheck each line should fit");
+}
+
+#[tokio::test]
 async fn issues_show_reads_current_and_historical_sprints_by_schema() {
     for legacy in [false, true] {
         let server = MockServer::start().await;
