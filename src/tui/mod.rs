@@ -174,6 +174,7 @@ struct App {
     show_detail: bool,
     detail_scroll: u16,
     detail_max_scroll: u16,
+    body_cache: Option<(String, Vec<ratatui::text::Line<'static>>)>,
     is_last: bool,
     next_offset: usize,
     loading: bool,
@@ -204,6 +205,7 @@ impl App {
             show_detail: false,
             detail_scroll: 0,
             detail_max_scroll: 0,
+            body_cache: None,
             is_last: true,
             next_offset: 0,
             loading: false,
@@ -1474,6 +1476,37 @@ mod tests {
             .collect();
         assert!(screen.contains("INSPECTOR"));
         assert!(screen.contains("APP-1"));
+    }
+
+    #[test]
+    fn renders_wiki_markup_in_the_inspector() {
+        let mut app = app(false);
+        let detail: Issue = serde_json::from_value(serde_json::json!({
+            "id": "1", "key": "APP-1",
+            "fields": {
+                "summary": "Wiki", "status": { "name": "To Do" }, "issuetype": { "name": "Task" },
+                "description": "h2. Cause\n\n* one {{mono}}\n\n||col||val||\n|a|1|"
+            }
+        }))
+        .unwrap();
+        app.issues.push(detail.clone());
+        app.detail = Some(detail);
+        app.show_detail = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("• one mono"), "{screen}");
+        assert!(screen.contains("│ col │ val │"), "{screen}");
+        assert!(
+            !screen.contains("h2.") && !screen.contains("||"),
+            "{screen}"
+        );
     }
 
     #[test]

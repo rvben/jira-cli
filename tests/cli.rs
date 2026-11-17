@@ -1919,6 +1919,51 @@ async fn issues_show_emits_exactly_the_fields_it_declares() {
 }
 
 #[tokio::test]
+async fn issues_show_renders_wiki_markup_unless_raw() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/field"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    let mut issue = full_issue();
+    issue["fields"]["description"] =
+        serde_json::json!("h2. Plan\r\n* *bold* step\r\n||k||v||\r\n|a|b|");
+    Mock::given(method("GET"))
+        .and(path("/rest/api/2/issue/PROJ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issue))
+        .mount(&server)
+        .await;
+    let show = |extra: &[&str]| {
+        let dir = TempDir::new().unwrap();
+        let mut cmd = jira_cmd(&dir);
+        cmd.args(["-o", "text", "issues", "show", "PROJ-1"])
+            .args(extra)
+            .env("JIRA_HOST", server.uri())
+            .env("JIRA_EMAIL", "test@example.com")
+            .env("JIRA_TOKEN", "test-token")
+            .env("JIRA_API_VERSION", "2");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let rendered = show(&[]);
+    assert!(rendered.contains("Plan\n"), "{rendered}");
+    assert!(rendered.contains("• bold step"), "{rendered}");
+    assert!(rendered.contains("│ a "), "{rendered}");
+    assert!(!rendered.contains("h2."), "{rendered}");
+
+    let raw = show(&["--raw-markup"]);
+    assert!(raw.contains("h2. Plan"), "{raw}");
+    assert!(raw.contains("||k||v||"), "{raw}");
+}
+
+#[tokio::test]
 async fn issues_show_reads_current_and_historical_sprints_by_schema() {
     for legacy in [false, true] {
         let server = MockServer::start().await;

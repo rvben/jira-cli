@@ -386,38 +386,65 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
             t,
         );
     }
-    if app.detail.as_ref().is_some() {
-        let description = clean_multiline(&issue.description_text());
-        lines.push(Line::raw(""));
-        lines.push(Line::styled("  DESCRIPTION", t.accent()));
-        if description.trim().is_empty() {
-            lines.push(Line::styled("  No description", t.muted()));
-        } else {
-            for line in description.lines() {
-                lines.push(Line::styled(format!("  {line}"), t.text()));
-            }
-        }
-        if let Some(comments) = &issue.fields.comment
-            && !comments.comments.is_empty()
-        {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                format!("  COMMENTS  ·  {}", comments.total),
-                t.accent(),
-            ));
-            for comment in comments.comments.iter().rev().take(5) {
-                lines.push(Line::styled(
-                    format!(
-                        "  {}  ·  {}",
-                        clean(&comment.author.display_name),
-                        comment.created.chars().take(10).collect::<String>()
-                    ),
-                    t.muted(),
-                ));
-                for line in clean_multiline(&comment.body_text()).lines() {
-                    lines.push(Line::styled(format!("  {line}"), t.text()));
+    if app.detail.is_some() {
+        // parsing and wrapping the wiki markup is costly, redo it only when
+        // the issue, its comments or the width change
+        let key = format!(
+            "{}|{:?}|{}|{}",
+            issue.key,
+            issue.fields.updated,
+            issue
+                .fields
+                .comment
+                .as_ref()
+                .map_or(0, |c| c.comments.len()),
+            inner.width
+        );
+        match app.body_cache.as_ref().filter(|(k, _)| *k == key) {
+            Some((_, cached)) => lines.extend(cached.iter().cloned()),
+            None => {
+                let mut body = Vec::new();
+                let description = body_lines(
+                    issue.fields.description.as_ref(),
+                    || issue.description_text(),
+                    inner.width,
+                    t,
+                );
+                body.push(Line::raw(""));
+                body.push(Line::styled("  DESCRIPTION", t.accent()));
+                if description.is_empty() {
+                    body.push(Line::styled("  No description", t.muted()));
+                } else {
+                    body.extend(description);
                 }
-                lines.push(Line::raw(""));
+                if let Some(comments) = &issue.fields.comment
+                    && !comments.comments.is_empty()
+                {
+                    body.push(Line::raw(""));
+                    body.push(Line::styled(
+                        format!("  COMMENTS  ·  {}", comments.total),
+                        t.accent(),
+                    ));
+                    for comment in comments.comments.iter().rev().take(5) {
+                        body.push(Line::styled(
+                            format!(
+                                "  {}  ·  {}",
+                                clean(&comment.author.display_name),
+                                comment.created.chars().take(10).collect::<String>()
+                            ),
+                            t.muted(),
+                        ));
+                        body.extend(body_lines(
+                            comment.body.as_ref(),
+                            || comment.body_text(),
+                            inner.width,
+                            t,
+                        ));
+                        body.push(Line::raw(""));
+                    }
+                }
+                lines.extend(body.iter().cloned());
+                app.body_cache = Some((key, body));
             }
         }
     } else {
@@ -432,6 +459,61 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, t: &Theme) {
         .min(u16::MAX as usize) as u16;
     app.detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
     frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), inner);
+}
+/// Description or comment body, indented by two columns. Data Center wiki
+/// markup is rendered; Cloud ADF and `--raw-markup` keep the plain text.
+fn body_lines(
+    value: Option<&serde_json::Value>,
+    plain: impl FnOnce() -> String,
+    width: u16,
+    t: &Theme,
+) -> Vec<Line<'static>> {
+    let indent = || Span::styled("  ", t.text());
+    match crate::wiki::source(value) {
+        Some(src) => {
+            let src = clean_multiline(src);
+            // two for the indent, one spare so ratatui does not re-wrap
+            let width = usize::from(width).saturating_sub(3);
+            crate::wiki::render_lines(&src, width, true)
+                .into_iter()
+                .map(|line| {
+                    let mut spans = vec![indent()];
+                    spans.extend(
+                        line.into_iter()
+                            .map(|sp| Span::styled(sp.text, wiki_style(sp.style, t))),
+                    );
+                    Line::from(spans)
+                })
+                .collect()
+        }
+        None => {
+            let plain = clean_multiline(&plain());
+            if plain.trim().is_empty() {
+                return Vec::new();
+            }
+            plain
+                .lines()
+                .map(|line| Line::styled(format!("  {line}"), t.text()))
+                .collect()
+        }
+    }
+}
+fn wiki_style(s: crate::wiki::Style, t: &Theme) -> Style {
+    let mut style = if s.dim { t.muted() } else { t.text() };
+    if s.mono {
+        style = style.fg(t.accent);
+    }
+    for (on, modifier) in [
+        (s.bold, Modifier::BOLD),
+        (s.italic, Modifier::ITALIC),
+        (s.underline, Modifier::UNDERLINED),
+        (s.strike, Modifier::CROSSED_OUT),
+    ] {
+        if on {
+            style = style.add_modifier(modifier);
+        }
+    }
+    style
 }
 fn field(lines: &mut Vec<Line<'static>>, label: &str, value: &str, t: &Theme) {
     lines.push(Line::from(vec![

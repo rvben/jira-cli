@@ -88,6 +88,15 @@ struct Cli {
     #[arg(long, global = true)]
     no_color: bool,
 
+    /// Show Jira wiki markup as stored instead of rendering it [env: JIRA_RAW_MARKUP]
+    #[arg(
+        long,
+        env = "JIRA_RAW_MARKUP",
+        global = true,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    raw_markup: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -858,6 +867,7 @@ async fn main() {
         }
     };
     jira_cli::output::set_no_color(cli.no_color);
+    jira_cli::output::set_raw_markup(cli.raw_markup);
     let text_mode = cli.output == "text";
     let json_mode = cli.json || cli.output == "json";
     let out = OutputConfig::new(json_mode, text_mode, cli.quiet);
@@ -2307,7 +2317,14 @@ fn schema_json() -> serde_json::Value {
 
     // Global arg IDs excluded from per-command arg lists.
     let global_ids: HashSet<&str> = [
-        "json", "output", "quiet", "no_color", "host", "email", "profile",
+        "json",
+        "output",
+        "quiet",
+        "no_color",
+        "raw_markup",
+        "host",
+        "email",
+        "profile",
     ]
     .iter()
     .copied()
@@ -2381,6 +2398,7 @@ fn schema_json() -> serde_json::Value {
                 ,{ "name": "JIRA_CLOUD_ID", "description": "Atlassian Cloud ID required by scoped tokens", "required": false }
                 ,{ "name": "JIRA_TOKEN_KIND", "description": "Cloud token type: scoped or classic", "required": false }
                 ,{ "name": "JIRA_STORY_POINTS_FIELD", "description": "Custom field ID to read story points from (e.g. customfield_10016), instead of discovering it", "required": false }
+                ,{ "name": "JIRA_RAW_MARKUP", "description": "Show Jira wiki markup as stored instead of rendering it in text output and the TUI (same as --raw-markup)", "required": false }
             ]
         },
         // The guard exists so a Jira account can be handed to an agent without
