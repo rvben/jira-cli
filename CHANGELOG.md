@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.21](https://github.com/rvben/jira-cli/compare/v0.4.20...v0.4.21) - 2026-11-17
+
+### Added
+
+- render Data Center wiki markup in issues and the TUI (#15) ([c3fdb4a](https://github.com/rvben/jira-cli/commit/c3fdb4aff9e0c53d79ed062b3b819e0f574d9f15))
+- **tui**: add a my sprint view on key 5 (#16) ([39754d7](https://github.com/rvben/jira-cli/commit/39754d77217f6b8ff85d8e5841311c4a486980ef))
+
+### Fixed
+
+- **issues**: respect terminal width when rendering comments ([060e99e](https://github.com/rvben/jira-cli/commit/060e99e37d4836b717e954344a06e953fc5b12e4))
+
 ## [0.4.20](https://github.com/rvben/jira-cli/compare/v0.4.19...v0.4.20) - 2026-10-21
 
 ### Added
