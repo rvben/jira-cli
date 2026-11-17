@@ -190,7 +190,7 @@ without a project, it includes issues from all active sprints you can access.
 
 | Key | Action |
 |-----|--------|
-| `1`, `2`, `3`, `4` | My work, current sprint, recent issues, JQL search |
+| `1`, `2`, `3`, `4`, `5` | My work, current sprint, recent issues, JQL search, my issues in the current sprint |
 | `j` / `k`, arrows | Select an issue |
 | `/` | Enter a JQL query |
 | `p` | Change the project for the preset views |
