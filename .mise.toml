@@ -6,7 +6,7 @@ RUST_BACKTRACE = "1"
 BINSTALL_DISABLE_TELEMETRY = "true"
 
 [tools]
-rust = "1.96.0"
+rust = "1.100.0"
 actionlint = "1.7.12"
 cargo-binstall = "1.22.0"
 "cargo:cargo-nextest" = "0.9.143"

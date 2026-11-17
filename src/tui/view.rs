@@ -164,6 +164,7 @@ fn tabs(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
             (Scope::Sprint, "2 Sprint"),
             (Scope::Recent, "3 Recent"),
             (Scope::Search, "4 JQL"),
+            (Scope::MySprint, "5 My sprint"),
         ]
     } else {
         [
@@ -171,6 +172,7 @@ fn tabs(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
             (Scope::Sprint, "2  Current sprint"),
             (Scope::Recent, "3  Recent"),
             (Scope::Search, "4  Search"),
+            (Scope::MySprint, "5  My sprint"),
         ]
     };
     let mut spans = vec![Span::raw("  ")];
@@ -193,6 +195,13 @@ fn tabs(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
             }
         }
         Scope::Recent => "Recently updated · all assignees".into(),
+        Scope::MySprint => {
+            if let Some(project) = &app.project {
+                format!("Active sprints in {project} · assigned to you")
+            } else {
+                "Active sprints · assigned to you".into()
+            }
+        }
         Scope::Search => format!("JQL  ·  {}", clean(&app.query)),
     };
     frame.render_widget(
@@ -235,7 +244,7 @@ fn list(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
             "Could not load issues. Press r to retry."
         } else if app.scope == Scope::Search {
             "No issues matched this JQL. Press / to edit the query."
-        } else if app.scope == Scope::Sprint {
+        } else if matches!(app.scope, Scope::Sprint | Scope::MySprint) {
             "No issues in an active sprint here. Try another project or JQL search (/)."
         } else {
             "No issues here. Try Recent (3) or search Jira (/)."
@@ -588,7 +597,7 @@ fn overlay(frame: &mut Frame, app: &App, t: &Theme) {
             let compact = frame.area().width < 70 || frame.area().height < 18;
             let lines = if compact {
                 vec![
-                    "1 Mine  2 Sprint  3 Recent  4 Search",
+                    "1 Mine  2 Sprint  3 Recent  4 Search  5 My sprint",
                     "j/k move  Enter detail  Esc list",
                     "/ JQL  f filter  p project",
                     "n more  r refresh  o browser",
@@ -602,7 +611,7 @@ fn overlay(frame: &mut Frame, app: &App, t: &Theme) {
             } else {
                 vec![
                     "VIEWS",
-                    "1 My work    2 Active sprints    3 Recent    4 Search",
+                    "1 My work  2 Active sprints  3 Recent  4 Search  5 My sprint",
                     "",
                     "BROWSE",
                     "j/k or arrows  move     Enter  inspect     Esc  list",

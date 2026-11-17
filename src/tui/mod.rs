@@ -54,6 +54,7 @@ enum Scope {
     Sprint,
     Recent,
     Search,
+    MySprint,
 }
 
 #[derive(Clone)]
@@ -227,6 +228,7 @@ impl App {
             Scope::Mine => "assignee = currentUser()",
             Scope::Sprint => "sprint in openSprints()",
             Scope::Recent => "",
+            Scope::MySprint => "assignee = currentUser() AND sprint in openSprints()",
             Scope::Search => unreachable!(),
         };
         let project = self
@@ -733,6 +735,7 @@ impl App {
             KeyCode::Char('1') => Action::Fetch(self.set_scope(Scope::Mine)),
             KeyCode::Char('2') => Action::Fetch(self.set_scope(Scope::Sprint)),
             KeyCode::Char('3') => Action::Fetch(self.set_scope(Scope::Recent)),
+            KeyCode::Char('5') => Action::Fetch(self.set_scope(Scope::MySprint)),
             KeyCode::Char('4') | KeyCode::Char('/') => {
                 self.overlay = Overlay::Input {
                     kind: InputKind::Search,
@@ -1110,6 +1113,19 @@ mod tests {
     }
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn my_sprint_scope_combines_assignee_and_open_sprints() {
+        let mut app = app(false);
+        assert!(
+            matches!(app.key(key(KeyCode::Char('5'))), Action::Fetch(Request::List { jql, offset: 0 }) if jql == "assignee = currentUser() AND sprint in openSprints() AND project = \"APP\" ORDER BY updated DESC")
+        );
+        app.project = None;
+        assert_eq!(
+            app.jql(),
+            "assignee = currentUser() AND sprint in openSprints() ORDER BY updated DESC"
+        );
     }
 
     #[test]

@@ -20,8 +20,8 @@ jobs:
       min-age: 7d
       max-bump: minor
       prepare-command: >-
-        rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt &&
-        rustup default 1.96.0 &&
+        rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt &&
+        rustup default 1.100.0 &&
         cargo install cargo-nextest --locked
       validation-command: make check
       fail-on-blocked: false
