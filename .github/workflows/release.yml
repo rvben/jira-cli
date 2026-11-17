@@ -74,7 +74,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            os: [self-hosted, Linux, ARM64]
+            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             os: [self-hosted, macOS, ARM64]
           - target: aarch64-apple-darwin
@@ -98,33 +98,13 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cargo install --locked cargo-zigbuild --version 0.23.2
-      - name: Prepare cargo cache dirs (arm64 linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: mkdir -p "${RUNNER_TOOL_CACHE}/cargo-cache/registry" "${RUNNER_TOOL_CACHE}/cargo-cache/git"
       - name: Clean stale build outputs
-        # Wipe every path the upload-artifact glob below can pick up, so prior
-        # runs cannot leak tarballs or wheels into this run's artifact. Both
-        # macOS targets share one self-hosted runner, so cross-target leakage
-        # is possible too. Self-hosted runners do not clean automatically.
-        # On the arm64 linux runner, maturin-action runs as root inside the
-        # manylinux container and leaves root-owned files behind; clean via
-        # docker so the unprivileged runner user can proceed.
+        # Both macOS targets share a persistent workspace.
+        if: runner.os == 'macOS'
         shell: bash
         run: |
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            docker run --rm -v "${GITHUB_WORKSPACE}:/io" alpine sh -c \
-              'rm -rf /io/dist /io/target/wheels && rm -f /io/jira-cli-*.tar.gz /io/jira-cli-*.tar.gz.sha256'
-          else
-            rm -rf dist target/wheels
-            rm -f jira-cli-*.tar.gz jira-cli-*.tar.gz.sha256
-          fi
-      - name: Install cross-compilation tools
-        # Only needed on GitHub-hosted linux where the arm64 toolchain must
-        # be cross-installed. The self-hosted arm64 runner is native.
-        if: matrix.target == 'aarch64-unknown-linux-gnu' && runner.arch != 'ARM64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rm -rf dist target/wheels
+          rm -f jira-cli-*.tar.gz jira-cli-*.tar.gz.sha256
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Install maturin and zig
@@ -142,10 +122,6 @@ jobs:
           target: aarch64-unknown-linux-gnu
           args: --release --out dist
           manylinux: manylinux_2_28
-          # Mount persistent cargo cache into the manylinux container so
-          # dependency downloads survive between jobs on the self-hosted
-          # runner.
-          docker-options: -v ${{ runner.tool_cache }}/cargo-cache/registry:/root/.cargo/registry -v ${{ runner.tool_cache }}/cargo-cache/git:/root/.cargo/git
       - name: Build wheel
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         shell: bash
@@ -159,10 +135,8 @@ jobs:
               ;;
           esac
       - name: Build binary (arm64 linux via cargo-zigbuild)
-        # On the Pi runner build natively with cargo-zigbuild targeting
-        # glibc 2.28 for wide distro compatibility. Use a separate target
-        # directory so host cargo does not conflict with root-owned files
-        # left behind by the maturin-action container build in target/.
+        # Target glibc 2.28 for distro compatibility. Keep host build outputs
+        # separate from files owned by the manylinux container.
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         env:
           CARGO_TARGET_DIR: target-host
@@ -170,12 +144,7 @@ jobs:
       - name: Build binary
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Verify binary
-        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
-        run: ./target/${{ matrix.target }}/release/jira --version
-      - name: Package binary
+      - name: Verify and package binary
         shell: bash
         run: |
           ARCHIVE_NAME="jira-cli-${{ github.ref_name }}-${{ matrix.target }}"
@@ -184,6 +153,7 @@ jobs:
           else
             BIN_PATH="target/${{ matrix.target }}/release/jira"
           fi
+          "./${BIN_PATH}" --version
           mkdir -p "${ARCHIVE_NAME}"
           cp "${BIN_PATH}" "${ARCHIVE_NAME}/"
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
