@@ -139,7 +139,8 @@ pub async fn comments(client: &JiraClient, out: &OutputConfig, key: &str) -> Res
                         c.author.display_name.clone()
                     };
                     println!("  {} - {}", author, format_date(&c.created));
-                    for line in c.body_text().lines() {
+                    let body = display_text(c.body.as_ref(), 4, color);
+                    for line in body.lines() {
                         println!("    {line}");
                     }
                 }
@@ -1289,7 +1290,7 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
         writeln!(out, "  Updated:    {}", format_date(updated))?;
     }
 
-    let desc = issue.description_text();
+    let desc = display_text(issue.fields.description.as_ref(), 2, color);
     if !desc.is_empty() {
         writeln!(out)?;
         writeln!(out, "Description:")?;
@@ -1321,13 +1322,35 @@ fn write_issue_detail<W: std::io::Write>(out: &mut W, issue: &Issue) -> std::io:
                 c.author.display_name.clone()
             };
             writeln!(out, "  {} - {}", author, format_date(&c.created))?;
-            let body = c.body_text();
+            let body = display_text(c.body.as_ref(), terminal_width().saturating_sub(4), color);
             for line in body.lines() {
                 writeln!(out, "    {line}")?;
             }
         }
     }
     Ok(())
+}
+
+/// Human-readable text of a description or comment body: API v2 wiki markup
+/// is rendered for the terminal unless `--raw-markup`, Cloud ADF keeps the
+/// plain-text extraction.
+/// `indent` columns are reserved for the caller's indentation. Piped output
+/// is not wrapped, unless `COLUMNS` pins a width.
+fn display_text(value: Option<&serde_json::Value>, indent: usize, color: bool) -> String {
+    use std::io::IsTerminal;
+
+    if let Some(src) = crate::wiki::source(value) {
+        let width = if std::io::stdout().is_terminal() || std::env::var_os("COLUMNS").is_some() {
+            terminal_width().saturating_sub(indent)
+        } else {
+            1 << 20
+        };
+        return crate::wiki::render(src, width, color);
+    }
+    match value {
+        Some(v) => crate::api::extract_adf_text(v),
+        None => String::new(),
+    }
 }
 
 fn write_issue_link<W: std::io::Write>(out: &mut W, link: &IssueLink) -> std::io::Result<()> {

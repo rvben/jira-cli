@@ -2,6 +2,16 @@ use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static NO_COLOR: AtomicBool = AtomicBool::new(false);
+static RAW_MARKUP: AtomicBool = AtomicBool::new(false);
+
+/// Show Jira wiki markup as stored instead of rendering it (`--raw-markup`).
+pub fn set_raw_markup(raw: bool) {
+    RAW_MARKUP.store(raw, Ordering::Relaxed);
+}
+
+pub fn raw_markup() -> bool {
+    RAW_MARKUP.load(Ordering::Relaxed)
+}
 
 pub fn set_no_color(disabled: bool) {
     NO_COLOR.store(disabled, Ordering::Relaxed);
