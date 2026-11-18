@@ -136,6 +136,7 @@ All credentials can be set via environment variables, which is useful for CI and
 | `JIRA_CLOUD_ID` | Atlassian Cloud ID required by a scoped token |
 | `JIRA_TOKEN_KIND` | `scoped` or `classic` |
 | `JIRA_STORY_POINTS_FIELD` | Custom field ID to read story points from (e.g. `customfield_10016`) instead of discovering it |
+| `JIRA_THEME` | Color palette of `jira tui`: `default`, `terminal` or `mono` |
 | `JIRA_READ_ONLY` | Block write operations. On: `1`, `true`, `yes`, `on`. Off: `0`, `false`, `no`, `off`. Any other value is an error, not "off" |
 | `JIRA_DEBUG_HTTP` | Include the raw Jira response body in API error messages (`1`, `true`, `yes`, `on`). Useful when the default summary is ambiguous. |
 
@@ -209,6 +210,16 @@ for, and Esc steps back to the previous field.
 If Jira does not confirm a write, refresh the issue before trying again. Write actions are unavailable when the
 active profile is read-only. `jira tui` requires a terminal; scripts can use
 `jira issues mine` or `jira search` instead.
+
+The workbench draws its own dark palette by default. Set `theme` in the profile
+(or `JIRA_THEME`) to `terminal` to use your terminal's background and ANSI
+colors instead, which follows a light or dark terminal scheme, or to `mono` for
+no colors. `NO_COLOR` and `--no-color` also select `mono`.
+
+```toml
+[default]
+theme = "terminal"
+```
 
 ### Issues
 
