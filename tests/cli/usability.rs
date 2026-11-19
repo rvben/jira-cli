@@ -2,7 +2,7 @@ use super::*;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, query_param};
 
-fn parse_success(output: std::process::Output) -> Value {
+pub(super) fn parse_success(output: std::process::Output) -> Value {
     assert!(
         output.status.success(),
         "{}",
@@ -442,7 +442,7 @@ async fn create_meta_lists_types_and_reports_fields_defaults_and_epic_evidence()
     );
 }
 
-fn assert_preview_schema(command: &str, data: &Value) {
+pub(super) fn assert_preview_schema(command: &str, data: &Value) {
     let dir = TempDir::new().unwrap();
     let schema = parse_success(
         jira_cmd(&dir)
@@ -1099,6 +1099,7 @@ fn every_preview_contract_has_a_conformance_test() {
         "issues unlink",
         "issues log-work",
         "issues delete-attachment",
+        "issues delete",
         "issues transition",
     ]
     .into_iter()

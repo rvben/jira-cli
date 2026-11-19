@@ -2,7 +2,7 @@ mod bulk;
 mod create_meta;
 pub use create_meta::create_meta;
 mod transitions;
-pub use bulk::{bulk_assign, bulk_transition};
+pub use bulk::{bulk_assign, bulk_transition, delete_issues};
 
 use std::path::{Path, PathBuf};
 

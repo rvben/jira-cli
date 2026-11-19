@@ -289,6 +289,11 @@ jira issues download-attachment 10042 --dir ./downloads --force  # overwrite an 
 jira issues delete-attachment 10042 --dry-run  # shows the attachment it would delete
 jira issues delete-attachment 10042
 
+# Delete issues (permanent; every key is checked before any is deleted)
+jira issues delete MYAPP-123 MYAPP-124 --dry-run  # summary, type and subtasks of each
+jira issues delete MYAPP-123 MYAPP-124 --yes
+jira issues delete MYAPP-120 --delete-subtasks --yes  # required when an issue has subtasks
+
 # Links
 jira issues link-types
 jira issues link MYAPP-123 --to MYAPP-456 --link-type Blocks  # MYAPP-123 blocks MYAPP-456

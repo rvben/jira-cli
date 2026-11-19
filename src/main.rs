@@ -622,6 +622,25 @@ enum IssuesCommand {
         dry_run: bool,
     },
 
+    /// Delete issues permanently; requires --yes
+    Delete {
+        /// Issue keys (e.g. PROJ-123). Every key is checked before any is deleted
+        #[arg(required = true)]
+        keys: Vec<String>,
+
+        /// Also delete the issues' subtasks; without it an issue with subtasks is refused
+        #[arg(long)]
+        delete_subtasks: bool,
+
+        /// Check every issue and list what would be deleted, without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Confirm the deletion, which cannot be undone; required unless --dry-run
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Transition all issues matching a JQL query to a new status
     BulkTransition {
         /// JQL query selecting the issues to transition
@@ -953,6 +972,7 @@ fn writes_to_jira(command: &Command) -> bool {
                 | IssuesCommand::LogWork { dry_run: false, .. }
                 | IssuesCommand::Attach { dry_run: false, .. }
                 | IssuesCommand::DeleteAttachment { dry_run: false, .. }
+                | IssuesCommand::Delete { dry_run: false, .. }
                 | IssuesCommand::BulkTransition { dry_run: false, .. }
                 | IssuesCommand::BulkAssign { dry_run: false, .. }
         )
@@ -1403,6 +1423,22 @@ async fn dispatch(
             IssuesCommand::DeleteAttachment { id, dry_run } => {
                 commands::issues::delete_attachment(client, out, &id, dry_run).await?
             }
+            IssuesCommand::Delete {
+                keys,
+                delete_subtasks,
+                dry_run,
+                yes,
+            } => {
+                if !yes && !dry_run {
+                    return Err(ApiError::ConfirmationRequired(
+                        "issues delete requires --yes, because deleted issues cannot be restored; preview with --dry-run"
+                            .into(),
+                    )
+                    .into());
+                }
+                commands::issues::delete_issues(client, out, &keys, delete_subtasks, dry_run)
+                    .await?
+            }
             IssuesCommand::BulkTransition {
                 jql,
                 to,
@@ -1689,6 +1725,7 @@ fn schema_json() -> serde_json::Value {
         // guard is a narrower question about writing to Jira.
         ("issues download-attachment", true),
         ("issues delete-attachment", true),
+        ("issues delete", true),
         ("issues bulk-transition", true),
         ("issues bulk-assign", true),
         ("projects list", false),
@@ -2007,6 +2044,35 @@ fn schema_json() -> serde_json::Value {
             serde_json::json!([
                 {"name": "id", "type": "string"},
                 {"name": "deleted", "type": "boolean"}
+            ]),
+        ),
+        (
+            "issues delete",
+            serde_json::json!([
+                {"name": "dryRun", "type": "boolean"},
+                {"name": "total", "type": "integer", "description": "Distinct keys given"},
+                {"name": "succeeded", "type": "integer", "description": "Issues deleted, counting subtasks deleted with a listed parent. Always 0 on a --dry-run"},
+                {"name": "failed", "type": "integer"},
+                {"name": "notAttempted", "type": "integer", "description": "Issues left in place: nothing is deleted unless every key passes its check, and a run stops after a session, rate limit, or connection failure"},
+                {"name": "ready", "type": "integer", "description": "Preview entries that passed their check; a real run deletes them only when every key passes. Zero on real writes. total = succeeded + ready + failed + notAttempted"},
+                {"name": "issues", "type": "object[]", "description": "One entry per distinct key, in the order given", "fields": [
+                    {"name": "key", "type": "string"},
+                    {"name": "summary", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
+                    {"name": "issueType", "type": "string", "nullable": true, "optional": true, "description": "Present only on a --dry-run entry"},
+                    {"name": "subtasks", "type": "string[]", "optional": true, "description": "Subtask keys the delete would remove; --dry-run only"},
+                    {"name": "action", "type": "string", "optional": true, "description": "Present only on a --dry-run entry"},
+                    {"name": "warnings", "type": "string[]", "optional": true, "description": "Checks Jira could not answer for this issue; --dry-run only"},
+                    {"name": "deletedWith", "type": "string", "optional": true, "description": "The listed parent whose delete removes this subtask"},
+                    {"name": "subtasksDeleted", "type": "string[]", "optional": true, "description": "Subtask keys deleted with this issue; present only on a successful delete"},
+                    {"name": "ok", "type": "boolean", "optional": true, "description": "Absent on a --dry-run entry, which changes nothing"},
+                    {"name": "error", "type": "string", "optional": true, "description": "Present only when ok is false"},
+                    {"name": "errorKind", "type": "string", "optional": true},
+                    {"name": "phase", "type": "string", "optional":true, "description":"lookup or write, on failed requests"},
+                    {"name": "outcome", "type": "string", "optional":true, "description":"failed or unknown; unknown means the delete may have been applied, so check whether the issue still exists before retrying"},
+                    {"name": "retryable", "type": "boolean", "optional": true, "description":"Error category retryability; check whether the issue still exists before retrying a delete with an uncertain result"},
+                    {"name": "errorDetails", "type": "object", "optional": true, "description":"Context whose keys depend on errorKind"},
+                    {"name": "notAttempted", "type": "boolean", "optional": true}
+                ]}
             ]),
         ),
         (
@@ -2586,6 +2652,7 @@ const READ_ONLY_BLOCKED_COMMANDS: &[&str] = &[
     "issues log-work",
     "issues attach",
     "issues delete-attachment",
+    "issues delete",
     "issues bulk-transition",
     "issues bulk-assign",
 ];
@@ -2697,7 +2764,7 @@ fn walk_commands(
             );
         } else if matches!(
             base_path.as_str(),
-            "issues bulk-transition" | "issues bulk-assign"
+            "issues bulk-transition" | "issues bulk-assign" | "issues delete"
         ) {
             entry.insert("x-dry-run".into(), serde_json::json!({"arg":"--dry-run", "effects":"read_only", "output_fields":output_fields[base_path.as_str()]}));
             entry.insert("x-output-on-error".into(), serde_json::json!({"kind":"bulk_failure", "exit_code":9, "stream":"stdout", "description":"Parse the full summary even on failure. Never blindly replay the entire bulk write."}));

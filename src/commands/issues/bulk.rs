@@ -50,15 +50,29 @@ fn finish(
             } else if item["notAttempted"] == true {
                 "not attempted".to_owned()
             } else if dry_run {
-                format!(
-                    "{} {}{}",
-                    item["action"].as_str().unwrap_or("ready"),
-                    item["to"].as_str().unwrap_or(""),
-                    item["transitionId"]
-                        .as_str()
-                        .map(|id| format!(" (transition {id})"))
-                        .unwrap_or_default()
-                )
+                let mut detail = item["action"].as_str().unwrap_or("ready").to_owned();
+                if let Some(to) = item["to"].as_str() {
+                    detail.push_str(&format!(" {to}"));
+                }
+                if let Some(id) = item["transitionId"].as_str() {
+                    detail.push_str(&format!(" (transition {id})"));
+                }
+                if let Some(summary) = item["summary"].as_str() {
+                    detail.push_str(&format!(" {summary:?}"));
+                }
+                if let Some(issue_type) = item["issueType"].as_str() {
+                    detail.push_str(&format!(" [{issue_type}]"));
+                }
+                if let Some(subtasks) = item["subtasks"].as_array().filter(|s| !s.is_empty()) {
+                    let keys: Vec<&str> = subtasks.iter().filter_map(Value::as_str).collect();
+                    detail.push_str(&format!(" and its subtasks {}", keys.join(", ")));
+                }
+                if let Some(parent) = item["deletedWith"].as_str() {
+                    detail.push_str(&format!(" (with {parent})"));
+                }
+                detail
+            } else if let Some(parent) = item["deletedWith"].as_str() {
+                format!("deleted with {parent}")
             } else {
                 "succeeded".to_owned()
             };
@@ -196,6 +210,132 @@ pub async fn bulk_assign(
                 results.push(failed_item(&issue.key, &error, "write"));
             }
         }
+    }
+    finish(out, dry_run, results, succeeded)
+}
+
+/// Delete issues by key. A deleted issue cannot be restored, so every key is
+/// checked first and nothing is deleted unless all of them pass. A subtask
+/// listed with its parent is removed by the parent's delete and reported as
+/// `deletedWith` that parent rather than deleted a second time.
+pub async fn delete_issues(
+    client: &JiraClient,
+    out: &OutputConfig,
+    keys: &[String],
+    delete_subtasks: bool,
+    dry_run: bool,
+) -> Result<(), ApiError> {
+    let mut unique: Vec<&str> = Vec::new();
+    for key in keys {
+        if !unique.contains(&key.as_str()) {
+            unique.push(key.as_str());
+        }
+    }
+
+    let mut checked = Vec::new();
+    let mut aborted = false;
+    for key in &unique {
+        if aborted {
+            checked.push(Err(None));
+            continue;
+        }
+        let check = async {
+            let target = client.preview_delete_issue(key).await?;
+            if !delete_subtasks && !target.subtasks.is_empty() {
+                return Err(ApiError::InvalidInput(format!(
+                    "{key} has {} subtask(s) ({}); pass --delete-subtasks to delete them with it",
+                    target.subtasks.len(),
+                    target.subtasks.join(", ")
+                )));
+            }
+            Ok(target)
+        }
+        .await;
+        checked.push(check.map_err(|error| {
+            aborted = aborts_run(&error);
+            Some(error)
+        }));
+    }
+
+    let parent_of = |key: &str| {
+        unique.iter().zip(&checked).find_map(|(parent, check)| {
+            check
+                .as_ref()
+                .ok()
+                .filter(|target| target.subtasks.iter().any(|s| s == key))
+                .map(|_| *parent)
+        })
+    };
+    let all_passed = checked.iter().all(Result::is_ok);
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut succeeded = 0;
+    for (key, check) in unique.iter().zip(&checked) {
+        let target = match check {
+            Err(Some(error)) => {
+                results.push(failed_item(key, error, "lookup"));
+                continue;
+            }
+            Err(None) => {
+                results.push(json!({"key": key, "notAttempted": true}));
+                continue;
+            }
+            Ok(target) => target,
+        };
+        let parent = parent_of(key);
+        if dry_run {
+            let mut entry = json!({"key": key, "summary": target.summary,
+                "issueType": target.issue_type, "subtasks": target.subtasks,
+                "action": "would delete", "warnings": target.warnings});
+            if let Some(parent) = parent {
+                entry["deletedWith"] = json!(parent);
+            }
+            results.push(entry);
+            continue;
+        }
+        if !all_passed || aborted {
+            results.push(json!({"key": key, "notAttempted": true}));
+            continue;
+        }
+        if parent.is_some() {
+            // Settled below, once the parent's delete has run.
+            results.push(Value::Null);
+            continue;
+        }
+        match client.delete_issue(key, delete_subtasks).await {
+            Ok(()) => {
+                succeeded += 1;
+                results.push(json!({"key": key, "ok": true,
+                    "subtasksDeleted": target.subtasks}));
+            }
+            Err(error) => {
+                aborted = aborts_run(&error);
+                results.push(failed_item(key, &error, "write"));
+            }
+        }
+    }
+
+    // A subtask listed with its parent shares the parent's fate.
+    for index in 0..results.len() {
+        if !results[index].is_null() {
+            continue;
+        }
+        let key = unique[index];
+        let parent = parent_of(key).expect("only subtasks of a listed parent are deferred");
+        let parent_index = unique.iter().position(|k| *k == parent).expect("listed");
+        results[index] = match &results[parent_index] {
+            done if done["ok"] == true => {
+                succeeded += 1;
+                json!({"key": key, "ok": true, "deletedWith": parent})
+            }
+            failed if failed["outcome"] == "unknown" => {
+                let mut item = failed.clone();
+                item["key"] = json!(key);
+                item["deletedWith"] = json!(parent);
+                item
+            }
+            _ => json!({"key": key, "notAttempted": true}),
+        };
     }
     finish(out, dry_run, results, succeeded)
 }

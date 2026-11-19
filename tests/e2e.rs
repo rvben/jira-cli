@@ -11,8 +11,8 @@
 //!   JIRA_E2E_HOST=http://localhost:8080 JIRA_E2E_EMAIL=ruben JIRA_E2E_TOKEN=test \
 //!     cargo nextest run --test e2e
 //!
-//! All write tests create issues tagged `[e2e-auto]` in the summary so they can
-//! be bulk-deleted after a test run if needed.
+//! All write tests create issues tagged `[e2e-auto]` in the summary and delete
+//! them again through a [`Cleanup`] guard, which also runs when a test fails.
 
 use jira_cli::api::{ApiError, AuthType, IssueDraft, IssueUpdate, JiraClient, TransitionInput};
 use jira_cli::output::OutputConfig;
@@ -34,6 +34,63 @@ fn e2e_client() -> Option<(JiraClient, String)> {
 
     let client = JiraClient::new(&host, &email, &token, auth_type, api_version).ok()?;
     Some((client, project))
+}
+
+/// Deletes every issue a test tracks when dropped, including after a panic,
+/// so a failing run leaves nothing behind. Subtasks go with their parent, and
+/// an issue the test already deleted is not an error.
+struct Cleanup(Vec<String>);
+
+impl Cleanup {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn track(&mut self, key: &str) {
+        self.0.push(key.to_owned());
+    }
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let keys = std::mem::take(&mut self.0);
+        // The test's runtime cannot be blocked on from here, so delete on a
+        // thread with its own runtime and client.
+        let failures = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("cleanup runtime");
+            let (client, _) = e2e_client().expect("cleanup needs the e2e environment");
+            runtime.block_on(async {
+                let mut failures = Vec::new();
+                for key in keys.iter().rev() {
+                    match client.delete_issue(key, true).await {
+                        Ok(()) | Err(ApiError::NotFound(_)) => {}
+                        Err(err) => failures.push(format!("{key}: {err}")),
+                    }
+                }
+                failures
+            })
+        })
+        .join()
+        .expect("cleanup thread");
+        if failures.is_empty() {
+            return;
+        }
+        let message = format!("e2e cleanup left issues behind: {}", failures.join("; "));
+        if std::thread::panicking() {
+            eprintln!("{message}");
+        } else {
+            panic!("{message}");
+        }
+    }
+}
+
+/// Assert that `key` no longer exists.
+async fn assert_deleted(client: &JiraClient, key: &str) {
+    match client.get_issue(key).await {
+        Err(ApiError::NotFound(_)) => {}
+        Ok(_) => panic!("{key} still exists after delete"),
+        Err(err) => panic!("checking that {key} was deleted failed: {err}"),
+    }
 }
 
 fn json_out() -> OutputConfig {
@@ -210,6 +267,8 @@ async fn e2e_create_comment_transition_show_delete() {
         )
         .await
         .expect("create failed");
+    let mut cleanup = Cleanup::new();
+    cleanup.track(&created.key);
     let key = &created.key;
 
     // Show
@@ -282,6 +341,20 @@ async fn e2e_create_comment_transition_show_delete() {
         .await
         .expect("get_issue after update failed");
     assert!(updated.summary().contains("updated"));
+
+    // Delete: a dry run deletes nothing, then the delete removes the issue.
+    let keys = [key.clone()];
+    jira_cli::commands::issues::delete_issues(&client, &out, &keys, false, true)
+        .await
+        .expect("delete dry run failed");
+    client
+        .get_issue(key)
+        .await
+        .expect("dry run must not delete the issue");
+    jira_cli::commands::issues::delete_issues(&client, &out, &keys, false, false)
+        .await
+        .expect("delete failed");
+    assert_deleted(&client, key).await;
 }
 
 #[tokio::test]
@@ -298,6 +371,8 @@ async fn e2e_create_subtask() {
         )
         .await
         .expect("create parent failed");
+    let mut cleanup = Cleanup::new();
+    cleanup.track(&parent.key);
 
     // Jira names the default subtask type "Subtask" on current Cloud projects
     // and "Sub-task" on Data Center. An unknown type name is rejected before
@@ -310,6 +385,7 @@ async fn e2e_create_subtask() {
         };
         match client.create_issue(&draft, &[]).await {
             Ok(created) => {
+                cleanup.track(&created.key);
                 child = Some(created);
                 break;
             }
@@ -321,6 +397,25 @@ async fn e2e_create_subtask() {
 
     assert_ne!(child.key, parent.key);
     assert!(child.key.starts_with(&format!("{project}-")));
+
+    // The parent cannot be deleted without its subtask, and refusing deletes
+    // neither issue; with --delete-subtasks one delete removes both.
+    let out = json_out();
+    let keys = [parent.key.clone(), child.key.clone()];
+    let refused = jira_cli::commands::issues::delete_issues(&client, &out, &keys, false, false)
+        .await
+        .expect_err("a parent with subtasks needs delete_subtasks");
+    assert!(
+        matches!(refused, ApiError::BulkFailure { succeeded: 0, .. }),
+        "{refused:?}"
+    );
+    client.get_issue(&parent.key).await.expect("parent kept");
+    client.get_issue(&child.key).await.expect("subtask kept");
+    jira_cli::commands::issues::delete_issues(&client, &out, &keys, true, false)
+        .await
+        .expect("delete with subtasks failed");
+    assert_deleted(&client, &parent.key).await;
+    assert_deleted(&client, &child.key).await;
 }
 
 #[tokio::test]
@@ -401,6 +496,8 @@ async fn e2e_issue_link_and_unlink() {
         )
         .await
         .expect("create a");
+    let mut cleanup = Cleanup::new();
+    cleanup.track(&a.key);
     let b = client
         .create_issue(
             &minimal_draft(&project, "Task", "e2e link-b [e2e-auto]"),
@@ -408,6 +505,7 @@ async fn e2e_issue_link_and_unlink() {
         )
         .await
         .expect("create b");
+    cleanup.track(&b.key);
 
     // Link a blocks b
     client

@@ -1084,6 +1084,19 @@ impl JiraClient {
         Ok(())
     }
 
+    /// Delete an issue. Jira refuses to delete an issue that has subtasks
+    /// unless `delete_subtasks` is set, in which case they are deleted with it.
+    pub async fn delete_issue(&self, key: &str, delete_subtasks: bool) -> Result<(), ApiError> {
+        self.ensure_writable()?;
+        validate_issue_key(key)?;
+        let url = format!(
+            "{}/issue/{key}?deleteSubtasks={delete_subtasks}",
+            self.base_url
+        );
+        self.send(self.http.delete(&url)).await?;
+        Ok(())
+    }
+
     // ── Users ─────────────────────────────────────────────────────────────────
 
     /// Search for users matching a query string.

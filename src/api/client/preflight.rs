@@ -228,6 +228,29 @@ impl JiraClient {
         Ok((link, warnings))
     }
 
+    /// Fetch what deleting `key` would remove and check you may delete it.
+    pub async fn preview_delete_issue(&self, key: &str) -> Result<DeleteTarget, ApiError> {
+        validate_issue_key(key)?;
+        let issue: Value = self
+            .get(&format!("issue/{key}?fields=summary,issuetype,subtasks"))
+            .await?;
+        let fields = &issue["fields"];
+        let mut warnings = Vec::new();
+        self.check_permission(&[key], "DELETE_ISSUES", "delete", &mut warnings)
+            .await?;
+        Ok(DeleteTarget {
+            summary: fields["summary"].as_str().unwrap_or_default().to_owned(),
+            issue_type: fields["issuetype"]["name"].as_str().map(str::to_owned),
+            subtasks: fields["subtasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|subtask| subtask["key"].as_str().map(str::to_owned))
+                .collect(),
+            warnings,
+        })
+    }
+
     /// Check that work can be logged on `key`.
     pub async fn preview_worklog(&self, key: &str) -> Result<Vec<String>, ApiError> {
         validate_issue_key(key)?;
@@ -250,6 +273,18 @@ impl JiraClient {
         }
         Ok(warnings)
     }
+}
+
+/// An issue as `issues delete` checks it before deleting.
+#[derive(Debug, Clone)]
+pub struct DeleteTarget {
+    pub summary: String,
+    /// `None` when Jira did not report the type.
+    pub issue_type: Option<String>,
+    /// Keys of the subtasks a delete would remove with the issue.
+    pub subtasks: Vec<String>,
+    /// Checks Jira could not answer, such as the delete permission.
+    pub warnings: Vec<String>,
 }
 
 /// Reject comments Jira would store as empty.

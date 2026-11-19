@@ -3010,6 +3010,7 @@ const COMMANDS_WITH_A_CONFORMANCE_TEST: &[&str] = &[
     "issues comments",
     "issues create",
     "issues create-meta",
+    "issues delete",
     "issues delete-attachment",
     "issues download-attachment",
     "issues link",
@@ -3144,6 +3145,14 @@ const OBJECTS_WITHOUT_A_DECLARED_SHAPE: &[(&str, &str)] = &[
         "context keys depend on the per-issue error kind",
     ),
     (
+        "issues delete.issues.errorDetails",
+        "context keys depend on the per-issue error kind",
+    ),
+    (
+        "issues delete.x-dry-run.issues.errorDetails",
+        "context keys depend on the per-issue error kind",
+    ),
+    (
         "issues bulk-transition.issues.errorDetails",
         "context keys depend on the per-issue error kind",
     ),
@@ -3271,6 +3280,7 @@ const JIRA_WRITE_INVOCATIONS: &[(&str, &[&str])] = &[
         "issues delete-attachment",
         &["issues", "delete-attachment", "10001"],
     ),
+    ("issues delete", &["issues", "delete", "PROJ-1", "--yes"]),
     (
         "issues bulk-transition",
         &[
@@ -3772,6 +3782,9 @@ mod story_points;
 
 #[path = "cli/sprint_totals.rs"]
 mod sprint_totals;
+
+#[path = "cli/delete.rs"]
+mod delete;
 
 /// A 401 on a stored credential names the profile and the exact command that
 /// replaces its token, because that is the one fix that works.
