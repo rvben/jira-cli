@@ -22,7 +22,7 @@ use ratatui::crossterm::terminal::{
 use tokio::task::JoinHandle;
 
 use crate::api::{ApiError, Issue, JiraClient, SearchResponse, Transition, TransitionInput};
-use crate::config::Config;
+use crate::config::{Config, Theme};
 use editor::Editor;
 
 const PAGE_SIZE: usize = 30;
@@ -164,7 +164,7 @@ struct App {
     host: String,
     project: Option<String>,
     read_only: bool,
-    color: bool,
+    theme: Theme,
     scope: Scope,
     query: String,
     filter: String,
@@ -195,7 +195,12 @@ impl App {
             host: cfg.host.clone(),
             project: project.map(str::to_owned),
             read_only: cfg.read_only,
-            color,
+            // no color wins over the configured palette
+            theme: if color {
+                cfg.theme().unwrap_or_default()
+            } else {
+                Theme::Mono
+            },
             scope: Scope::Mine,
             query: String::new(),
             filter: String::new(),
@@ -1020,6 +1025,7 @@ pub async fn run(
     if client.story_point_fields().await.is_ok() {
         client.enable_story_points_lookup();
     }
+    cfg.theme()?;
     let client = Arc::new(client);
     let color = color
         && std::env::var_os("NO_COLOR").is_none()
@@ -1102,6 +1108,7 @@ mod tests {
             cloud_id: None,
             token_kind: "classic".into(),
             story_points_field: None,
+            theme: None,
         };
         App::new(&cfg, Some("APP"), false)
     }

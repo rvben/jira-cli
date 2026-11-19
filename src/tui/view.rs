@@ -7,45 +7,82 @@ use ratatui::{
 };
 
 use super::{App, InputKind, Overlay, Scope, clean};
+use crate::config;
 
+/// Resolved TUI colors. `focus` None marks the selection by reversing colors,
+/// which reads on any terminal background.
 struct Theme {
     ink: Color,
     muted: Color,
+    /// Dim modifier of `muted` and `line`: the terminal theme fades the
+    /// foreground instead of using bright black, which some schemes draw as
+    /// the background.
+    fade: Modifier,
     line: Color,
     accent: Color,
-    focus: Color,
+    focus: Option<Color>,
     surface: Color,
+    done: Color,
+    progress: Color,
+    blocked: Color,
 }
 impl Theme {
-    fn new(color: bool) -> Self {
-        if color {
-            Self {
+    fn new(name: config::Theme) -> Self {
+        match name {
+            config::Theme::Default => Self {
                 ink: Color::Rgb(225, 235, 239),
                 muted: Color::Rgb(143, 165, 174),
+                fade: Modifier::empty(),
                 line: Color::Rgb(47, 69, 77),
                 accent: Color::Rgb(106, 224, 199),
-                focus: Color::Rgb(26, 61, 64),
+                focus: Some(Color::Rgb(26, 61, 64)),
                 surface: Color::Rgb(15, 32, 39),
-            }
-        } else {
-            Self {
+                done: Color::Rgb(132, 215, 161),
+                progress: Color::Rgb(131, 189, 250),
+                blocked: Color::Rgb(244, 190, 113),
+            },
+            // reset keeps the terminal's own foreground and background
+            config::Theme::Terminal => Self {
+                ink: Color::Reset,
+                muted: Color::Reset,
+                fade: Modifier::DIM,
+                line: Color::Reset,
+                accent: Color::Cyan,
+                focus: None,
+                surface: Color::Reset,
+                done: Color::Green,
+                progress: Color::Blue,
+                blocked: Color::Yellow,
+            },
+            config::Theme::Mono => Self {
                 ink: Color::White,
                 muted: Color::Gray,
+                fade: Modifier::empty(),
                 line: Color::DarkGray,
                 accent: Color::White,
-                focus: Color::DarkGray,
+                focus: Some(Color::DarkGray),
                 surface: Color::Black,
-            }
+                done: Color::White,
+                progress: Color::White,
+                blocked: Color::White,
+            },
         }
     }
     fn text(&self) -> Style {
         Style::default().fg(self.ink).bg(self.surface)
     }
     fn muted(&self) -> Style {
-        self.text().fg(self.muted)
+        self.text().fg(self.muted).add_modifier(self.fade)
     }
     fn accent(&self) -> Style {
         self.text().fg(self.accent).add_modifier(Modifier::BOLD)
+    }
+    /// `base` marked as the current selection.
+    fn focused(&self, base: Style) -> Style {
+        match self.focus {
+            Some(color) => base.bg(color),
+            None => base.add_modifier(Modifier::REVERSED),
+        }
     }
     fn status(&self, status: &str) -> Style {
         let normalized = status.to_ascii_lowercase();
@@ -53,23 +90,11 @@ impl Theme {
             || normalized.contains("closed")
             || normalized.contains("resolved")
         {
-            self.text().fg(if self.accent == Color::White {
-                Color::White
-            } else {
-                Color::Rgb(132, 215, 161)
-            })
+            self.text().fg(self.done)
         } else if normalized.contains("progress") || normalized.contains("review") {
-            self.text().fg(if self.accent == Color::White {
-                Color::White
-            } else {
-                Color::Rgb(131, 189, 250)
-            })
+            self.text().fg(self.progress)
         } else if normalized.contains("block") {
-            self.text().fg(if self.accent == Color::White {
-                Color::White
-            } else {
-                Color::Rgb(244, 190, 113)
-            })
+            self.text().fg(self.blocked)
         } else {
             self.muted()
         }
@@ -77,13 +102,13 @@ impl Theme {
     fn panel(&self) -> Block<'static> {
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.line))
+            .border_style(Style::default().fg(self.line).add_modifier(self.fade))
             .style(self.text())
     }
 }
 
 pub(super) fn draw(frame: &mut Frame, app: &mut App) {
-    let t = Theme::new(app.color);
+    let t = Theme::new(app.theme);
     let area = frame.area();
     frame.render_widget(Block::default().style(t.text()), area);
     if area.width < 42 || area.height < 12 {
@@ -178,7 +203,7 @@ fn tabs(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let mut spans = vec![Span::raw("  ")];
     for (scope, label) in choices {
         let style = if app.scope == scope {
-            t.accent().bg(t.focus)
+            t.focused(t.accent())
         } else {
             t.muted()
         };
@@ -291,7 +316,7 @@ fn list(frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
     state.select(visible.iter().position(|&idx| idx == app.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .highlight_style(t.text().bg(t.focus))
+            .highlight_style(t.focused(t.text()))
             .highlight_symbol("▌"),
         inner,
         &mut state,
@@ -848,7 +873,7 @@ fn picker(
             Line::styled(
                 format!("  {}  {item}", if chosen { "▌" } else { " " }),
                 if chosen {
-                    t.accent().bg(t.focus)
+                    t.focused(t.accent())
                 } else {
                     t.text()
                 },

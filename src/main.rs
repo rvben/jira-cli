@@ -1693,7 +1693,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "auth_type", "type": "string", "description": "\"basic\" for Jira Cloud, \"pat\" for a Data Center personal access token"},
                 {"name": "api_version", "type": "integer", "description": "3 for Jira Cloud, 2 for Data Center"},
                 {"name": "read_only", "type": "boolean", "description": "Block commands that write to Jira"},
-                {"name": "story_points_field", "type": "string", "description": "Custom field ID (e.g. customfield_10016) to read story points from. Optional: by default the field is discovered, and pinning it settles a site that has more than one"}
+                {"name": "story_points_field", "type": "string", "description": "Custom field ID (e.g. customfield_10016) to read story points from. Optional: by default the field is discovered, and pinning it settles a site that has more than one"},
+                {"name": "theme", "type": "string", "optional": true, "description": "Color palette of `jira tui`: default, terminal (the terminal's own colors) or mono"}
             ]},
             {"name": "profiles", "type": "object", "description": "Keyed by profile name, so the keys are chosen by the user rather than fixed. Each value has the same shape as `default`"}
         ]}
@@ -2279,7 +2280,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "credentialStore", "type": "string"},
                 {"name": "tokenKind", "type": "string"},
                 {"name": "cloudId", "type": "string", "nullable": true},
-                {"name": "storyPointsField", "type": "string", "nullable": true, "description": "The pinned story points field; null when it is discovered"}
+                {"name": "storyPointsField", "type": "string", "nullable": true, "description": "The pinned story points field; null when it is discovered"},
+                {"name": "theme", "type": "string", "description": "Color palette of `jira tui`: default, terminal or mono"}
             ]),
         ),
         ("auth login", init_fields.clone()),
@@ -2456,7 +2458,8 @@ fn schema_json() -> serde_json::Value {
                 "api_version": ["JIRA_API_VERSION", "config profile/default api_version"],
                 "cloud_id": ["JIRA_CLOUD_ID", "config profile/default cloud_id"],
                 "token_kind": ["JIRA_TOKEN_KIND", "config profile/default token_kind"],
-                "story_points_field": ["JIRA_STORY_POINTS_FIELD", "config profile/default story_points_field", "discovered from the site's fields"]
+                "story_points_field": ["JIRA_STORY_POINTS_FIELD", "config profile/default story_points_field", "discovered from the site's fields"],
+                "theme": ["JIRA_THEME", "config profile/default theme", "default"]
             },
             "env": [
                 { "name": "JIRA_HOST", "description": "Atlassian domain override", "required": false },
@@ -2468,6 +2471,7 @@ fn schema_json() -> serde_json::Value {
                 ,{ "name": "JIRA_CLOUD_ID", "description": "Atlassian Cloud ID required by scoped tokens", "required": false }
                 ,{ "name": "JIRA_TOKEN_KIND", "description": "Cloud token type: scoped or classic", "required": false }
                 ,{ "name": "JIRA_STORY_POINTS_FIELD", "description": "Custom field ID to read story points from (e.g. customfield_10016), instead of discovering it", "required": false }
+                ,{ "name": "JIRA_THEME", "description": "Color palette of `jira tui`: default, terminal (the terminal's own colors) or mono", "required": false }
                 ,{ "name": "JIRA_RAW_MARKUP", "description": "Show Jira wiki markup as stored instead of rendering it in text output and the TUI (same as --raw-markup)", "required": false }
             ]
         },

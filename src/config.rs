@@ -21,6 +21,7 @@ pub struct ProfileConfig {
     pub api_version: Option<u8>,
     pub read_only: Option<bool>,
     pub story_points_field: Option<String>,
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -41,6 +42,7 @@ struct RawConfig {
     api_version: Option<u8>,
     read_only: Option<bool>,
     story_points_field: Option<String>,
+    theme: Option<String>,
 }
 
 impl RawConfig {
@@ -76,6 +78,7 @@ impl RawConfig {
                 .story_points_field
                 .clone()
                 .or_else(|| self.story_points_field.clone()),
+            theme: self.default.theme.clone().or_else(|| self.theme.clone()),
         }
     }
 }
@@ -96,6 +99,55 @@ pub struct Config {
     /// The custom field story points are read from, when the profile pins one
     /// instead of leaving it to discovery.
     pub story_points_field: Option<String>,
+    /// Color palette of `jira tui`, as written. Checked by `theme()` only when
+    /// the TUI starts, so a typo does not break the other commands.
+    pub theme: Option<String>,
+}
+
+impl Config {
+    /// The palette of `jira tui`.
+    pub fn theme(&self) -> Result<Theme, ApiError> {
+        self.theme
+            .as_deref()
+            .map_or(Ok(Theme::default()), parse_theme)
+    }
+}
+
+/// Color palette of `jira tui`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    /// The built-in dark palette.
+    #[default]
+    Default,
+    /// The terminal's own background and ANSI colors, so the TUI follows the
+    /// terminal's color scheme, light or dark.
+    Terminal,
+    /// No colors, as with NO_COLOR.
+    Mono,
+}
+
+impl Theme {
+    pub const NAMES: [&str; 3] = ["default", "terminal", "mono"];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Default => "default",
+            Theme::Terminal => "terminal",
+            Theme::Mono => "mono",
+        }
+    }
+}
+
+fn parse_theme(value: &str) -> Result<Theme, ApiError> {
+    match value.to_ascii_lowercase().as_str() {
+        "default" => Ok(Theme::Default),
+        "terminal" => Ok(Theme::Terminal),
+        "mono" => Ok(Theme::Mono),
+        _ => Err(ApiError::InvalidInput(format!(
+            "unknown theme `{value}`; expected one of: {}",
+            Theme::NAMES.join(", ")
+        ))),
+    }
 }
 
 /// What a profile's site reports about its deployment, held against the REST
@@ -305,6 +357,8 @@ impl Config {
             .map(|field| parse_story_points_field(&field))
             .transpose()?;
 
+        let theme = env_var("JIRA_THEME").or_else(|| normalize_value(file_profile.theme));
+
         let cloud_id = env_var("JIRA_CLOUD_ID").or(file_profile.cloud_id);
         let token_kind = env_var("JIRA_TOKEN_KIND")
             .or(file_profile.token_kind)
@@ -331,6 +385,7 @@ impl Config {
             cloud_id,
             token_kind,
             story_points_field,
+            theme,
         })
     }
 }
@@ -499,6 +554,7 @@ pub fn show(
                 "tokenKind": cfg.token_kind,
                 "cloudId": cfg.cloud_id,
                 "storyPointsField": cfg.story_points_field,
+                "theme": cfg.theme.as_deref().unwrap_or("default"),
             }))
             .expect("failed to serialize JSON"),
         );
@@ -1755,7 +1811,7 @@ struct ProfileWrite<'a> {
 /// Profile keys set by hand rather than by a login, which a rewrite of the
 /// profile keeps. Anything else not written afresh is dropped, so obsolete keys
 /// from earlier releases do not linger.
-const HAND_SET_PROFILE_KEYS: [&str; 1] = ["story_points_field"];
+const HAND_SET_PROFILE_KEYS: [&str; 2] = ["story_points_field", "theme"];
 
 fn existing_section<'a>(
     root: &'a toml::map::Map<String, toml::Value>,
@@ -2462,6 +2518,51 @@ mod tests {
             let err = parse_story_points_field(bad).unwrap_err();
             assert!(matches!(err, ApiError::InvalidInput(_)), "{bad}");
             assert!(err.to_string().contains("jira fields list"), "{err}");
+        }
+    }
+
+    #[test]
+    fn load_theme_from_file_and_env() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_config(
+            dir.path(),
+            r#"
+[default]
+host = "file.atlassian.net"
+email = "me@example.com"
+token = "tok"
+theme = "Terminal"
+"#,
+        )
+        .unwrap();
+
+        let _config_dir = set_config_dir_env(dir.path());
+        let _host = EnvVarGuard::unset("JIRA_HOST");
+        let _email = EnvVarGuard::unset("JIRA_EMAIL");
+        let _token = EnvVarGuard::unset("JIRA_TOKEN");
+        let _profile = EnvVarGuard::unset("JIRA_PROFILE");
+
+        let _theme = EnvVarGuard::unset("JIRA_THEME");
+        let cfg = Config::load(None, None, None).unwrap();
+        assert_eq!(cfg.theme().unwrap(), Theme::Terminal);
+
+        let _theme = EnvVarGuard::set("JIRA_THEME", "mono");
+        let cfg = Config::load(None, None, None).unwrap();
+        assert_eq!(cfg.theme().unwrap(), Theme::Mono);
+
+        // a typo is reported by the TUI, not by every command
+        let _theme = EnvVarGuard::set("JIRA_THEME", "solarized");
+        let cfg = Config::load(None, None, None).unwrap();
+        let err = cfg.theme().unwrap_err().to_string();
+        assert!(err.contains("default, terminal, mono"), "{err}");
+    }
+
+    #[test]
+    fn theme_defaults_when_unset() {
+        assert_eq!(Theme::default(), Theme::Default);
+        for name in Theme::NAMES {
+            assert_eq!(parse_theme(name).unwrap().name(), name);
         }
     }
 
