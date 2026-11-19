@@ -541,6 +541,15 @@ pub fn show(
     let path = config_path();
     let cfg = Config::load(host_arg, email_arg, profile_arg)?;
     let masked = mask_token(&cfg.token);
+    // An unknown theme stays as written, so it can be found and corrected,
+    // and is named in a warning rather than failing every command.
+    let (theme, warnings) = match cfg.theme() {
+        Ok(theme) => (theme.name().to_owned(), Vec::new()),
+        Err(err) => (
+            cfg.theme.clone().unwrap_or_default(),
+            vec![format!("jira tui will not start: {err}")],
+        ),
+    };
 
     if out.json {
         out.print_data(
@@ -554,16 +563,20 @@ pub fn show(
                 "tokenKind": cfg.token_kind,
                 "cloudId": cfg.cloud_id,
                 "storyPointsField": cfg.story_points_field,
-                "theme": cfg.theme.as_deref().unwrap_or("default"),
+                "theme": theme,
+                "warnings": warnings,
             }))
             .expect("failed to serialize JSON"),
         );
     } else {
         out.print_message(&format!("Config file: {}", path.display()));
         out.print_data(&format!(
-            "profile: {}\nhost:  {}\nemail: {}\ntoken: {masked}\ncredential store: {}\ntoken kind: {}",
+            "profile: {}\nhost:  {}\nemail: {}\ntoken: {masked}\ncredential store: {}\ntoken kind: {}\ntheme: {theme}",
             cfg.profile, cfg.host, cfg.email, cfg.credential_store, cfg.token_kind,
         ));
+        for warning in &warnings {
+            out.print_message(&format!("warning: {warning}"));
+        }
     }
     Ok(())
 }

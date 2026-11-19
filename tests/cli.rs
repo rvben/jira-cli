@@ -32,7 +32,8 @@ fn jira_cmd(dir: &TempDir) -> Command {
         .env_remove("JIRA_TOKEN")
         .env_remove("JIRA_PROFILE")
         .env_remove("JIRA_API_VERSION")
-        .env_remove("JIRA_READ_ONLY");
+        .env_remove("JIRA_READ_ONLY")
+        .env_remove("JIRA_THEME");
     cmd
 }
 
@@ -51,6 +52,41 @@ fn config_show_auto_json_when_piped() {
     assert_eq!(json["host"], "work.atlassian.net");
     assert_eq!(json["email"], "me@example.com");
     assert_eq!(json["tokenMasked"], "***oken");
+}
+
+/// `config show` reports the theme `jira tui` will use, and names an unknown
+/// one as written, with a warning, instead of failing.
+#[test]
+fn config_show_reports_the_theme_the_tui_uses() {
+    let dir = TempDir::new().unwrap();
+    write_config(dir.path(), config_fixture()).unwrap();
+    let show = |theme: Option<&str>| {
+        let mut cmd = jira_cmd(&dir);
+        if let Some(theme) = theme {
+            cmd.env("JIRA_THEME", theme);
+        }
+        let output = cmd.args(["config", "show"]).output().unwrap();
+        assert!(output.status.success(), "{theme:?}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_json_keys_match_schema("config show", &json, &[]);
+        json
+    };
+
+    let unset = show(None);
+    assert_eq!(unset["theme"], "default");
+    assert_eq!(unset["warnings"], serde_json::json!([]));
+
+    let named = show(Some("Terminal"));
+    assert_eq!(named["theme"], "terminal");
+    assert_eq!(named["warnings"], serde_json::json!([]));
+
+    let unknown = show(Some("solarized"));
+    assert_eq!(unknown["theme"], "solarized");
+    let warning = unknown["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("solarized") && warning.contains("default, terminal, mono"),
+        "{warning}"
+    );
 }
 
 #[test]

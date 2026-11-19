@@ -1095,8 +1095,8 @@ mod tests {
     use crate::api::AuthType;
     use ratatui::backend::TestBackend;
 
-    fn app(read_only: bool) -> App {
-        let cfg = Config {
+    fn config(read_only: bool, theme: Option<&str>) -> Config {
+        Config {
             profile: "work".into(),
             host: "jira.example.com".into(),
             email: "me@example.com".into(),
@@ -1108,9 +1108,53 @@ mod tests {
             cloud_id: None,
             token_kind: "classic".into(),
             story_points_field: None,
-            theme: None,
-        };
-        App::new(&cfg, Some("APP"), false)
+            theme: theme.map(str::to_owned),
+        }
+    }
+
+    fn app(read_only: bool) -> App {
+        App::new(&config(read_only, None), Some("APP"), false)
+    }
+
+    /// Every cell of one frame of the issue list.
+    fn render(app: &mut App) -> Vec<ratatui::buffer::Cell> {
+        app.issues.push(issue("APP-1", "A sample task"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| view::draw(frame, app)).unwrap();
+        terminal.backend().buffer().content().to_vec()
+    }
+
+    #[test]
+    fn no_color_overrides_the_configured_theme() {
+        let terminal = config(false, Some("terminal"));
+        assert_eq!(App::new(&terminal, None, true).theme, Theme::Terminal);
+        assert_eq!(App::new(&terminal, None, false).theme, Theme::Mono);
+    }
+
+    #[test]
+    fn mono_draws_in_the_terminals_own_colors() {
+        use ratatui::style::{Color, Modifier};
+        let mut default = App::new(&config(false, None), None, true);
+        assert!(
+            render(&mut default)
+                .iter()
+                .any(|cell| cell.bg != Color::Reset),
+            "the default theme paints its own background"
+        );
+        let mut mono = App::new(&config(false, Some("mono")), None, true);
+        let cells = render(&mut mono);
+        let colored: Vec<_> = cells
+            .iter()
+            .filter(|cell| cell.fg != Color::Reset || cell.bg != Color::Reset)
+            .map(|cell| (cell.symbol(), cell.fg, cell.bg))
+            .collect();
+        assert!(colored.is_empty(), "mono sets colors: {colored:?}");
+        assert!(
+            cells
+                .iter()
+                .any(|cell| cell.modifier.contains(Modifier::REVERSED)),
+            "mono marks the selection with reverse video"
+        );
     }
     fn issue(key: &str, summary: &str) -> Issue {
         serde_json::from_value(serde_json::json!({

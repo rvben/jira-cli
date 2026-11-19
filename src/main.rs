@@ -2281,7 +2281,8 @@ fn schema_json() -> serde_json::Value {
                 {"name": "tokenKind", "type": "string"},
                 {"name": "cloudId", "type": "string", "nullable": true},
                 {"name": "storyPointsField", "type": "string", "nullable": true, "description": "The pinned story points field; null when it is discovered"},
-                {"name": "theme", "type": "string", "description": "Color palette of `jira tui`: default, terminal or mono"}
+                {"name": "theme", "type": "string", "description": "Color palette of `jira tui`: default, terminal or mono; an unknown value is shown as written, with a warning"},
+                {"name": "warnings", "type": "string[]", "description": "Settings that will fail where they are used, such as an unknown theme"}
             ]),
         ),
         ("auth login", init_fields.clone()),
