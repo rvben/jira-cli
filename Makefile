@@ -7,11 +7,21 @@ release:
 	cargo build --release
 
 # The test runner. Fail with the install command rather than cargo's
-# "no such command" when it is missing.
+# "no such command" when it is missing. Tests that spawn the binary find it
+# through CARGO_BIN_EXE_jira at runtime, because this toolchain builds test
+# binaries away from target/debug; nextest sets that variable from 0.9.130 on,
+# and under an older one every such test panics.
+NEXTEST_MIN := 0.9.130
 nextest:
-	@cargo nextest --version >/dev/null 2>&1 || { \
+	@v=$$(cargo nextest --version 2>/dev/null | awk 'NR == 1 { print $$2 }'); \
+	if [ -z "$$v" ]; then \
 		echo "cargo-nextest is not installed; install it with: cargo install cargo-nextest --locked" >&2; \
-		exit 1; }
+		exit 1; \
+	fi; \
+	if [ "$$(printf '%s\n%s\n' "$(NEXTEST_MIN)" "$$v" | sort -V | head -n 1)" != "$(NEXTEST_MIN)" ]; then \
+		echo "cargo-nextest $$v is older than $(NEXTEST_MIN), the first release that sets CARGO_BIN_EXE_jira for these tests; upgrade with: cargo install cargo-nextest --locked" >&2; \
+		exit 1; \
+	fi
 
 # Every test target except e2e, which needs live Jira credentials. Selecting by
 # exclusion means a new test file is covered the moment it is added; naming the
