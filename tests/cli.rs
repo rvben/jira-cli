@@ -2,7 +2,7 @@ use std::process::Command;
 
 use assert_cmd::prelude::*;
 use jira_cli::output::exit_codes;
-use jira_cli::test_support::{config_dir_env_name, write_config};
+use jira_cli::test_support::{isolate_command, write_config};
 use tempfile::TempDir;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -25,16 +25,54 @@ token = "secret-token"
 /// one does not push another over a lock timeout.
 fn jira_cmd(dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("jira").unwrap();
-    cmd.env(config_dir_env_name(), dir.path())
-        .env("NO_COLOR", "1")
-        .env_remove("JIRA_HOST")
-        .env_remove("JIRA_EMAIL")
-        .env_remove("JIRA_TOKEN")
-        .env_remove("JIRA_PROFILE")
-        .env_remove("JIRA_API_VERSION")
-        .env_remove("JIRA_READ_ONLY")
-        .env_remove("JIRA_THEME");
+    isolate_command(&mut cmd, dir.path()).env("NO_COLOR", "1");
     cmd
+}
+
+/// Every test that runs the `jira` binary isolates it from the developer's
+/// environment: the line after each spawn calls `isolate_command`, which
+/// `jira_cmd` does for most tests.
+#[test]
+fn every_spawn_of_the_binary_is_isolated() {
+    let spawn = concat!("cargo_bin(", "\"jira\")");
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files = vec![];
+    for entry in std::fs::read_dir(&tests).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        } else {
+            files.push(path);
+        }
+    }
+    let mut spawns = 0;
+    let mut unisolated = vec![];
+    for file in files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+    {
+        let source = std::fs::read_to_string(file).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if line.contains(spawn) {
+                spawns += 1;
+                if !lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.contains("isolate_command("))
+                {
+                    unisolated.push(format!("{}:{}", file.display(), index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        spawns >= 2,
+        "the scan found {spawns} spawns; it must see jira_cmd's"
+    );
+    assert!(
+        unisolated.is_empty(),
+        "spawn through jira_cmd, or call isolate_command on the next line: {unisolated:?}"
+    );
 }
 
 #[test]
@@ -416,8 +454,7 @@ fn unknown_profile_with_no_named_profiles_does_not_render_an_empty_list() {
 
 #[test]
 fn completions_install_powershell_returns_input_error() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .args(["completions", "powershell", "--install"])
         .output()
         .unwrap();
@@ -1046,8 +1083,7 @@ fn schema_command_lookup_has_an_actionable_not_found_error() {
 /// Principle 6 (Bounded Output) of the CLI Spec.
 #[test]
 fn issues_list_help_mentions_fields_flag() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .args(["issues", "list", "--help"])
         .output()
         .unwrap();
@@ -1064,8 +1100,7 @@ fn issues_list_help_mentions_fields_flag() {
 /// without parsing prose.
 #[test]
 fn unrecognized_subcommand_emits_error_envelope() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .args(["__no_such_subcommand__"])
         .output()
         .unwrap();
@@ -1090,8 +1125,7 @@ fn unrecognized_subcommand_emits_error_envelope() {
 /// stderr as a failure reads a working `--help` as a broken one.
 #[test]
 fn help_is_success_output_with_a_silent_stderr() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .arg("--help")
         .output()
         .unwrap();
@@ -1108,8 +1142,7 @@ fn help_is_success_output_with_a_silent_stderr() {
 
 #[test]
 fn version_is_success_output_with_a_silent_stderr() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .arg("--version")
         .output()
         .unwrap();
@@ -1122,8 +1155,7 @@ fn version_is_success_output_with_a_silent_stderr() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("jira "));
 
-    let alias = Command::cargo_bin("jira")
-        .unwrap()
+    let alias = jira_cmd(&TempDir::new().unwrap())
         .arg("version")
         .output()
         .unwrap();
@@ -1180,8 +1212,7 @@ fn text_mode_stderr_is_only_prose() {
 /// suggestion, rather than being replaced by JSON.
 #[test]
 fn text_mode_usage_error_keeps_clap_prose() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .args(["-o", "text", "__no_such_subcommand__"])
         .output()
         .unwrap();
@@ -1364,8 +1395,7 @@ fn assert_fields_match(
 /// other mutating commands (e.g. `issues list --help` mentions `--fields`).
 #[test]
 fn issues_attach_help_mentions_file_flag() {
-    let output = Command::cargo_bin("jira")
-        .unwrap()
+    let output = jira_cmd(&TempDir::new().unwrap())
         .args(["issues", "attach", "--help"])
         .output()
         .unwrap();
@@ -3360,7 +3390,8 @@ fn every_environment_variable_the_cli_reads_is_declared_in_the_schema() {
                 stack.push(path);
                 continue;
             }
-            if path.extension().is_none_or(|e| e != "rs") {
+            // test_support only isolates test runs from these variables.
+            if path.extension().is_none_or(|e| e != "rs") || path.ends_with("test_support.rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();

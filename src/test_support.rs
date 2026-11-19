@@ -128,3 +128,60 @@ fn clear_stale_lock(path: &Path) {
         let _ = fs::remove_file(path);
     }
 }
+
+/// Prepare `cmd` to run `jira` in isolation: its config directory is
+/// `config_dir`, and no `JIRA_*` variable from the environment running the
+/// tests reaches it, so a developer's own settings cannot change a result.
+/// Variables the test sets on `cmd` afterwards still apply.
+pub fn isolate_command<'a>(
+    cmd: &'a mut std::process::Command,
+    config_dir: &Path,
+) -> &'a mut std::process::Command {
+    remove_jira_vars(cmd, std::env::vars_os().map(|(name, _)| name));
+    cmd.env(config_dir_env_name(), config_dir)
+}
+
+fn remove_jira_vars(
+    cmd: &mut std::process::Command,
+    names: impl Iterator<Item = std::ffi::OsString>,
+) {
+    for name in names {
+        if name.to_string_lossy().starts_with("JIRA_") {
+            cmd.env_remove(name);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    #[test]
+    fn only_jira_variables_are_removed() {
+        let mut cmd = std::process::Command::new("jira");
+        let inherited = ["JIRA_THEME", "JIRA_SOMETHING_NEW", "HOME", "NOT_JIRA_HOST"];
+        remove_jira_vars(&mut cmd, inherited.iter().map(OsString::from));
+        let removed: Vec<&OsStr> = cmd
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(removed, ["JIRA_SOMETHING_NEW", "JIRA_THEME"]);
+    }
+
+    #[test]
+    fn variables_set_afterwards_still_apply() {
+        let mut cmd = std::process::Command::new("jira");
+        remove_jira_vars(&mut cmd, [OsString::from("JIRA_HOST")].into_iter());
+        cmd.env("JIRA_HOST", "example.atlassian.net");
+        let host = cmd.get_envs().find(|(name, _)| *name == "JIRA_HOST");
+        assert_eq!(
+            host,
+            Some((
+                OsStr::new("JIRA_HOST"),
+                Some(OsStr::new("example.atlassian.net"))
+            ))
+        );
+    }
+}

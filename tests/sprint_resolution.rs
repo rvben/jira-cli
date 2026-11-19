@@ -1,7 +1,7 @@
 use assert_cmd::prelude::*;
 use jira_cli::api::{ApiError, AuthType, JiraClient};
 use jira_cli::output::{PARTIAL_SUCCESS, exit_codes};
-use jira_cli::test_support::{config_dir_env_name, write_config};
+use jira_cli::test_support::{isolate_command, write_config};
 use serde_json::{Value, json};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -15,16 +15,10 @@ fn client(server: &MockServer) -> JiraClient {
 fn run(server: &MockServer, args: &[&str]) -> Output {
     let dir = TempDir::new().unwrap();
     write_config(dir.path(), &format!("[default]\nhost = {:?}\nauth_type = \"pat\"\napi_version = 3\ntoken = \"mock-token\"\n", server.uri())).unwrap();
-    Command::cargo_bin("jira")
-        .unwrap()
-        .args(args)
-        .env(config_dir_env_name(), dir.path())
+    let mut cmd = Command::cargo_bin("jira").unwrap();
+    isolate_command(&mut cmd, dir.path())
         .env("NO_COLOR", "1")
-        .env_remove("JIRA_HOST")
-        .env_remove("JIRA_EMAIL")
-        .env_remove("JIRA_TOKEN")
-        .env_remove("JIRA_PROFILE")
-        .env_remove("JIRA_READ_ONLY")
+        .args(args)
         .output()
         .unwrap()
 }
