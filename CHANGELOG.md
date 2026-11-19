@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.22](https://github.com/rvben/jira-cli/compare/v0.4.21...v0.4.22) - 2026-11-19
+
+### Added
+
+- **issues**: add issues delete ([c071977](https://github.com/rvben/jira-cli/commit/c07197726adbb39fd5653f9a6a907cfbc1d9281e))
+
+### Fixed
+
+- **issues**: describe system and user fields in the --field help ([e1d46e7](https://github.com/rvben/jira-cli/commit/e1d46e76f902ef4d755889b9dc49449c0ae3a4e0))
+
 ## [0.4.21](https://github.com/rvben/jira-cli/compare/v0.4.20...v0.4.21) - 2026-11-17
 
 ### Added
