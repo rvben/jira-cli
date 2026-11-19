@@ -372,7 +372,9 @@ enum IssuesCommand {
         #[arg(long, value_name = "KEY")]
         epic: Option<String>,
 
-        /// Custom field values as key=value pairs (e.g. --field customfield_10016=5)
+        /// Set a field by ID: key=value (repeatable), e.g. customfield_10016=5 or reporter=jdoe.
+        /// Values are checked against the field's type; user fields accept me, a username,
+        /// an account ID or an e-mail; a JSON object is sent unchanged
         #[arg(long, value_parser = parse_field)]
         field: Vec<(String, serde_json::Value)>,
         /// Validate and print the normalized write plan without making changes
@@ -434,7 +436,9 @@ enum IssuesCommand {
         #[arg(long)]
         assignee: Option<String>,
 
-        /// Custom field values as key=value pairs (e.g. --field customfield_10016=5)
+        /// Set a field by ID: key=value (repeatable), e.g. customfield_10016=5 or reporter=jdoe.
+        /// Values are checked against the field's type; user fields accept me, a username,
+        /// an account ID or an e-mail; a JSON object is sent unchanged
         #[arg(long, value_parser = parse_field)]
         field: Vec<(String, serde_json::Value)>,
         /// Validate and print the normalized write plan without making changes
