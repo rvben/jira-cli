@@ -2057,20 +2057,26 @@ pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiE
         .ok_or_else(|| ApiError::Other("config is not a TOML table".to_string()))?;
 
     let removed = if profile_name == "default" {
-        root.remove("default").is_some()
+        root.remove("default")
     } else {
         root.get_mut("profiles")
             .and_then(toml::Value::as_table_mut)
             .and_then(|t| t.remove(profile_name))
-            .is_some()
     };
-
-    if !removed {
+    let Some(removed) = removed else {
         return Err(ApiError::NotFound(format!(
             "profile '{profile_name}' in config. Available: {}",
             format_available(&removable_profiles(root))
         )));
-    }
+    };
+    // The keychain entry is named after the profile alone, so another config
+    // directory's profile of the same name can own it. Only a profile that
+    // keeps its token there may remove it. `[default]` inherits the top-level
+    // store, as it does when the profile is loaded.
+    let inherited = (profile_name == "default")
+        .then(|| root.get("credential_store"))
+        .flatten();
+    let in_keychain = stores_in_keychain(&removed, inherited);
 
     if root.get("active_profile").and_then(toml::Value::as_str) == Some(profile_name) {
         let next = removable_profiles(root).first().copied().map(str::to_owned);
@@ -2085,13 +2091,32 @@ pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiE
     }
 
     write_toml_atomically(&path, &doc)?;
-    let _ = crate::credentials::delete(profile_name);
+    // The profile goes first: a token left behind by a failure here can still
+    // be removed by hand, while a profile whose token is gone cannot sign in.
+    if in_keychain {
+        crate::credentials::delete(profile_name).map_err(|error| {
+            ApiError::Other(format!(
+                "removed profile '{profile_name}', but not its keychain token: {error}. \
+                 Delete the \"jira-cli\" item for \"profile:{profile_name}\" from the OS keychain"
+            ))
+        })?;
+    }
 
     out.print_result(
         &serde_json::json!({ "profile": profile_name, "removed": true }),
         &format!("{} Removed profile '{profile_name}'", sym_ok()),
     );
     Ok(())
+}
+
+/// Whether a profile's token lives in the OS keychain rather than the file,
+/// given the `credential_store` it inherits when it names none.
+fn stores_in_keychain(profile: &toml::Value, inherited: Option<&toml::Value>) -> bool {
+    profile
+        .get("credential_store")
+        .or(inherited)
+        .and_then(toml::Value::as_str)
+        == Some("keyring")
 }
 
 pub fn print_config_path(out: &OutputConfig) -> Result<(), ApiError> {
@@ -3422,6 +3447,30 @@ token = "supersecrettoken"
     }
 
     // ── remove_profile ─────────────────────────────────────────────────────────
+
+    /// Removing a profile must leave alone a keychain entry it does not own:
+    /// the entry is keyed by profile name only, so a file-stored `work` in one
+    /// config directory shares its name with a keychain `work` in another.
+    #[test]
+    fn only_a_keychain_profile_owns_its_keychain_entry() {
+        let profile = |text: &str| toml::from_str::<toml::Value>(text).unwrap();
+        let keyring = toml::Value::String("keyring".into());
+        let file = toml::Value::String("file".into());
+        let own_keyring = profile(r#"credential_store = "keyring""#);
+        let own_file = profile(r#"credential_store = "file""#);
+        assert!(stores_in_keychain(&own_keyring, None));
+        assert!(!stores_in_keychain(&own_file, None));
+        assert!(!stores_in_keychain(&profile(r#"token = "legacy""#), None));
+        assert!(!stores_in_keychain(&profile(""), None));
+        // `[default]` without its own store uses the top-level one.
+        assert!(stores_in_keychain(
+            &profile(r#"host = "h""#),
+            Some(&keyring)
+        ));
+        assert!(!stores_in_keychain(&profile(r#"host = "h""#), Some(&file)));
+        assert!(!stores_in_keychain(&own_file, Some(&keyring)));
+        assert!(stores_in_keychain(&own_keyring, Some(&file)));
+    }
 
     #[test]
     fn remove_profile_removes_default_section() {
