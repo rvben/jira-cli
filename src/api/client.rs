@@ -411,6 +411,36 @@ impl JiraClient {
         }
     }
 
+    /// Every issue a JQL search matches, in the order the search returns them.
+    ///
+    /// On API v3 this follows the `/search/jql` cursor from the first page to
+    /// the last once, where repeated [`search`](Self::search) calls would walk it
+    /// again from the start for every offset. On v2 it pages by offset. Each issue
+    /// appears once: a result set that changes while it is being paged can shift
+    /// an issue onto a second page, under a new key if it moved project, and a
+    /// caller acting on every issue must not act on one twice.
+    pub async fn search_all(&self, jql: &str) -> Result<Vec<Issue>, ApiError> {
+        const PAGE_SIZE: usize = 100;
+        let issues = if self.api_version >= 3 {
+            self.search_jql_v3(jql, usize::MAX, 0).await?.issues
+        } else {
+            let mut all = Vec::new();
+            loop {
+                let page = self.search_v2(jql, PAGE_SIZE, all.len()).await?;
+                let fetched = page.issues.len();
+                all.extend(page.issues);
+                if page.is_last || fetched == 0 {
+                    break all;
+                }
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        Ok(issues
+            .into_iter()
+            .filter(|issue| seen.insert(issue.id.clone()))
+            .collect())
+    }
+
     async fn search_v2(
         &self,
         jql: &str,

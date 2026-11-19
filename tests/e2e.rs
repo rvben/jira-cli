@@ -461,9 +461,7 @@ async fn e2e_search_all_pages() {
         return;
     };
     let jql = format!("project = {project} ORDER BY updated DESC");
-    let all = jira_cli::commands::issues::fetch_all_issues(&client, &jql)
-        .await
-        .expect("fetch_all_issues failed");
+    let all = client.search_all(&jql).await.expect("search_all failed");
 
     // If the server reported a total (v2 only), verify it matches.
     // Jira Cloud (v3) `/search/jql` no longer returns a total.
@@ -472,13 +470,13 @@ async fn e2e_search_all_pages() {
         assert_eq!(
             all.len(),
             total,
-            "fetch_all_issues returned {} issues but total is {total}",
+            "search_all returned {} issues but total is {total}",
             all.len(),
         );
     } else {
         assert!(
             !all.is_empty(),
-            "fetch_all_issues returned no issues for project {project}",
+            "search_all returned no issues for project {project}",
         );
     }
 }

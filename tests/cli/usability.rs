@@ -17,6 +17,7 @@ async fn search_issues(server: &MockServer, count: usize) {
         .map(|n| {
             let mut issue = full_issue();
             issue["key"] = json!(format!("PROJ-{n}"));
+            issue["id"] = json!(format!("{}", 10000 + n));
             issue
         })
         .collect();

@@ -70,7 +70,7 @@ fn json_out() -> OutputConfig {
 
 fn issue_fixture(key: &str, summary: &str, status: &str) -> serde_json::Value {
     serde_json::json!({
-        "id": "10001",
+        "id": format!("id-{key}"),
         "key": key,
         "self": format!("https://test.atlassian.net/rest/api/3/issue/{key}"),
         "fields": {
@@ -2745,6 +2745,118 @@ async fn search_all_fetches_multiple_pages() {
     jira_cli::commands::search::run(&client, &out, "project = PROJ", 50, 0, true, None)
         .await
         .unwrap();
+}
+
+/// Serve `pages` of the `/search/jql` cursor: page `n` answers the request
+/// carrying `cursor-n` (the first answers one with no cursor) and points at
+/// `cursor-{n+1}` until the last.
+async fn mount_cursor_pages(server: &MockServer, pages: &[Vec<String>]) {
+    for (n, keys) in pages.iter().enumerate().rev() {
+        let issues = keys.iter().map(|key| numbered_issue(key)).collect();
+        let last = n + 1 == pages.len();
+        let next = format!("cursor-{}", n + 1);
+        let body = search_jql_response(issues, (!last).then_some(next.as_str()), last);
+        let mock = Mock::given(method("POST")).and(path("/rest/api/3/search/jql"));
+        let mock = if n == 0 {
+            mock
+        } else {
+            mock.and(body_partial_json(
+                serde_json::json!({ "nextPageToken": format!("cursor-{n}") }),
+            ))
+        };
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+}
+
+/// An issue whose ID follows its number, so `OTHER-7` is `PROJ-7` after a move.
+fn numbered_issue(key: &str) -> serde_json::Value {
+    let mut issue = issue_fixture(key, "Issue", "Open");
+    issue["id"] = serde_json::json!(format!("1{}", key.rsplit('-').next().unwrap()));
+    issue
+}
+
+fn keys(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    range.map(|n| format!("PROJ-{n}")).collect()
+}
+
+/// Full pages are where an offset loop over the cursor endpoint goes wrong:
+/// each later page would walk the cursor again from the start.
+#[tokio::test]
+async fn search_all_follows_the_cursor_once_across_full_pages() {
+    let server = MockServer::start().await;
+    mount_cursor_pages(&server, &[keys(1..=100), keys(101..=200), keys(201..=250)]).await;
+    let out = json_out();
+    jira_cli::commands::search::run(
+        &test_client(&server),
+        &out,
+        "project = PROJ",
+        50,
+        0,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let searches: Vec<Option<String>> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/rest/api/3/search/jql")
+        .map(|r| {
+            let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            body["nextPageToken"].as_str().map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        searches,
+        [None, Some("cursor-1".into()), Some("cursor-2".into())]
+    );
+}
+
+/// An issue that moves onto a later page while the selection is paged is
+/// still selected once, so a bulk write never acts on it twice: by ID, as a
+/// move to another project changes the key.
+#[tokio::test]
+async fn search_all_returns_each_issue_once() {
+    let server = MockServer::start().await;
+    let mut second = keys(101..=200);
+    second[0] = "OTHER-100".into();
+    mount_cursor_pages(&server, &[keys(1..=100), second, keys(201..=201)]).await;
+    let found: Vec<String> = test_client(&server)
+        .search_all("project = PROJ")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|issue| issue.key)
+        .collect();
+    let mut expected = keys(1..=100);
+    expected.extend(keys(102..=201));
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn search_all_pages_by_offset_on_api_v2() {
+    let server = MockServer::start().await;
+    for (start, page) in [(0, keys(1..=100)), (100, keys(101..=130))] {
+        let issues: Vec<_> = page.iter().map(|key| numbered_issue(key)).collect();
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/search"))
+            .and(query_param("startAt", start.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issues": issues, "total": 130, "startAt": start, "maxResults": 100
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let found = test_client_v2(&server)
+        .search_all("project = PROJ")
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 130);
 }
 
 // ── issues comments subcommand ────────────────────────────────────────────────

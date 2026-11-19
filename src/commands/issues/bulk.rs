@@ -1,4 +1,4 @@
-use super::{fetch_all_issues, transitions};
+use super::transitions;
 use crate::api::{ApiError, JiraClient, TransitionInput};
 use crate::output::{OutputConfig, contract_for, error_envelope_for};
 use serde_json::{Value, json};
@@ -112,7 +112,7 @@ pub async fn bulk_transition(
     input: &TransitionInput<'_>,
     dry_run: bool,
 ) -> Result<(), ApiError> {
-    let issues = fetch_all_issues(client, jql).await?;
+    let issues = client.search_all(jql).await?;
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut aborted = false;
@@ -176,7 +176,7 @@ pub async fn bulk_assign(
     let account_id = super::resolve_assignee_arg(client, Some(assignee))
         .await?
         .flatten();
-    let issues = fetch_all_issues(client, jql).await?;
+    let issues = client.search_all(jql).await?;
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut aborted = false;

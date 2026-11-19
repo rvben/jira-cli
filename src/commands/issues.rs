@@ -43,7 +43,7 @@ pub async fn list(
     let jql = build_list_jql(&filters);
     enable_lookups_for(client, out, fields).await?;
     if all {
-        let issues = fetch_all_issues(client, &jql).await?;
+        let issues = client.search_all(&jql).await?;
         let n = issues.len();
         render_results(
             out,
@@ -148,23 +148,6 @@ pub async fn comments(client: &JiraClient, out: &OutputConfig, key: &str) -> Res
         }
     }
     Ok(())
-}
-
-/// Fetch every page of a JQL search, returning all issues.
-pub async fn fetch_all_issues(client: &JiraClient, jql: &str) -> Result<Vec<Issue>, ApiError> {
-    const PAGE_SIZE: usize = 100;
-    let mut all: Vec<Issue> = Vec::new();
-    let mut offset = 0;
-    loop {
-        let resp = client.search(jql, PAGE_SIZE, offset).await?;
-        let fetched = resp.issues.len();
-        all.extend(resp.issues);
-        offset += fetched;
-        if resp.is_last || fetched == 0 {
-            break;
-        }
-    }
-    Ok(all)
 }
 
 struct PageInfo {

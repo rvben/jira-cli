@@ -54,7 +54,7 @@ fn issue(key: &str, issuetype: Value, parent: Option<Value>) -> Value {
     if let Some(parent) = parent {
         fields["parent"] = parent;
     }
-    json!({"id": "1", "key": key, "fields": fields})
+    json!({"id": format!("id-{key}"), "key": key, "fields": fields})
 }
 
 fn parent(key: &str, issuetype: Value) -> Value {

@@ -1,7 +1,7 @@
 use crate::api::{ApiError, JiraClient};
 use crate::output::OutputConfig;
 
-use super::issues::{fetch_all_issues, filter_fields, issue_to_json, render_issue_table};
+use super::issues::{filter_fields, issue_to_json, render_issue_table};
 
 /// Run a raw JQL search and render the results.
 ///
@@ -19,7 +19,7 @@ pub async fn run(
 ) -> Result<(), ApiError> {
     super::issues::enable_lookups_for(client, out, fields).await?;
     if all {
-        let issues = fetch_all_issues(client, jql).await?;
+        let issues = client.search_all(jql).await?;
         let count = issues.len();
         if out.json {
             let items: Vec<serde_json::Value> = issues
