@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.23](https://github.com/rvben/jira-cli/compare/v0.4.22...v0.4.23) - 2026-11-19
+
+### Added
+
+- **tui**: add terminal and mono color themes (#17) ([25838fd](https://github.com/rvben/jira-cli/commit/25838fd6eb94d0a0d64b3122cbaa9b7fe56f166a))
+
+### Fixed
+
+- **tui**: draw the mono theme in the terminal's own colors ([4d625c7](https://github.com/rvben/jira-cli/commit/4d625c78d60a42ed22d8e8da5df4f2d760e3121f))
+
 ## [0.4.22](https://github.com/rvben/jira-cli/compare/v0.4.21...v0.4.22) - 2026-11-19
 
 ### Added
