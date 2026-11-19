@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.24](https://github.com/rvben/jira-cli/compare/v0.4.23...v0.4.24) - 2026-11-19
+
+### Added
+
+- ask for confirmation on a terminal before destructive writes ([581af8b](https://github.com/rvben/jira-cli/commit/581af8b40f515a9bd66c8b7a41ff3abcc9a001a6))
+
+### Fixed
+
+- **config**: remove a profile's keychain token only when the profile stored it there ([fffe282](https://github.com/rvben/jira-cli/commit/fffe282d141ce26c3d6d80254a2d02d0a1a0b437))
+
+### Performance
+
+- **search**: follow the search cursor once when fetching every page ([bd741e1](https://github.com/rvben/jira-cli/commit/bd741e1973122a8e8719ced712733d85da02f830))
+
 ## [0.4.23](https://github.com/rvben/jira-cli/compare/v0.4.22...v0.4.23) - 2026-11-19
 
 ### Added
