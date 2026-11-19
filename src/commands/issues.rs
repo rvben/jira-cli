@@ -1042,7 +1042,17 @@ pub async fn delete_attachment(
     out: &OutputConfig,
     id: &str,
     dry_run: bool,
+    consent: crate::confirm::Consent,
 ) -> Result<(), ApiError> {
+    if consent == crate::confirm::Consent::Ask {
+        let a = client.get_attachment(id).await?;
+        consent.confirm(&format!(
+            "Permanently delete attachment {id}: {} ({}, by {})? It cannot be restored.",
+            a.filename,
+            format_size(a.size),
+            a.author()
+        ))?;
+    }
     if dry_run {
         let a = client.get_attachment(id).await?;
         print_dry_run(

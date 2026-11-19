@@ -298,12 +298,12 @@ jira issues attach MYAPP-123 --file ./design.png --dry-run  # checks permission 
 jira issues download-attachment 10042 --dir ./downloads
 jira issues download-attachment 10042 --dir ./downloads --force  # overwrite an existing file
 jira issues delete-attachment 10042 --dry-run  # shows the attachment it would delete
-jira issues delete-attachment 10042
+jira issues delete-attachment 10042  # names the file and asks before deleting
 
 # Delete issues (permanent; every key is checked before any is deleted)
 jira issues delete MYAPP-123 MYAPP-124 --dry-run  # summary, type and subtasks of each
-jira issues delete MYAPP-123 MYAPP-124 --yes
-jira issues delete MYAPP-120 --delete-subtasks --yes  # required when an issue has subtasks
+jira issues delete MYAPP-123 MYAPP-124  # asks once every key has been checked
+jira issues delete MYAPP-120 --delete-subtasks  # required when an issue has subtasks
 
 # Links
 jira issues link-types
@@ -317,7 +317,7 @@ jira issues move MYAPP-123 --sprint active
 jira issues move MYAPP-123 --sprint "Sprint 14"
 jira issues move MYAPP-123 --sprint active --board 42
 
-# Bulk operations (use --dry-run to preview)
+# Bulk operations (use --dry-run to preview; asks before writing)
 jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "In Progress"
 jira issues bulk-transition --jql 'project = MYAPP AND status = "To Do"' --to "In Progress" --dry-run
 jira issues bulk-transition --jql 'project = MYAPP AND status = "In Review"' --to Done --resolution Fixed --comment "Released"
@@ -582,7 +582,7 @@ jira auth status             # verify the selected credential
 jira auth status --offline   # inspect local credential state only
 jira profile list            # list profiles and show the active one
 jira profile use work        # make work the active profile
-jira profile remove old --yes
+jira profile remove old      # asks first, then removes its keychain token if it stored one
 jira config show             # resolved credentials (token masked)
 jira config path             # resolved config file location
 jira config init             # same as jira init
@@ -610,6 +610,29 @@ results. Transitions are declared non-idempotent because repeating a workflow
 action can trigger additional effects.
 Bulk commands also declare `x-output-on-error` so consumers know to parse
 stdout when the exit code is nonzero.
+
+### Confirmation
+
+Commands that cannot be undone or that write to every issue a query matches
+ask before writing: `issues delete`, `issues delete-attachment`,
+`issues bulk-transition`, `issues bulk-assign`, `profile remove` and
+`config remove`. Each first finds out what it would change, then asks once on
+the terminal, naming the count, the first keys and the target:
+
+```text
+Transition 37 issues (OPS-12, OPS-18, OPS-21, OPS-30, OPS-31 and 32 more) to "Done"? [y/N]
+```
+
+Only `y` or `yes` proceeds, and the command writes exactly the issues it asked
+about. Anything else, including Enter or end of input, changes nothing and
+exits 2 with error kind `confirmation_declined`. The question goes to stderr,
+so stdout keeps only the result.
+
+The command asks only when both stdin and stderr are terminals. Otherwise it
+refuses before sending any request, exiting 2 with `confirmation_required`, so
+piping `yes` into it never authorizes a write. Pass `--yes` to skip the
+question, as scripts and agents must, or `--dry-run` to preview. `jira schema`
+names that flag as `confirmation_bypass_arg` on each of these commands.
 
 ### Read-only mode
 

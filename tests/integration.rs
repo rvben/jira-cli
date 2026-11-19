@@ -3043,6 +3043,7 @@ async fn bulk_transition_dry_run_validates_without_writes() {
         "In Progress",
         &Default::default(),
         true,
+        jira_cli::confirm::Consent::Given,
     )
     .await
     .unwrap();
@@ -3089,6 +3090,7 @@ async fn bulk_transition_calls_transition_for_each_issue() {
         "In Progress",
         &Default::default(),
         false,
+        jira_cli::confirm::Consent::Given,
     )
     .await
     .unwrap();
@@ -3110,9 +3112,16 @@ async fn bulk_assign_dry_run_makes_no_api_calls() {
         .await;
 
     let out = json_out();
-    jira_cli::commands::issues::bulk_assign(&client, &out, "project = PROJ", "alice123", true)
-        .await
-        .unwrap();
+    jira_cli::commands::issues::bulk_assign(
+        &client,
+        &out,
+        "project = PROJ",
+        "alice123",
+        true,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -3136,9 +3145,16 @@ async fn bulk_assign_calls_assign_for_each_issue() {
         .await;
 
     let out = json_out();
-    jira_cli::commands::issues::bulk_assign(&client, &out, "project = PROJ", "alice123", false)
-        .await
-        .unwrap();
+    jira_cli::commands::issues::bulk_assign(
+        &client,
+        &out,
+        "project = PROJ",
+        "alice123",
+        false,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .unwrap();
 }
 
 // ── Subtask creation (--parent flag) ─────────────────────────────────────────
@@ -3597,9 +3613,16 @@ async fn bulk_assign_me_resolves_current_user_and_assigns() {
 
     let client = test_client(&server);
     let out = json_out();
-    jira_cli::commands::issues::bulk_assign(&client, &out, "project = PROJ", "me", false)
-        .await
-        .unwrap();
+    jira_cli::commands::issues::bulk_assign(
+        &client,
+        &out,
+        "project = PROJ",
+        "me",
+        false,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .unwrap();
 
     // Verify each assignee payload uses the resolved accountId, not "me"
     let requests = server.received_requests().await.unwrap();

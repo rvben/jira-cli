@@ -3,6 +3,7 @@
 use jira_cli::api::{ApiError, IssueDraft, IssueUpdate, JiraClient, TransitionInput};
 use jira_cli::commands;
 use jira_cli::config::Config;
+use jira_cli::confirm::Consent;
 use jira_cli::output::{OutputConfig, exit_codes, machine_readable_errors};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -620,9 +621,13 @@ enum IssuesCommand {
         /// Validate and print the normalized write plan without making changes
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip the confirmation prompt; required when stdin or stderr is not a terminal
+        #[arg(long)]
+        yes: bool,
     },
 
-    /// Delete issues permanently; requires --yes
+    /// Delete issues permanently
     Delete {
         /// Issue keys (e.g. PROJ-123). Every key is checked before any is deleted
         #[arg(required = true)]
@@ -636,7 +641,7 @@ enum IssuesCommand {
         #[arg(long)]
         dry_run: bool,
 
-        /// Confirm the deletion, which cannot be undone; required unless --dry-run
+        /// Skip the confirmation prompt; required when stdin or stderr is not a terminal
         #[arg(long)]
         yes: bool,
     },
@@ -668,7 +673,7 @@ enum IssuesCommand {
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip confirmation prompt (required when stdin is not a terminal)
+        /// Skip the confirmation prompt; required when stdin or stderr is not a terminal
         #[arg(long)]
         yes: bool,
     },
@@ -687,7 +692,7 @@ enum IssuesCommand {
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip confirmation prompt (required when stdin is not a terminal)
+        /// Skip the confirmation prompt; required when stdin or stderr is not a terminal
         #[arg(long)]
         yes: bool,
     },
@@ -726,10 +731,13 @@ enum ConfigCommand {
     Path,
     /// Print example config file and token instructions
     Init,
-    /// Remove a profile from the config file
+    /// Remove a profile and its stored credential (same as `profile remove`)
     Remove {
         /// Profile name to remove (use "default" for the default profile)
         name: String,
+        /// Skip the confirmation prompt; required when stdin or stderr is not a terminal
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -773,8 +781,9 @@ enum ProfileCommand {
     Use { name: String },
     /// Remove a profile and its stored credential
     Remove {
+        /// Profile name to remove (use "default" for the default profile)
         name: String,
-        /// Confirm removal without prompting
+        /// Skip the confirmation prompt; required when stdin or stderr is not a terminal
         #[arg(long)]
         yes: bool,
     },
@@ -1109,8 +1118,13 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                     )
                     .await?;
                 }
-                ConfigCommand::Remove { name } => {
-                    jira_cli::config::remove_profile(&out, &name)?;
+                ConfigCommand::Remove { name, yes } => {
+                    let consent = Consent::resolve(
+                        yes,
+                        false,
+                        "config remove requires --yes when it cannot ask at a terminal",
+                    )?;
+                    jira_cli::config::remove_profile(&out, &name, consent)?;
                 }
             }
             return Ok(());
@@ -1121,13 +1135,12 @@ async fn run(cli: Cli, out: OutputConfig) -> Result<(), Box<dyn std::error::Erro
                 ProfileCommand::List => jira_cli::config::list_profiles(&out)?,
                 ProfileCommand::Use { name } => jira_cli::config::use_profile(&out, &name)?,
                 ProfileCommand::Remove { name, yes } => {
-                    if !yes {
-                        return Err(ApiError::InvalidInput(
-                            "profile removal requires --yes".into(),
-                        )
-                        .into());
-                    }
-                    jira_cli::config::remove_profile(&out, &name)?
+                    let consent = Consent::resolve(
+                        yes,
+                        false,
+                        "profile remove requires --yes when it cannot ask at a terminal",
+                    )?;
+                    jira_cli::config::remove_profile(&out, &name, consent)?
                 }
             }
             return Ok(());
@@ -1420,8 +1433,13 @@ async fn dispatch(
             IssuesCommand::DownloadAttachment { id, dir, force } => {
                 commands::issues::download_attachment(client, out, &id, &dir, force).await?
             }
-            IssuesCommand::DeleteAttachment { id, dry_run } => {
-                commands::issues::delete_attachment(client, out, &id, dry_run).await?
+            IssuesCommand::DeleteAttachment { id, dry_run, yes } => {
+                let consent = Consent::resolve(
+                    yes,
+                    dry_run,
+                    "delete-attachment requires --yes when it cannot ask at a terminal, because a deleted attachment cannot be restored; preview with --dry-run",
+                )?;
+                commands::issues::delete_attachment(client, out, &id, dry_run, consent).await?
             }
             IssuesCommand::Delete {
                 keys,
@@ -1429,15 +1447,20 @@ async fn dispatch(
                 dry_run,
                 yes,
             } => {
-                if !yes && !dry_run {
-                    return Err(ApiError::ConfirmationRequired(
-                        "issues delete requires --yes, because deleted issues cannot be restored; preview with --dry-run"
-                            .into(),
-                    )
-                    .into());
-                }
-                commands::issues::delete_issues(client, out, &keys, delete_subtasks, dry_run)
-                    .await?
+                let consent = Consent::resolve(
+                    yes,
+                    dry_run,
+                    "issues delete requires --yes when it cannot ask at a terminal, because deleted issues cannot be restored; preview with --dry-run",
+                )?;
+                commands::issues::delete_issues(
+                    client,
+                    out,
+                    &keys,
+                    delete_subtasks,
+                    dry_run,
+                    consent,
+                )
+                .await?
             }
             IssuesCommand::BulkTransition {
                 jql,
@@ -1448,18 +1471,18 @@ async fn dispatch(
                 dry_run,
                 yes,
             } => {
-                if !yes && !dry_run && !std::io::stdin().is_terminal() {
-                    return Err(jira_cli::api::ApiError::ConfirmationRequired(
-                        "bulk-transition requires --yes when stdin is not a terminal".into(),
-                    )
-                    .into());
-                }
+                let consent = Consent::resolve(
+                    yes,
+                    dry_run,
+                    "bulk-transition requires --yes when it cannot ask at a terminal; preview with --dry-run",
+                )?;
                 let input = TransitionInput {
                     resolution: resolution.as_deref(),
                     comment: comment.as_deref(),
                     fields: &fields,
                 };
-                commands::issues::bulk_transition(client, out, &jql, &to, &input, dry_run).await?
+                commands::issues::bulk_transition(client, out, &jql, &to, &input, dry_run, consent)
+                    .await?
             }
             IssuesCommand::BulkAssign {
                 jql,
@@ -1467,13 +1490,13 @@ async fn dispatch(
                 dry_run,
                 yes,
             } => {
-                if !yes && !dry_run && !std::io::stdin().is_terminal() {
-                    return Err(jira_cli::api::ApiError::ConfirmationRequired(
-                        "bulk-assign requires --yes when stdin is not a terminal".into(),
-                    )
-                    .into());
-                }
-                commands::issues::bulk_assign(client, out, &jql, &assignee, dry_run).await?
+                let consent = Consent::resolve(
+                    yes,
+                    dry_run,
+                    "bulk-assign requires --yes when it cannot ask at a terminal; preview with --dry-run",
+                )?;
+                commands::issues::bulk_assign(client, out, &jql, &assignee, dry_run, consent)
+                    .await?
             }
             IssuesCommand::External(args) => {
                 let key = args
@@ -2750,6 +2773,11 @@ fn walk_commands(
         }
 
         entry.insert("args".into(), serde_json::json!(all_args));
+        // Every `--yes` belongs to the shared confirmation gate, which asks on a
+        // terminal and refuses without one: what clispec's bypass arg declares.
+        if flags.iter().any(|a| a.get_long() == Some("yes")) {
+            entry.insert("confirmation_bypass_arg".into(), serde_json::json!("--yes"));
+        }
 
         if matches!(
             base_path.as_str(),
@@ -3254,6 +3282,35 @@ mod tests {
             args.push(value);
         }
         args
+    }
+
+    /// Writes that cannot be undone, and writes whose reach is a query rather
+    /// than named keys, ask before running. The schema declares exactly those
+    /// through `confirmation_bypass_arg`, so a new destructive command fails
+    /// here until it decides whether it belongs on the list.
+    #[test]
+    fn the_schema_declares_which_commands_ask_for_confirmation() {
+        let _env = ProcessEnvLock::acquire().unwrap();
+        let _config_dir = unset_config_dir_env();
+        let schema = schema_json();
+        let asking: Vec<&str> = schema["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["confirmation_bypass_arg"] == "--yes")
+            .map(|command| command["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            asking,
+            [
+                "issues delete-attachment",
+                "issues delete",
+                "issues bulk-transition",
+                "issues bulk-assign",
+                "config remove",
+                "profile remove",
+            ]
+        );
     }
 
     /// The read-only guard lists Jira writes by hand; the schema declares them

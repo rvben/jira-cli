@@ -219,7 +219,13 @@ pub static CONFIRMATION_REQUIRED: ErrorContract = ErrorContract {
     kind: "confirmation_required",
     exit_code: exit_codes::INPUT_ERROR,
     retryable: false,
-    description: "Destructive operation requires explicit confirmation (--yes)",
+    description: "A destructive operation needs --yes because it could not ask at a terminal; nothing was changed",
+};
+pub static CONFIRMATION_DECLINED: ErrorContract = ErrorContract {
+    kind: "confirmation_declined",
+    exit_code: exit_codes::INPUT_ERROR,
+    retryable: false,
+    description: "The confirmation prompt was answered with anything but yes; nothing was changed",
 };
 pub static RATE_LIMIT: ErrorContract = ErrorContract {
     kind: "rate_limit",
@@ -275,6 +281,7 @@ pub static ALL_ERRORS: &[&ErrorContract] = &[
     &CONFLICT,
     &PARTIAL_SUCCESS,
     &BULK_FAILURE,
+    &CONFIRMATION_DECLINED,
 ];
 
 /// The contract row describing how this error is reported.
@@ -285,6 +292,7 @@ pub fn contract_for(err: &crate::api::ApiError) -> &'static ErrorContract {
         ApiError::NotFound(_) => &NOT_FOUND,
         ApiError::InvalidInput(_) => &INVALID_INPUT,
         ApiError::ConfirmationRequired(_) => &CONFIRMATION_REQUIRED,
+        ApiError::ConfirmationDeclined(_) => &CONFIRMATION_DECLINED,
         ApiError::RateLimit => &RATE_LIMIT,
         ApiError::Conflict(_) => &CONFLICT,
         ApiError::PartialSuccess { .. } => &PARTIAL_SUCCESS,
@@ -512,6 +520,7 @@ mod tests {
             ApiError::NotFound("x".into()),
             ApiError::InvalidInput("x".into()),
             ApiError::ConfirmationRequired("x".into()),
+            ApiError::ConfirmationDeclined("x".into()),
             ApiError::RateLimit,
             ApiError::BulkFailure {
                 total: 2,

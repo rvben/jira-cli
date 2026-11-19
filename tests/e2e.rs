@@ -344,16 +344,30 @@ async fn e2e_create_comment_transition_show_delete() {
 
     // Delete: a dry run deletes nothing, then the delete removes the issue.
     let keys = [key.clone()];
-    jira_cli::commands::issues::delete_issues(&client, &out, &keys, false, true)
-        .await
-        .expect("delete dry run failed");
+    jira_cli::commands::issues::delete_issues(
+        &client,
+        &out,
+        &keys,
+        false,
+        true,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .expect("delete dry run failed");
     client
         .get_issue(key)
         .await
         .expect("dry run must not delete the issue");
-    jira_cli::commands::issues::delete_issues(&client, &out, &keys, false, false)
-        .await
-        .expect("delete failed");
+    jira_cli::commands::issues::delete_issues(
+        &client,
+        &out,
+        &keys,
+        false,
+        false,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .expect("delete failed");
     assert_deleted(&client, key).await;
 }
 
@@ -402,18 +416,32 @@ async fn e2e_create_subtask() {
     // neither issue; with --delete-subtasks one delete removes both.
     let out = json_out();
     let keys = [parent.key.clone(), child.key.clone()];
-    let refused = jira_cli::commands::issues::delete_issues(&client, &out, &keys, false, false)
-        .await
-        .expect_err("a parent with subtasks needs delete_subtasks");
+    let refused = jira_cli::commands::issues::delete_issues(
+        &client,
+        &out,
+        &keys,
+        false,
+        false,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .expect_err("a parent with subtasks needs delete_subtasks");
     assert!(
         matches!(refused, ApiError::BulkFailure { succeeded: 0, .. }),
         "{refused:?}"
     );
     client.get_issue(&parent.key).await.expect("parent kept");
     client.get_issue(&child.key).await.expect("subtask kept");
-    jira_cli::commands::issues::delete_issues(&client, &out, &keys, true, false)
-        .await
-        .expect("delete with subtasks failed");
+    jira_cli::commands::issues::delete_issues(
+        &client,
+        &out,
+        &keys,
+        true,
+        false,
+        jira_cli::confirm::Consent::Given,
+    )
+    .await
+    .expect("delete with subtasks failed");
     assert_deleted(&client, &parent.key).await;
     assert_deleted(&client, &child.key).await;
 }
@@ -432,6 +460,7 @@ async fn e2e_bulk_transition_dry_run() {
         "In Progress",
         &Default::default(),
         true,
+        jira_cli::confirm::Consent::Given,
     )
     .await
     .expect("bulk_transition dry-run failed");

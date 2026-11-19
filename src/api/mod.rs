@@ -36,6 +36,9 @@ pub enum ApiError {
     /// confirmed. Distinct from `InvalidInput` because the command line was
     /// well formed: adding `--yes` makes the identical request succeed.
     ConfirmationRequired(String),
+    /// The person asked to confirm a destructive operation declined, so
+    /// nothing was sent.
+    ConfirmationDeclined(String),
     /// HTTP 429 rate limit.
     RateLimit,
     /// The request conflicts with the current state of something it would
@@ -124,6 +127,7 @@ impl fmt::Display for ApiError {
             ApiError::NotFound(msg) => write!(f, "Not found: {msg}"),
             ApiError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
             ApiError::ConfirmationRequired(msg) => write!(f, "Confirmation required: {msg}"),
+            ApiError::ConfirmationDeclined(msg) => write!(f, "Cancelled: {msg}"),
             ApiError::RateLimit => write!(f, "Rate limited by Jira. Please wait and try again."),
             ApiError::Conflict(msg) => write!(f, "Conflict: {msg}"),
             ApiError::PartialSuccess {

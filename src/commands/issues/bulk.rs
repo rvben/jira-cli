@@ -1,5 +1,6 @@
 use super::transitions;
 use crate::api::{ApiError, JiraClient, TransitionInput};
+use crate::confirm::{self, Consent};
 use crate::output::{OutputConfig, contract_for, error_envelope_for};
 use serde_json::{Value, json};
 
@@ -111,8 +112,32 @@ pub async fn bulk_transition(
     to: &str,
     input: &TransitionInput<'_>,
     dry_run: bool,
+    consent: Consent,
 ) -> Result<(), ApiError> {
     let issues = client.search_all(jql).await?;
+    if !dry_run && !issues.is_empty() {
+        let keys: Vec<&str> = issues.iter().map(|i| i.key.as_str()).collect();
+        let mut question = format!(
+            "Transition {} ({}) to {to:?}",
+            confirm::count(keys.len(), "issue"),
+            confirm::sample(&keys)
+        );
+        let mut sets: Vec<String> = Vec::new();
+        if let Some(resolution) = input.resolution {
+            sets.push(format!("resolution={resolution}"));
+        }
+        sets.extend(input.fields.iter().map(|(name, value)| match value {
+            Value::String(text) => format!("{name}={text}"),
+            other => format!("{name}={other}"),
+        }));
+        if !sets.is_empty() {
+            question.push_str(&format!(", setting {}", sets.join(", ")));
+        }
+        if input.comment.is_some() {
+            question.push_str(", and comment on each");
+        }
+        consent.confirm(&format!("{question}?"))?;
+    }
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut aborted = false;
@@ -172,11 +197,24 @@ pub async fn bulk_assign(
     jql: &str,
     assignee: &str,
     dry_run: bool,
+    consent: Consent,
 ) -> Result<(), ApiError> {
     let account_id = super::resolve_assignee_arg(client, Some(assignee))
         .await?
         .flatten();
     let issues = client.search_all(jql).await?;
+    if !dry_run && !issues.is_empty() {
+        let keys: Vec<&str> = issues.iter().map(|i| i.key.as_str()).collect();
+        let selection = format!(
+            "{} ({})",
+            confirm::count(keys.len(), "issue"),
+            confirm::sample(&keys)
+        );
+        consent.confirm(&match &account_id {
+            Some(id) => format!("Assign {selection} to {assignee:?} (account {id})?"),
+            None => format!("Unassign {selection}?"),
+        })?;
+    }
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut aborted = false;
@@ -224,6 +262,7 @@ pub async fn delete_issues(
     keys: &[String],
     delete_subtasks: bool,
     dry_run: bool,
+    consent: Consent,
 ) -> Result<(), ApiError> {
     let mut unique: Vec<&str> = Vec::new();
     for key in keys {
@@ -267,6 +306,37 @@ pub async fn delete_issues(
         })
     };
     let all_passed = checked.iter().all(Result::is_ok);
+    if !dry_run && all_passed {
+        let listed: Vec<&str> = unique
+            .iter()
+            .copied()
+            .filter(|key| parent_of(key).is_none())
+            .collect();
+        let subtasks: Vec<&str> = checked
+            .iter()
+            .flatten()
+            .flat_map(|target| target.subtasks.iter().map(String::as_str))
+            .collect();
+        let mut question = format!(
+            "Permanently delete {} ({})",
+            confirm::count(listed.len(), "issue"),
+            confirm::sample(&listed)
+        );
+        // Jira deletes the subtasks present when the delete runs, not those
+        // seen here, so the question covers every subtask under the issues.
+        if delete_subtasks {
+            let under = if listed.len() == 1 { "it" } else { "them" };
+            question.push_str(&format!(" and every subtask under {under}"));
+            if !subtasks.is_empty() {
+                question.push_str(&format!(
+                    ", now {} ({})",
+                    confirm::count(subtasks.len(), "subtask"),
+                    confirm::sample(&subtasks)
+                ));
+            }
+        }
+        consent.confirm(&format!("{question}? Deleted issues cannot be restored."))?;
+    }
 
     let mut results: Vec<Value> = Vec::new();
     let mut succeeded = 0;

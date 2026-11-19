@@ -12,7 +12,7 @@ pub(super) fn parse_success(output: std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-async fn search_issues(server: &MockServer, count: usize) {
+pub(super) async fn search_issues(server: &MockServer, count: usize) {
     let issues: Vec<_> = (1..=count)
         .map(|n| {
             let mut issue = full_issue();
@@ -30,7 +30,7 @@ async fn search_issues(server: &MockServer, count: usize) {
         .await;
 }
 
-async fn transitions(server: &MockServer, key: &str, values: Value) {
+pub(super) async fn transitions(server: &MockServer, key: &str, values: Value) {
     Mock::given(method("GET"))
         .and(path(format!("/rest/api/3/issue/{key}/transitions")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"transitions":values})))

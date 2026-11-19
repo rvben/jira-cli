@@ -351,7 +351,7 @@ fn config_remove_emits_declared_json_contract() {
     .unwrap();
 
     let output = jira_cmd(&dir)
-        .args(["config", "remove", "work"])
+        .args(["config", "remove", "work", "--yes"])
         .output()
         .unwrap();
 
@@ -392,7 +392,7 @@ fn config_remove_missing_profile_is_not_found() {
     .unwrap();
 
     let output = jira_cmd(&dir)
-        .args(["config", "remove", "nosuchprofile"])
+        .args(["config", "remove", "nosuchprofile", "--yes"])
         .output()
         .unwrap();
 
@@ -1597,7 +1597,7 @@ async fn issues_delete_attachment_json_field_names_match_schema_contract() {
         .mount(&server)
         .await;
 
-    let output = run_jira_against(&server, &["issues", "delete-attachment", "10001"]);
+    let output = run_jira_against(&server, &["issues", "delete-attachment", "10001", "--yes"]);
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -2977,7 +2977,7 @@ fn config_commands_emit_exactly_the_fields_they_declare() {
     assert_json_keys_match_schema("profile remove", &json, &[]);
 
     let output = jira_cmd(&dir)
-        .args(["config", "remove", "legacy"])
+        .args(["config", "remove", "legacy", "--yes"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -4775,3 +4775,7 @@ async fn auth_login_with_token_does_not_reuse_the_account_of_another_site() {
     let config = read_config(&dir);
     assert_eq!(config["profiles"]["work"]["token"].as_str(), Some("old"));
 }
+
+#[cfg(unix)]
+#[path = "cli/confirm.rs"]
+mod confirm;

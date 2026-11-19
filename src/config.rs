@@ -2038,7 +2038,11 @@ fn rewrite_profile_credential(
     write_toml_atomically(&path, &doc)
 }
 
-pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiError> {
+pub fn remove_profile(
+    out: &OutputConfig,
+    profile_name: &str,
+    consent: crate::confirm::Consent,
+) -> Result<(), ApiError> {
     let path = config_path();
 
     if !path.exists() {
@@ -2090,6 +2094,23 @@ pub fn remove_profile(out: &OutputConfig, profile_name: &str) -> Result<(), ApiE
         }
     }
 
+    if consent == crate::confirm::Consent::Ask {
+        consent.confirm(&if in_keychain {
+            format!("Remove profile '{profile_name}' and its token in the OS keychain?")
+        } else {
+            format!("Remove profile '{profile_name}'?")
+        })?;
+        // Writing the copy read before the question would undo whatever
+        // changed the file while it was open.
+        let now = std::fs::read_to_string(&path)
+            .map_err(|e| ApiError::Other(format!("Failed to read config: {e}")))?;
+        if now != content {
+            return Err(ApiError::Conflict(format!(
+                "{} changed while waiting for an answer; nothing was removed, run the command again",
+                path.display()
+            )));
+        }
+    }
     write_toml_atomically(&path, &doc)?;
     // The profile goes first: a token left behind by a failure here can still
     // be removed by hand, while a profile whose token is gone cannot sign in.
@@ -3483,7 +3504,12 @@ token = "supersecrettoken"
         .unwrap();
 
         let _config_dir = set_config_dir_env(dir.path());
-        remove_profile(&OutputConfig::new(true, false, true), "default").unwrap();
+        remove_profile(
+            &OutputConfig::new(true, false, true),
+            "default",
+            crate::confirm::Consent::Given,
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.contains("[default]"));
@@ -3502,7 +3528,12 @@ token = "supersecrettoken"
         .unwrap();
 
         let _config_dir = set_config_dir_env(dir.path());
-        remove_profile(&OutputConfig::new(true, false, true), "work").unwrap();
+        remove_profile(
+            &OutputConfig::new(true, false, true),
+            "work",
+            crate::confirm::Consent::Given,
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -3527,7 +3558,12 @@ token = "supersecrettoken"
         .unwrap();
 
         let _config_dir = set_config_dir_env(dir.path());
-        remove_profile(&OutputConfig::new(true, false, true), "staging").unwrap();
+        remove_profile(
+            &OutputConfig::new(true, false, true),
+            "staging",
+            crate::confirm::Consent::Given,
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
