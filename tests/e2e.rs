@@ -14,7 +14,7 @@
 //! All write tests create issues tagged `[e2e-auto]` in the summary so they can
 //! be bulk-deleted after a test run if needed.
 
-use jira_cli::api::{AuthType, IssueDraft, IssueUpdate, JiraClient, TransitionInput};
+use jira_cli::api::{ApiError, AuthType, IssueDraft, IssueUpdate, JiraClient, TransitionInput};
 use jira_cli::output::OutputConfig;
 
 fn e2e_client() -> Option<(JiraClient, String)> {
@@ -299,26 +299,25 @@ async fn e2e_create_subtask() {
         .await
         .expect("create parent failed");
 
-    // Create subtask
-    let child = client
-        .create_issue(
-            &IssueDraft {
-                project_key: &project,
-                issue_type: "Sub-task",
-                summary: "e2e subtask [e2e-auto]",
-                description: None,
-                priority: None,
-                labels: None,
-                components: None,
-                fix_versions: None,
-                assignee: None,
-                parent: Some(&parent.key),
-                epic: None,
-            },
-            &[],
-        )
-        .await
-        .expect("create subtask failed");
+    // Jira names the default subtask type "Subtask" on current Cloud projects
+    // and "Sub-task" on Data Center. An unknown type name is rejected before
+    // anything is written, so trying each in turn creates exactly one issue.
+    let mut child = None;
+    for issue_type in ["Subtask", "Sub-task"] {
+        let draft = IssueDraft {
+            parent: Some(&parent.key),
+            ..minimal_draft(&project, issue_type, "e2e subtask [e2e-auto]")
+        };
+        match client.create_issue(&draft, &[]).await {
+            Ok(created) => {
+                child = Some(created);
+                break;
+            }
+            Err(ApiError::InvalidInput(message)) if message.contains(issue_type) => continue,
+            Err(err) => panic!("create subtask as {issue_type:?} failed: {err}"),
+        }
+    }
+    let child = child.expect("project has neither a \"Subtask\" nor a \"Sub-task\" issue type");
 
     assert_ne!(child.key, parent.key);
     assert!(child.key.starts_with(&format!("{project}-")));
