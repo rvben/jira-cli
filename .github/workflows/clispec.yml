@@ -14,7 +14,7 @@ permissions:
 jobs:
   conformance:
     name: clispec v0.3
-    uses: rvben/clispec/.github/workflows/conformance.yml@6fb51e2692272f4723fa8b572c3b175b8d41364f
+    uses: rvben/clispec/.github/workflows/conformance.yml@ee6aa486a3c7f3e859947ab178ad5ac0d5182ba6
     with:
       binary: target/debug/jira
 
